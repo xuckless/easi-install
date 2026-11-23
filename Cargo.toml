@@ -1,0 +1,22 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+easi-core = { path = "crates/easi-core" }
+easi-cli = { path = "crates/easi-cli" }
+easi-gui = { path = "crates/easi-gui" }
+# clap: subcommand parsing + help for the CLI view.
+clap = { version = "4.6", features = ["derive"] }
+# slint: GUI toolkit (project requirement).
+slint = "1.19"
+slint-build = "1.19"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

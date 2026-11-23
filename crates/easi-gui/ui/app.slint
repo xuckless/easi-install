@@ -1,0 +1,18 @@
+// Layout only. No logic here: callbacks dispatch actions to the Rust store (AGENTS.md).
+// Default Slint style on purpose; visual design pass comes after M3 layout.
+import { Button, VerticalBox } from "std-widgets.slint";
+
+export component AppWindow inherits Window {
+    title: "easi";
+    preferred-width: 480px;
+    preferred-height: 320px;
+
+    VerticalBox {
+        alignment: center;
+        Text {
+            text: "Drop a package here";
+            horizontal-alignment: center;
+        }
+        Button { text: "Install"; enabled: false; }
+    }
+}

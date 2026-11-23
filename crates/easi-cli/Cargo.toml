@@ -1,0 +1,12 @@
+[package]
+name = "easi-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+easi-core.workspace = true
+clap.workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "easi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+easi-cli.workspace = true
+easi-gui.workspace = true
+clap.workspace = true
