@@ -884,7 +884,7 @@ fn find_best_icon_bytes(manifest: &Manifest) -> Option<(&'static str, Vec<u8>)> 
                 .iter()
                 .find(|(p, _)| p == &cand.path)
             {
-                if bytes.starts_with(b"<svg") || bytes.starts_with(b"<?xml") {
+                if is_svg_bytes(bytes) {
                     return Some(("svg", bytes.clone()));
                 }
                 if bytes.starts_with(b"\x89PNG") {
@@ -908,7 +908,7 @@ fn find_best_icon_bytes(manifest: &Manifest) -> Option<(&'static str, Vec<u8>)> 
         for cand in scored {
             let full = manifest.install_dir.join(&cand.path);
             if let Ok(bytes) = fs::read(&full) {
-                if bytes.starts_with(b"<svg") || bytes.starts_with(b"<?xml") {
+                if is_svg_bytes(&bytes) {
                     return Some(("svg", bytes));
                 }
                 if bytes.starts_with(b"\x89PNG") {
@@ -918,6 +918,11 @@ fn find_best_icon_bytes(manifest: &Manifest) -> Option<(&'static str, Vec<u8>)> 
         }
     }
     None
+}
+
+fn is_svg_bytes(bytes: &[u8]) -> bool {
+    let head = &bytes[..bytes.len().min(512)];
+    std::str::from_utf8(head).is_ok_and(|s| s.contains("<svg"))
 }
 
 fn collect_icon_entries(root: &Path, dir: &Path, depth: usize, out: &mut Vec<ArchiveEntry>) {

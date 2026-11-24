@@ -301,6 +301,7 @@ export component ConfirmButton inherits Rectangle {
 
     trigger := EButton {
         x: 0;
+        width: self.preferred-width;
         small: true;
         text: root.text;
         kind: root.trigger-kind;

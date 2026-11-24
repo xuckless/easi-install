@@ -1148,14 +1148,9 @@ fn project_state(win: &ui::AppWindow, state: &State) {
                     };
                     win.set_status_text(msg.into());
                 }
-                DoneOutcome::HandedOff { path } => {
-                    win.set_status_text(
-                        format!(
-                            "Handed off {} to your previous archive manager.",
-                            path.display()
-                        )
-                        .into(),
-                    );
+                DoneOutcome::HandedOff { .. } => {
+                    // Silent handoff: close easi immediately so the user isn't left with a dangling window.
+                    let _ = win.hide();
                 }
             }
         }
@@ -1190,7 +1185,8 @@ fn load_installed_row_icon(roots: &InstallRoots, app_id: &str) -> (slint::Image,
 
 fn load_preview_icon(app_id: &str, bytes: Option<&[u8]>) -> Option<slint::Image> {
     let data = bytes?;
-    let ext = if data.starts_with(b"<svg") || data.starts_with(b"<?xml") {
+    let head = &data[..data.len().min(512)];
+    let ext = if std::str::from_utf8(head).is_ok_and(|s| s.contains("<svg")) {
         "svg"
     } else if data.starts_with(b"\x89PNG") {
         "png"

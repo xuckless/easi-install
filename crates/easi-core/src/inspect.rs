@@ -129,6 +129,18 @@ const ICON_PATH_RULES: &[ScoreRule] = &[
         needle: "tray",
         delta: -20,
     },
+    ScoreRule {
+        needle: "node_modules/",
+        delta: -80,
+    },
+    ScoreRule {
+        needle: "/extensions/",
+        delta: -50,
+    },
+    ScoreRule {
+        needle: "/resources/linux/",
+        delta: 35,
+    },
 ];
 
 /// Source-tree markers: if present with no executables, report NotAnApp (never build from source).
