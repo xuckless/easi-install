@@ -147,6 +147,8 @@ export component AppWindow inherits Window {
     in-out property <string> filter-kind: "all";
     in-out property <bool> sort-by-size: false;
     in property <string> easi-update-version: "";
+    in property <string> self-update-state: "idle"; // "idle" | "updating" | "updated" | "up_to_date" | "failed"
+    in property <string> self-update-message: "";
     in-out property <bool> auto-check-updates: true;
     in-out property <bool> purge-data-on-uninstall: false;
     in-out property <bool> confirm-self-uninstall: false;
@@ -238,6 +240,7 @@ export component AppWindow inherits Window {
     callback copy-suggested-command(string);
     callback check-app-updates();
     callback run-self-update();
+    callback restart-easi();
     callback run-setup-handlers();
     callback run-restore-handlers();
     callback run-self-uninstall();
@@ -308,14 +311,40 @@ export component AppWindow inherits Window {
                     VerticalLayout {
                         spacing: Theme.s3;
 
-                        if root.easi-update-version != "": Rectangle {
+                        if root.self-update-state == "updated": Rectangle {
+                            border-radius: Theme.radius-section;
+                            background: Theme.success-soft;
+                            HorizontalLayout {
+                                padding: Theme.s3;
+                                spacing: Theme.s3;
+                                Text {
+                                    text: root.self-update-message;
+                                    font-size: Theme.font-heading;
+                                    font-weight: 600;
+                                    color: Theme.success;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    wrap: word-wrap;
+                                }
+                                EButton {
+                                    text: "Restart Now";
+                                    kind: "primary";
+                                    small: true;
+                                    clicked => { root.restart-easi(); }
+                                }
+                            }
+                        }
+
+                        if root.self-update-state != "updated" && root.easi-update-version != "": Rectangle {
                             border-radius: Theme.radius-section;
                             background: Theme.accent-soft;
                             HorizontalLayout {
                                 padding: Theme.s3;
                                 spacing: Theme.s3;
                                 Text {
-                                    text: "easi " + root.easi-update-version + " is available";
+                                    text: root.self-update-state == "updating"
+                                        ? "Updating easi to " + root.easi-update-version + "…"
+                                        : "easi " + root.easi-update-version + " is available";
                                     font-size: Theme.font-heading;
                                     font-weight: 600;
                                     color: Theme.ink;
@@ -323,9 +352,10 @@ export component AppWindow inherits Window {
                                     horizontal-stretch: 1;
                                 }
                                 EButton {
-                                    text: "Update Now";
+                                    text: root.self-update-state == "updating" ? "Updating…" : "Update Now";
                                     kind: "primary";
                                     small: true;
+                                    enabled: root.self-update-state != "updating";
                                     clicked => { root.run-self-update(); }
                                 }
                             }
@@ -1002,12 +1032,27 @@ export component AppWindow inherits Window {
                                             vertical-alignment: center;
                                             horizontal-stretch: 1;
                                         }
-                                        EButton {
-                                            text: root.easi-update-version != "" ? "Update to " + root.easi-update-version : "Check for easi Update";
+                                        if root.self-update-state == "updated": EButton {
+                                            text: "Restart Now";
+                                            kind: "primary";
+                                            small: true;
+                                            clicked => { root.restart-easi(); }
+                                        }
+                                        if root.self-update-state != "updated": EButton {
+                                            text: root.self-update-state == "updating"
+                                                ? "Updating…"
+                                                : (root.easi-update-version != "" ? "Update to " + root.easi-update-version : "Check for easi Update");
                                             kind: root.easi-update-version != "" ? "primary" : "secondary";
                                             small: true;
+                                            enabled: root.self-update-state != "updating";
                                             clicked => { root.run-self-update(); }
                                         }
+                                    }
+                                    if root.self-update-message != "": Text {
+                                        text: root.self-update-message;
+                                        font-size: Theme.font-caption;
+                                        color: root.self-update-state == "failed" ? Theme.danger-text : Theme.success;
+                                        wrap: word-wrap;
                                     }
                                 }
                             }
@@ -1148,9 +1193,19 @@ export component AppWindow inherits Window {
                                     VerticalLayout {
                                         alignment: center;
                                         EButton {
-                                            text: "Check for Update";
+                                            text: root.self-update-state == "updated"
+                                                ? "Restart Now"
+                                                : (root.self-update-state == "updating" ? "Updating…" : "Check for Update");
+                                            kind: root.self-update-state == "updated" ? "primary" : "secondary";
                                             small: true;
-                                            clicked => { root.run-self-update(); }
+                                            enabled: root.self-update-state != "updating";
+                                            clicked => {
+                                                if (root.self-update-state == "updated") {
+                                                    root.restart-easi();
+                                                } else {
+                                                    root.run-self-update();
+                                                }
+                                            }
                                         }
                                     }
                                 }

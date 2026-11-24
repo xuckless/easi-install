@@ -128,6 +128,7 @@ Every arrow is a row in the reducer match. Every unlisted `(state, action)` pair
 - [x] Dedicated Settings page (auto-update switch, uninstall defaults, file association register/restore, Danger Zone for Uninstall easi) and Android-style Per-App Info page (icon, developer, signature, origin, App/User Data/Cache storage breakdown, Clear Cache, Clear Data, Uninstall)
 - [x] Discover, adopt & repair existing unmanaged user apps in `$HOME` (`easi scan`/`adopt`/`repair`/`forget`, Detected Apps section with Manage / Manage All, Repair Icon & Launcher, Stop Managing), clarified Settings file-handler copy, and Wayland/X11 Alt-Tab app ID fix (`set_xdg_app_id("easi")` + `StartupWMClass=easi`)
 - [x] Universal update source discovery & linking: auto-detect Electron-builder `app-update.yml` (GitHub & generic CDN YAML), JetBrains `product-info.json` CDN API, Firefox/Gecko `application.ini`, `package.json`, GitLab/Codeberg releases, and direct CDN/proxy HTTP redirect URLs (`easi set-source` + App Info Update Source editor)
+- [x] Switch Slint GUI from FemtoVG to Skia renderer (`renderer-skia` + FreeType hinting) to fix wiggly/uneven Linux text antialiasing, plus single-instance Unix socket handoff (prevents duplicate windows when opened twice)
 - [ ] Portable app-list backup (`easi export` / `easi import`) to reinstall upstream-tracked apps on a new Linux machine or fresh SteamOS/CachyOS install
 
 ## Open questions

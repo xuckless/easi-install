@@ -6,6 +6,8 @@ mod ui {
     slint::include_modules!();
 }
 
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -16,7 +18,41 @@ use easi_core::{
 };
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
 
+fn single_instance_socket_path() -> PathBuf {
+    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+        let p = PathBuf::from(dir);
+        if p.is_dir() {
+            return p.join("easi.sock");
+        }
+    }
+    let user = std::env::var("USER").unwrap_or_else(|_| "user".into());
+    std::env::temp_dir().join(format!("easi-{user}.sock"))
+}
+
+/// If another `easi` GUI instance is already running, forward the request (open path or raise)
+/// over our per-user Unix socket and return `true` so this process exits cleanly.
+fn try_forward_to_running_instance(initial_path: Option<&PathBuf>) -> bool {
+    let sock = single_instance_socket_path();
+    let Ok(mut stream) = UnixStream::connect(&sock) else {
+        return false;
+    };
+    let msg = match initial_path {
+        Some(p) => format!("OPEN:{}\n", p.display()),
+        None => "RAISE\n".to_string(),
+    };
+    let _ = stream.write_all(msg.as_bytes());
+    let _ = stream.flush();
+    true
+}
+
 pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
+    if try_forward_to_running_instance(initial_path.as_ref()) {
+        return Ok(());
+    }
+    let sock_path = single_instance_socket_path();
+    let _ = std::fs::remove_file(&sock_path);
+    let listener = UnixListener::bind(&sock_path).ok();
+
     let roots = InstallRoots::default_user().unwrap_or_else(|_| {
         InstallRoots::from_home(&std::env::temp_dir().join("easi-fallback-home"))
     });
@@ -542,9 +578,18 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
     {
         let w = window.as_weak();
         window.on_run_self_update(move || {
+            if let Some(win) = w.upgrade() {
+                if win.get_self_update_state() == "updating"
+                    || win.get_self_update_state() == "updated"
+                {
+                    return;
+                }
+                win.set_self_update_state("updating".into());
+                win.set_self_update_message("Downloading and verifying update…".into());
+            }
             let w = w.clone();
             std::thread::spawn(move || {
-                let msg = match std::env::current_exe()
+                let (state_str, msg) = match std::env::current_exe()
                     .map_err(easi_core::EasiError::Io)
                     .and_then(|exe| {
                         easi_core::self_update::run_self_update(env!("CARGO_PKG_VERSION"), &exe)
@@ -552,22 +597,45 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                     Ok(easi_core::self_update::UpdateOutcome::Updated { to, .. }) => {
                         easi_core::desktop::notify(
                             "easi updated",
-                            &format!("Updated easi to {to}. Restart easi to use it."),
+                            &format!("Update {to} installed — restart easi to apply."),
                         );
-                        format!("Updated easi to {to}. Restart easi to use the new version.")
+                        (
+                            "updated",
+                            format!("Update installed (easi {to}) — restart easi to apply."),
+                        )
                     }
-                    Ok(easi_core::self_update::UpdateOutcome::AlreadyUpToDate { version }) => {
-                        format!("easi {version} is already up to date.")
-                    }
-                    Err(e) => format!("Update failed: {}", easi_core::format_user_error(&e)),
+                    Ok(easi_core::self_update::UpdateOutcome::AlreadyUpToDate { version }) => (
+                        "up_to_date",
+                        format!("easi {version} is already up to date."),
+                    ),
+                    Err(e) => (
+                        "failed",
+                        format!("Update failed: {}", easi_core::format_user_error(&e)),
+                    ),
                 };
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(win) = w.upgrade() {
-                        win.set_easi_update_version("".into());
-                        win.set_status_text(msg.into());
+                        win.set_self_update_state(state_str.into());
+                        win.set_self_update_message(msg.into());
+                        if state_str == "updated" || state_str == "up_to_date" {
+                            win.set_easi_update_version("".into());
+                        }
                     }
                 });
             });
+        });
+    }
+    {
+        let w = window.as_weak();
+        let sock = sock_path.clone();
+        window.on_restart_easi(move || {
+            let _ = std::fs::remove_file(&sock);
+            if let Ok(exe) = std::env::current_exe() {
+                let _ = std::process::Command::new(exe).spawn();
+            }
+            if let Some(win) = w.upgrade() {
+                let _ = win.hide();
+            }
         });
     }
     {
@@ -589,6 +657,34 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         });
     }
 
+    if let Some(listener) = listener {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        let r = Arc::clone(&runner);
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_ok() {
+                    let trimmed = line.trim_end_matches(&['\r', '\n'][..]);
+                    let open_target = trimmed.strip_prefix("OPEN:").map(PathBuf::from);
+                    let w = w.clone();
+                    let s = Arc::clone(&s);
+                    let r = Arc::clone(&r);
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(win) = w.upgrade() {
+                            win.window().set_minimized(false);
+                            let _ = win.show();
+                        }
+                        if let Some(path) = open_target {
+                            dispatch_action(&w, &s, &r, Action::OpenPath(path));
+                        }
+                    });
+                }
+            }
+        });
+    }
+
     if let Some(path) = initial_path {
         dispatch_action(&window.as_weak(), &store, &runner, Action::OpenPath(path));
     } else {
@@ -597,6 +693,7 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
     }
 
     let res = window.run();
+    let _ = std::fs::remove_file(&sock_path);
     cleanup_preview_icons();
     res
 }
