@@ -42,7 +42,18 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Install an AppImage, tarball or zip.
-    Install { path: PathBuf },
+    Install {
+        path: PathBuf,
+        /// Print planned writes and trust summary without modifying disk.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Inspect a package and print its trust summary and planned writes without installing.
+    Inspect { path: PathBuf },
+    /// Export managed apps and their update sources to a portable TOML file (or stdout).
+    Export { file: Option<PathBuf> },
+    /// Reinstall apps from an exported TOML file using their recorded update sources.
+    Import { file: PathBuf },
     /// Remove an app installed by easi.
     Uninstall {
         app: String,
@@ -123,10 +134,17 @@ pub fn run(cli: Cli) -> ExitCode {
     }
 
     match cli.command {
-        Some(Command::Install { path }) => {
+        Some(Command::Install { path, dry_run }) => {
             maybe_notify_update(&roots);
-            run_install_cmd(&roots, path, cli.yes)
+            if dry_run {
+                run_inspect_cmd(&roots, path)
+            } else {
+                run_install_cmd(&roots, path, cli.yes)
+            }
         }
+        Some(Command::Inspect { path }) => run_inspect_cmd(&roots, path),
+        Some(Command::Export { file }) => run_export_cmd(&roots, file.as_deref()),
+        Some(Command::Import { file }) => run_import_cmd(&roots, &file),
         Some(Command::Uninstall { app, purge_data }) => {
             maybe_notify_update(&roots);
             run_uninstall_cmd(&roots, &app, purge_data, cli.yes)
@@ -654,16 +672,20 @@ fn run_set_source_cmd(roots: &InstallRoots, app: &str, url: Option<&str>, clear:
         }
     } else {
         match resolve_installed(roots, app) {
-            Ok(m) => match easi_core::upstream::detect_dir_update_source(&m.install_dir) {
-                Some(s) => s,
-                None => {
-                    eprintln!(
-                        "easi: no embedded update config found in {}; pass a URL explicitly: `easi set-source {app} <url>`",
-                        m.install_dir.display()
-                    );
-                    return ExitCode::FAILURE;
+            Ok(m) => {
+                let detected = easi_core::upstream::detect_dir_update_source(&m.install_dir)
+                    .or_else(|| easi_core::upstream::lookup_known_app_source(&m.app_id));
+                match detected {
+                    Some(s) => s,
+                    None => {
+                        eprintln!(
+                            "easi: no embedded update config found in {}; pass a URL explicitly: `easi set-source {app} <url>`",
+                            m.install_dir.display()
+                        );
+                        return ExitCode::FAILURE;
+                    }
                 }
-            },
+            }
             Err(e) => {
                 eprintln!("easi: {}", format_user_error(&e));
                 return ExitCode::FAILURE;
@@ -676,6 +698,128 @@ fn run_set_source_cmd(roots: &InstallRoots, app: &str, url: Option<&str>, clear:
         Ok(m) => {
             println!("Set update source for {} ({}) -> {label}", m.name, m.app_id);
             ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("easi: {}", format_user_error(&e));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_inspect_cmd(roots: &InstallRoots, path: PathBuf) -> ExitCode {
+    let existing = easi_core::manifest::list_manifests(roots).unwrap_or_default();
+    match easi_core::inspect::classify_package(&path, |id| {
+        existing
+            .iter()
+            .find(|m| m.app_id == id)
+            .map(|m| m.to_installed_app())
+    }) {
+        Ok(easi_core::Classified::Ready { plan, trust })
+        | Ok(easi_core::Classified::Conflict { plan, trust, .. }) => {
+            println!(
+                "{} ({})",
+                plan.name,
+                plan.version.as_deref().unwrap_or("unknown version")
+            );
+            println!("  App ID: {}", plan.app_id);
+            println!("  Format: {:?}", plan.format);
+            println!("  Kind:   {:?}", plan.kind);
+            if let Some(src) = &plan.update_source {
+                println!("  Update: {}", src.display_label());
+            }
+            print_trust(&trust);
+            if !plan.planned_writes.is_empty() {
+                println!("  Planned writes (dry-run, nothing written):");
+                for w in &plan.planned_writes {
+                    println!("    - {w}");
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(easi_core::Classified::NeedsChoice { draft, trust, .. }) => {
+            println!("{} (ambiguous — would open selection wizard)", draft.name);
+            println!("  App ID: {}", draft.app_id);
+            println!("  Format: {:?}", draft.format);
+            print_trust(&trust);
+            println!("  Executable candidates:");
+            for c in &draft.exec_candidates {
+                println!("    - {}", c.path);
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(easi_core::Classified::NotAnApp { reason, .. }) => {
+            println!("Not an installable app: {reason}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("easi: {}", format_user_error(&e));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_export_cmd(roots: &InstallRoots, file: Option<&std::path::Path>) -> ExitCode {
+    match easi_core::upstream::export_apps_toml(roots) {
+        Ok(toml_text) => {
+            if let Some(path) = file {
+                match std::fs::write(path, toml_text) {
+                    Ok(()) => {
+                        println!("Exported managed apps to {}.", path.display());
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("easi: failed to write {}: {e}", path.display());
+                        ExitCode::FAILURE
+                    }
+                }
+            } else {
+                print!("{toml_text}");
+                ExitCode::SUCCESS
+            }
+        }
+        Err(e) => {
+            eprintln!("easi: {}", format_user_error(&e));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_import_cmd(roots: &InstallRoots, file: &std::path::Path) -> ExitCode {
+    let text = match std::fs::read_to_string(file) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("easi: failed to read {}: {e}", file.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    match easi_core::upstream::import_apps_from_toml(roots, &text) {
+        Ok(outcomes) => {
+            let mut failed = false;
+            for o in outcomes {
+                match o {
+                    easi_core::upstream::ImportOutcome::Installed { name, version } => {
+                        println!(
+                            "Installed {name} ({}).",
+                            version.as_deref().unwrap_or("latest")
+                        );
+                    }
+                    easi_core::upstream::ImportOutcome::AlreadyInstalled { name } => {
+                        println!("Skipped {name} (already installed).");
+                    }
+                    easi_core::upstream::ImportOutcome::SkippedNoSource { name } => {
+                        println!("Skipped {name} (no upstream update source recorded).");
+                    }
+                    easi_core::upstream::ImportOutcome::Failed { name, error } => {
+                        eprintln!("Failed to install {name}: {error}");
+                        failed = true;
+                    }
+                }
+            }
+            if failed {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
         }
         Err(e) => {
             eprintln!("easi: {}", format_user_error(&e));

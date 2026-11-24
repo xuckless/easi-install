@@ -10,6 +10,9 @@ use clap::Parser;
 
 const CLI_SUBCOMMANDS: &[&str] = &[
     "install",
+    "inspect",
+    "export",
+    "import",
     "uninstall",
     "list",
     "update",
@@ -51,7 +54,10 @@ fn main() -> ExitCode {
                 yes: false,
                 setup: false,
                 restore_handlers: false,
-                command: Some(easi_cli::Command::Install { path }),
+                command: Some(easi_cli::Command::Install {
+                    path,
+                    dry_run: false,
+                }),
             });
         }
     }

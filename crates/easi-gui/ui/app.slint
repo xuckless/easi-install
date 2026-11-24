@@ -149,6 +149,7 @@ export component AppWindow inherits Window {
     in-out property <string> filter-kind: "all";
     in-out property <bool> sort-by-size: false;
     in property <string> easi-update-version: "";
+    in property <int> outdated-count: 0;
     in property <string> updating-app-id: "";
     in property <bool> checking-updates: false;
     in property <bool> scanning-apps: false;
@@ -157,6 +158,7 @@ export component AppWindow inherits Window {
     in property <string> self-update-state: "idle"; // "idle" | "updating" | "updated" | "up_to_date" | "failed"
     in property <string> self-update-message: "";
     in-out property <bool> auto-check-updates: true;
+    in-out property <bool> bg-update-timer: false;
     in-out property <bool> purge-data-on-uninstall: false;
     in-out property <bool> confirm-self-uninstall: false;
     in property <string> settings-feedback: "";
@@ -248,12 +250,14 @@ export component AppWindow inherits Window {
     callback filter-changed();
     callback copy-suggested-command(string);
     callback check-app-updates();
+    callback update-all-apps();
     callback run-self-update();
     callback restart-easi();
     callback run-setup-handlers();
     callback run-restore-handlers();
     callback run-self-uninstall();
     callback toggle-auto-update(bool);
+    callback toggle-bg-update-timer(bool);
     callback confirm-install();
     callback cancel();
     callback choose-candidate(int);
@@ -448,20 +452,31 @@ export component AppWindow inherits Window {
                                         root.filter-changed();
                                     }
                                 }
+                                if root.outdated-count > 0: EButton {
+                                    text: root.updating-app-id == "__all__"
+                                        ? "Updating All…"
+                                        : "Update All (" + root.outdated-count + ")";
+                                    kind: "primary";
+                                    small: true;
+                                    enabled: root.updating-app-id == "" && !root.checking-updates;
+                                    clicked => { root.update-all-apps(); }
+                                }
                                 EButton {
                                     text: root.checking-updates ? "Checking…" : "Check Updates";
                                     small: true;
-                                    enabled: root.installed-apps.length > 0 && !root.checking-updates;
+                                    enabled: root.installed-apps.length > 0 && !root.checking-updates && root.updating-app-id == "";
                                     clicked => { root.check-app-updates(); }
                                 }
                             }
 
-                            if root.checking-updates || root.adopting-app-id == "__all__": VerticalLayout {
+                            if root.checking-updates || root.adopting-app-id == "__all__" || root.updating-app-id == "__all__": VerticalLayout {
                                 spacing: Theme.s1;
                                 Text {
-                                    text: root.adopting-app-id == "__all__"
-                                        ? "Adopting and repairing detected apps…"
-                                        : "Checking upstream releases for installed apps…";
+                                    text: root.updating-app-id == "__all__"
+                                        ? "Downloading and installing updates for outdated apps…"
+                                        : root.adopting-app-id == "__all__"
+                                            ? "Adopting and repairing detected apps…"
+                                            : "Checking upstream releases for installed apps…";
                                     font-size: Theme.font-caption;
                                     color: Theme.ink-2;
                                 }
@@ -1091,6 +1106,20 @@ export component AppWindow inherits Window {
                                         ESwitch {
                                             checked <=> root.auto-check-updates;
                                             toggled(v) => { root.toggle-auto-update(v); }
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        spacing: Theme.s2;
+                                        Text {
+                                            text: "Check for app updates in the background (daily systemd timer)";
+                                            font-size: Theme.font-body;
+                                            color: Theme.ink;
+                                            vertical-alignment: center;
+                                            horizontal-stretch: 1;
+                                        }
+                                        ESwitch {
+                                            checked <=> root.bg-update-timer;
+                                            toggled(v) => { root.toggle-bg-update-timer(v); }
                                         }
                                     }
                                     HorizontalLayout {

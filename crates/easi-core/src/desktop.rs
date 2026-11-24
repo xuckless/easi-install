@@ -13,6 +13,80 @@ use crate::install::refresh_desktop_caches;
 use crate::roots::InstallRoots;
 
 pub const EASI_DESKTOP_ID: &str = "easi.desktop";
+const SYSTEMD_TIMER_NAME: &str = "easi-check-updates.timer";
+const SYSTEMD_SERVICE_NAME: &str = "easi-check-updates.service";
+
+/// Check whether the optional `systemd --user` background update-check timer is installed.
+pub fn is_background_update_timer_enabled(roots: &InstallRoots) -> bool {
+    roots
+        .home_dir
+        .join(".config/systemd/user")
+        .join(SYSTEMD_TIMER_NAME)
+        .exists()
+}
+
+/// Enable or disable the lightweight `systemd --user` daily update-check timer (0 MB RAM when idle).
+pub fn set_background_update_timer(
+    roots: &InstallRoots,
+    easi_bin: &Path,
+    enabled: bool,
+) -> Result<bool, EasiError> {
+    let unit_dir = roots.home_dir.join(".config/systemd/user");
+    let service_path = unit_dir.join(SYSTEMD_SERVICE_NAME);
+    let timer_path = unit_dir.join(SYSTEMD_TIMER_NAME);
+
+    if enabled {
+        fs::create_dir_all(&unit_dir)?;
+        let exec = easi_bin.to_string_lossy();
+        let service = format!(
+            "[Unit]\n\
+             Description=Check upstream updates for easi-managed apps\n\
+             After=network-online.target\n\n\
+             [Service]\n\
+             Type=oneshot\n\
+             ExecStart=\"{exec}\" check-updates\n"
+        );
+        let timer = "[Unit]\n\
+             Description=Daily easi app update check\n\n\
+             [Timer]\n\
+             OnCalendar=daily\n\
+             RandomizedDelaySec=15m\n\
+             Persistent=true\n\n\
+             [Install]\n\
+             WantedBy=timers.target\n";
+        fs::write(&service_path, service)?;
+        fs::write(&timer_path, timer)?;
+
+        let out = Command::new("systemctl")
+            .args(["--user", "daemon-reload"])
+            .output();
+        if out.is_err() {
+            return Err(EasiError::Desktop(
+                "systemd user session not available on this distro; unit files were saved but timer could not be enabled.".into(),
+            ));
+        }
+        let enable = Command::new("systemctl")
+            .args(["--user", "enable", "--now", SYSTEMD_TIMER_NAME])
+            .output()
+            .map_err(|e| EasiError::Desktop(format!("systemctl failed: {e}")))?;
+        if !enable.status.success() {
+            return Err(EasiError::Desktop(
+                "systemctl --user enable failed (is systemd --user running?).".into(),
+            ));
+        }
+        Ok(true)
+    } else {
+        let _ = Command::new("systemctl")
+            .args(["--user", "disable", "--now", SYSTEMD_TIMER_NAME])
+            .output();
+        let _ = fs::remove_file(&timer_path);
+        let _ = fs::remove_file(&service_path);
+        let _ = Command::new("systemctl")
+            .args(["--user", "daemon-reload"])
+            .output();
+        Ok(false)
+    }
+}
 
 /// MIME types easi claims as default handler on `easi --setup` (previous defaults are saved
 /// so non-app archives hand off silently).

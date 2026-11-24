@@ -34,8 +34,12 @@ Installs `easi` into `~/.local/bin/easi` (SHA-256 verified) and runs `easi --set
 ### CLI
 ```sh
 easi install <path>                # interactive install (Y/N prompts)
+easi install --dry-run <path>      # preview planned writes without touching disk
+easi inspect <path>                # read-only trust & permissions summary
 easi install -y <path>             # non-interactive / scriptable
 easi list                          # list installed apps (reconciles self-updated apps)
+easi export [apps.toml]            # export managed apps & update sources
+easi import <apps.toml>            # reinstall exported apps on a new Linux machine
 easi scan                          # discover existing unmanaged user apps in $HOME
 easi adopt <app|path> [--all]      # adopt existing app(s) and repair icons/launchers
 easi repair <app>                  # repair missing icon, .desktop, StartupWMClass, or CLI link

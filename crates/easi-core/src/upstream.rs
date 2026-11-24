@@ -6,16 +6,327 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::AtomicBool;
 
+use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 
 use crate::appid::slug_and_version;
 use crate::error::EasiError;
 use crate::inspect::classify_package;
 use crate::install::execute_install;
-use crate::manifest::{Manifest, resolve_installed, save_manifest};
-use crate::model::{Classified, InstallSummary, UpdateSource};
+use crate::manifest::{Manifest, list_manifests, resolve_installed, save_manifest};
+use crate::model::{AppKind, Classified, InstallSummary, UpdateSource};
 use crate::roots::InstallRoots;
 use crate::self_update::{extract_json_string_field, is_newer_version};
+
+enum KnownSourceKind {
+    GitHub(&'static str, &'static str),
+    JetBrains(&'static str),
+}
+
+struct KnownAppSource {
+    slug: &'static str,
+    source: KnownSourceKind,
+}
+
+/// Curated lookup table of popular non-distro Linux apps -> official upstream update source.
+/// Zero-dependency, instant lookup; adding an app is one row here.
+const KNOWN_APP_SOURCES: &[KnownAppSource] = &[
+    KnownAppSource {
+        slug: "zen-browser",
+        source: KnownSourceKind::GitHub("zen-browser", "desktop"),
+    },
+    KnownAppSource {
+        slug: "zen",
+        source: KnownSourceKind::GitHub("zen-browser", "desktop"),
+    },
+    KnownAppSource {
+        slug: "zed",
+        source: KnownSourceKind::GitHub("zed-industries", "zed"),
+    },
+    KnownAppSource {
+        slug: "helium",
+        source: KnownSourceKind::GitHub("imputnet", "helium-linux"),
+    },
+    KnownAppSource {
+        slug: "obsidian",
+        source: KnownSourceKind::GitHub("obsidianmd", "obsidian-releases"),
+    },
+    KnownAppSource {
+        slug: "vesktop",
+        source: KnownSourceKind::GitHub("Vencord", "Vesktop"),
+    },
+    KnownAppSource {
+        slug: "bruno",
+        source: KnownSourceKind::GitHub("usebruno", "bruno"),
+    },
+    KnownAppSource {
+        slug: "localsend",
+        source: KnownSourceKind::GitHub("localsend", "localsend"),
+    },
+    KnownAppSource {
+        slug: "logseq",
+        source: KnownSourceKind::GitHub("logseq", "logseq"),
+    },
+    KnownAppSource {
+        slug: "joplin",
+        source: KnownSourceKind::GitHub("laurent22", "joplin"),
+    },
+    KnownAppSource {
+        slug: "siyuan",
+        source: KnownSourceKind::GitHub("siyuan-note", "siyuan"),
+    },
+    KnownAppSource {
+        slug: "anytype",
+        source: KnownSourceKind::GitHub("anyproto", "anytype-ts"),
+    },
+    KnownAppSource {
+        slug: "bitwarden",
+        source: KnownSourceKind::GitHub("bitwarden", "clients"),
+    },
+    KnownAppSource {
+        slug: "keepassxc",
+        source: KnownSourceKind::GitHub("keepassxreboot", "keepassxc"),
+    },
+    KnownAppSource {
+        slug: "neovim",
+        source: KnownSourceKind::GitHub("neovim", "neovim"),
+    },
+    KnownAppSource {
+        slug: "nvim",
+        source: KnownSourceKind::GitHub("neovim", "neovim"),
+    },
+    KnownAppSource {
+        slug: "alacritty",
+        source: KnownSourceKind::GitHub("alacritty", "alacritty"),
+    },
+    KnownAppSource {
+        slug: "wezterm",
+        source: KnownSourceKind::GitHub("wezterm", "wezterm"),
+    },
+    KnownAppSource {
+        slug: "ghostty",
+        source: KnownSourceKind::GitHub("ghostty-org", "ghostty"),
+    },
+    KnownAppSource {
+        slug: "uv",
+        source: KnownSourceKind::GitHub("astral-sh", "uv"),
+    },
+    KnownAppSource {
+        slug: "ruff",
+        source: KnownSourceKind::GitHub("astral-sh", "ruff"),
+    },
+    KnownAppSource {
+        slug: "ripgrep",
+        source: KnownSourceKind::GitHub("BurntSushi", "ripgrep"),
+    },
+    KnownAppSource {
+        slug: "bat",
+        source: KnownSourceKind::GitHub("sharkdp", "bat"),
+    },
+    KnownAppSource {
+        slug: "fd",
+        source: KnownSourceKind::GitHub("sharkdp", "fd"),
+    },
+    KnownAppSource {
+        slug: "fzf",
+        source: KnownSourceKind::GitHub("junegunn", "fzf"),
+    },
+    KnownAppSource {
+        slug: "lazygit",
+        source: KnownSourceKind::GitHub("jesseduffield", "lazygit"),
+    },
+    KnownAppSource {
+        slug: "helix",
+        source: KnownSourceKind::GitHub("helix-editor", "helix"),
+    },
+    KnownAppSource {
+        slug: "lapce",
+        source: KnownSourceKind::GitHub("lapce", "lapce"),
+    },
+    KnownAppSource {
+        slug: "godot",
+        source: KnownSourceKind::GitHub("godotengine", "godot"),
+    },
+    KnownAppSource {
+        slug: "prismlauncher",
+        source: KnownSourceKind::GitHub("PrismLauncher", "PrismLauncher"),
+    },
+    KnownAppSource {
+        slug: "heroic",
+        source: KnownSourceKind::GitHub("Heroic-Games-Launcher", "HeroicGamesLauncher"),
+    },
+    KnownAppSource {
+        slug: "freetube",
+        source: KnownSourceKind::GitHub("FreeTubeApp", "FreeTube"),
+    },
+    KnownAppSource {
+        slug: "feishin",
+        source: KnownSourceKind::GitHub("jeffvli", "feishin"),
+    },
+    KnownAppSource {
+        slug: "superproductivity",
+        source: KnownSourceKind::GitHub("johannesjo", "super-productivity"),
+    },
+    KnownAppSource {
+        slug: "webstorm",
+        source: KnownSourceKind::JetBrains("WS"),
+    },
+    KnownAppSource {
+        slug: "intellij",
+        source: KnownSourceKind::JetBrains("IIU"),
+    },
+    KnownAppSource {
+        slug: "pycharm",
+        source: KnownSourceKind::JetBrains("PCP"),
+    },
+    KnownAppSource {
+        slug: "rustrover",
+        source: KnownSourceKind::JetBrains("RR"),
+    },
+    KnownAppSource {
+        slug: "goland",
+        source: KnownSourceKind::JetBrains("GO"),
+    },
+    KnownAppSource {
+        slug: "clion",
+        source: KnownSourceKind::JetBrains("CL"),
+    },
+    KnownAppSource {
+        slug: "rider",
+        source: KnownSourceKind::JetBrains("RD"),
+    },
+    KnownAppSource {
+        slug: "datagrip",
+        source: KnownSourceKind::JetBrains("DG"),
+    },
+    KnownAppSource {
+        slug: "phpstorm",
+        source: KnownSourceKind::JetBrains("PS"),
+    },
+];
+
+/// Look up an app_id or name slug (e.g. `easi.zen-browser`, `dev.zed.Zed`, `helium`) in `KNOWN_APP_SOURCES`.
+pub fn lookup_known_app_source(app_id: &str) -> Option<UpdateSource> {
+    let lower = app_id.trim().to_ascii_lowercase();
+    let stripped = lower.strip_prefix("easi.").unwrap_or(&lower);
+    let last_seg = stripped.rsplit('.').next().unwrap_or(stripped);
+    let hit = KNOWN_APP_SOURCES
+        .iter()
+        .find(|row| row.slug == stripped || row.slug == last_seg)?;
+    Some(match hit.source {
+        KnownSourceKind::GitHub(owner, repo) => UpdateSource::GitHubRelease {
+            owner: owner.to_string(),
+            repo: repo.to_string(),
+            asset_pattern: None,
+        },
+        KnownSourceKind::JetBrains(code) => UpdateSource::JetBrains {
+            product_code: code.to_string(),
+        },
+    })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportedApp {
+    pub app_id: String,
+    pub name: String,
+    pub version: Option<String>,
+    pub kind: AppKind,
+    pub update_source: Option<UpdateSource>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppExportFile {
+    pub format_version: u32,
+    pub apps: Vec<ExportedApp>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImportOutcome {
+    Installed {
+        name: String,
+        version: Option<String>,
+    },
+    AlreadyInstalled {
+        name: String,
+    },
+    SkippedNoSource {
+        name: String,
+    },
+    Failed {
+        name: String,
+        error: String,
+    },
+}
+
+/// Export all managed apps and their recorded update sources as portable TOML.
+pub fn export_apps_toml(roots: &InstallRoots) -> Result<String, EasiError> {
+    let manifests = list_manifests(roots)?;
+    let apps = manifests
+        .into_iter()
+        .map(|m| ExportedApp {
+            app_id: m.app_id,
+            name: m.name,
+            version: m.version,
+            kind: m.kind,
+            update_source: m.update_source,
+        })
+        .collect();
+    let payload = AppExportFile {
+        format_version: 1,
+        apps,
+    };
+    toml::to_string_pretty(&payload).map_err(|e| EasiError::Manifest(e.to_string()))
+}
+
+/// Reinstall apps from an exported TOML file using their recorded `UpdateSource`.
+pub fn import_apps_from_toml(
+    roots: &InstallRoots,
+    toml_text: &str,
+) -> Result<Vec<ImportOutcome>, EasiError> {
+    let parsed: AppExportFile =
+        toml::from_str(toml_text).map_err(|e| EasiError::Manifest(e.to_string()))?;
+    let existing = list_manifests(roots).unwrap_or_default();
+    let mut outcomes = Vec::new();
+    for entry in parsed.apps {
+        if existing.iter().any(|m| m.app_id == entry.app_id) {
+            outcomes.push(ImportOutcome::AlreadyInstalled { name: entry.name });
+            continue;
+        }
+        let Some(src) = entry
+            .update_source
+            .or_else(|| lookup_known_app_source(&entry.app_id))
+        else {
+            outcomes.push(ImportOutcome::SkippedNoSource { name: entry.name });
+            continue;
+        };
+        let synthetic = Manifest {
+            app_id: entry.app_id,
+            name: entry.name.clone(),
+            version: None,
+            source_filename: String::new(),
+            kind: entry.kind,
+            install_dir: roots.applications_dir.join(&entry.name),
+            developer: None,
+            origin_url: None,
+            signature_summary: None,
+            update_source: Some(src),
+            adopted: false,
+            created_files: vec![],
+            created_dirs: vec![],
+        };
+        match download_and_update_app(roots, &synthetic) {
+            Ok(summary) => outcomes.push(ImportOutcome::Installed {
+                name: summary.name,
+                version: summary.version,
+            }),
+            Err(e) => outcomes.push(ImportOutcome::Failed {
+                name: entry.name,
+                error: e.to_string(),
+            }),
+        }
+    }
+    Ok(outcomes)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppUpdateStatus {
@@ -865,6 +1176,54 @@ mod tests {
             Some(UpdateSource::HttpRedirect {
                 url: "https://downloads.vendor.com/latest/app-linux.tar.gz".into()
             })
+        );
+
+        // 5. Known app sources lookup table
+        assert_eq!(
+            lookup_known_app_source("dev.zed.Zed"),
+            Some(UpdateSource::GitHubRelease {
+                owner: "zed-industries".into(),
+                repo: "zed".into(),
+                asset_pattern: None
+            })
+        );
+        assert_eq!(
+            lookup_known_app_source("easi.webstorm"),
+            Some(UpdateSource::JetBrains {
+                product_code: "WS".into()
+            })
+        );
+        assert_eq!(
+            lookup_known_app_source("zen-browser"),
+            Some(UpdateSource::GitHubRelease {
+                owner: "zen-browser".into(),
+                repo: "desktop".into(),
+                asset_pattern: None
+            })
+        );
+
+        // 6. Export TOML round-trip
+        let roots = InstallRoots::from_home(tmp.path());
+        let sample = Manifest {
+            app_id: "zen-browser".into(),
+            name: "Zen Browser".into(),
+            version: Some("1.24.3b".into()),
+            source_filename: "zen.tar.xz".into(),
+            kind: AppKind::Gui,
+            install_dir: roots.applications_dir.join("Zen"),
+            developer: None,
+            origin_url: None,
+            signature_summary: None,
+            update_source: lookup_known_app_source("zen-browser"),
+            adopted: true,
+            created_files: vec![],
+            created_dirs: vec![],
+        };
+        save_manifest(&roots, &sample).unwrap();
+        let exported = export_apps_toml(&roots).unwrap();
+        assert!(exported.contains("zen-browser"));
+        assert!(
+            exported.contains("zen-browser/desktop") || exported.contains("repo = \"desktop\"")
         );
     }
 }

@@ -1353,7 +1353,7 @@ checksum = "edf234dd1594d6dd434a8fb8cada51ddbbc593e40e4a01556a0b31c62da2775b"
 
 [[package]]
 name = "easi"
-version = "2.2.3"
+version = "2.3.0"
 dependencies = [
  "clap",
  "easi-cli",
@@ -1362,7 +1362,7 @@ dependencies = [
 
 [[package]]
 name = "easi-cli"
-version = "2.2.3"
+version = "2.3.0"
 dependencies = [
  "clap",
  "easi-core",
@@ -1370,7 +1370,7 @@ dependencies = [
 
 [[package]]
 name = "easi-core"
-version = "2.2.3"
+version = "2.3.0"
 dependencies = [
  "backhand",
  "bzip2",
@@ -1391,7 +1391,7 @@ dependencies = [
 
 [[package]]
 name = "easi-gui"
-version = "2.2.3"
+version = "2.3.0"
 dependencies = [
  "easi-core",
  "rfd",

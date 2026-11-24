@@ -108,8 +108,8 @@ Every arrow is a row in the reducer match. Every unlisted `(state, action)` pair
 - [x] Self-updated app manifest reconciliation (re-index `~/Applications/<App>/`, strip stray setuid, refresh version, repair renamed binary/AppImage wiring, clean uninstall)
 
 ## Wishlist
-- [ ] `easi inspect <path>` — read-only inspection and trust summary without installing
-- [ ] `--dry-run` flag for `easi install` — print planned writes without touching disk
+- [x] `easi inspect <path>` — read-only inspection and trust summary without installing
+- [x] `--dry-run` flag for `easi install` — print planned writes without touching disk
 - [x] File picker button in empty GUI window (in addition to drag-and-drop and `easi <path>`)
 - [x] Desktop notifications on install, uninstall, and updates (via `notify-send` / D-Bus fallback)
 
@@ -133,7 +133,8 @@ Every arrow is a row in the reducer match. Every unlisted `(state, action)` pair
 - [x] Explicit UI busy-state locks on all async buttons (`Check Updates`, `Refresh`, `Manage`/`Manage All`, `Install Package…`/`Add Existing…`) plus human-friendly `InstallStep` progress labels
 - [x] Left-align app row metadata (`Kind · id · size`) with uniform 32px icon column, and write absolute hicolor `Icon=` paths in `.desktop` files for instant GNOME/KDE/Wayland Alt-Tab & Dock icon rendering
 - [x] Auto-close window on silent hand-off (`DoneOutcome::HandedOff`), detect commented SVGs for DragStage preview icons, fix Settings/App Info vertical stretch, ConfirmButton width clipping, and wider default window for Apps toolbar
-- [ ] Portable app-list backup (`easi export` / `easi import`) to reinstall upstream-tracked apps on a new Linux machine or fresh SteamOS/CachyOS install
+- [x] Portable app-list backup (`easi export` / `easi import`) to reinstall upstream-tracked apps on a new Linux machine or fresh SteamOS/CachyOS install
+- [x] Curated `KNOWN_APP_SOURCES` table, GUI **"Update All (N)"** button, and optional `systemd --user` daily background update-check timer toggle in Settings
 
 ## Open questions
 - (none)

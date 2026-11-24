@@ -67,6 +67,9 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
     let _ = slint::set_xdg_app_id("easi");
     let cfg = easi_core::self_update::load_config(&runner.roots);
     window.set_auto_check_updates(cfg.auto_check_updates);
+    window.set_bg_update_timer(easi_core::desktop::is_background_update_timer_enabled(
+        &runner.roots,
+    ));
     window.set_easi_version(env!("CARGO_PKG_VERSION").into());
 
     if let Ok(st) = store.lock() {
@@ -353,7 +356,9 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
             let id: String = app_id.into();
             let msg = match easi_core::manifest::resolve_installed(&r.roots, &id) {
                 Ok(m) => {
-                    if let Some(src) = easi_core::upstream::detect_dir_update_source(&m.install_dir) {
+                    let detected = easi_core::upstream::detect_dir_update_source(&m.install_dir)
+                        .or_else(|| easi_core::upstream::lookup_known_app_source(&m.app_id));
+                    if let Some(src) = detected {
                         let label = src.display_label();
                         let _ = easi_core::upstream::set_app_update_source(&r.roots, &id, Some(src));
                         format!("Detected update source: {label}.")
@@ -668,8 +673,43 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                             })
                             .collect();
                         win.set_installed_apps(ModelRc::new(VecModel::from(rows)));
+                        win.set_outdated_count(available_count as i32);
                         win.set_checking_updates(false);
                     }
+                });
+            });
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        let r = Arc::clone(&runner);
+        window.on_update_all_apps(move || {
+            if let Some(win) = w.upgrade() {
+                if !win.get_updating_app_id().is_empty() {
+                    return;
+                }
+                win.set_updating_app_id("__all__".into());
+            }
+            let w = w.clone();
+            let s = Arc::clone(&s);
+            let r = Arc::clone(&r);
+            std::thread::spawn(move || {
+                let manifests = easi_core::manifest::list_manifests(&r.roots).unwrap_or_default();
+                for m in &manifests {
+                    if matches!(
+                        easi_core::upstream::check_app_update(m),
+                        easi_core::upstream::AppUpdateStatus::UpdateAvailable { .. }
+                    ) {
+                        let _ = easi_core::upstream::download_and_update_app(&r.roots, m);
+                    }
+                }
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(win) = w.upgrade() {
+                        win.set_updating_app_id("".into());
+                        win.set_outdated_count(0);
+                    }
+                    dispatch_action(&w, &s, &r, Action::LoadInstalled);
                 });
             });
         });
@@ -678,6 +718,26 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         let r = Arc::clone(&runner);
         window.on_toggle_auto_update(move |enabled| {
             let _ = easi_core::self_update::set_auto_check_updates(&r.roots, enabled);
+        });
+    }
+    {
+        let w = window.as_weak();
+        let r = Arc::clone(&runner);
+        window.on_toggle_bg_update_timer(move |enabled| {
+            let msg = match std::env::current_exe()
+                .map_err(easi_core::EasiError::Io)
+                .and_then(|exe| {
+                    easi_core::desktop::set_background_update_timer(&r.roots, &exe, enabled)
+                }) {
+                Ok(true) => {
+                    "Enabled daily background app update checks (systemd user timer).".into()
+                }
+                Ok(false) => "Disabled background app update checks.".into(),
+                Err(e) => format!("Timer update failed: {}", easi_core::format_user_error(&e)),
+            };
+            if let Some(win) = w.upgrade() {
+                win.set_settings_feedback(msg.into());
+            }
         });
     }
     {
