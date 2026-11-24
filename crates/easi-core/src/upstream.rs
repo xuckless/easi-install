@@ -988,7 +988,7 @@ pub fn download_and_update_app(
         ))
     })?;
 
-    let download_url = match source {
+    let (download_url, known_latest_version): (String, Option<String>) = match source {
         UpdateSource::GitHubRelease { owner, repo, .. } => {
             if !is_safe_repo_segment(owner) || !is_safe_repo_segment(repo) {
                 return Err(EasiError::Desktop(format!(
@@ -998,15 +998,19 @@ pub fn download_and_update_app(
             let api = format!("https://api.github.com/repos/{owner}/{repo}/releases/latest");
             let body =
                 curl_text(&api, &["-fsSL", "--max-time", "15"]).map_err(EasiError::Desktop)?;
+            let ver = extract_json_string_field(&body, "tag_name")
+                .map(|t| t.trim_start_matches('v').to_string());
             let urls = extract_github_asset_urls(&body);
-            select_best_github_asset(&urls, std::env::consts::ARCH, &manifest.source_filename)
-                .ok_or_else(|| {
-                    EasiError::Desktop(format!(
-                        "no matching Linux release asset found for {} ({})",
-                        manifest.name,
-                        std::env::consts::ARCH
-                    ))
-                })?
+            let url =
+                select_best_github_asset(&urls, std::env::consts::ARCH, &manifest.source_filename)
+                    .ok_or_else(|| {
+                        EasiError::Desktop(format!(
+                            "no matching Linux release asset found for {} ({})",
+                            manifest.name,
+                            std::env::consts::ARCH
+                        ))
+                    })?;
+            (url, ver)
         }
         UpdateSource::ForgeRelease {
             host,
@@ -1026,32 +1030,38 @@ pub fn download_and_update_app(
             };
             let body =
                 curl_text(&api, &["-fsSL", "--max-time", "15"]).map_err(EasiError::Desktop)?;
+            let ver = extract_json_string_field(&body, "tag_name")
+                .map(|t| t.trim_start_matches('v').to_string());
             let urls = extract_github_asset_urls(&body);
-            select_best_github_asset(&urls, std::env::consts::ARCH, &manifest.source_filename)
-                .ok_or_else(|| {
-                    EasiError::Desktop(format!(
-                        "no matching Linux release asset found on {host} for {}",
-                        manifest.name
-                    ))
-                })?
+            let url =
+                select_best_github_asset(&urls, std::env::consts::ARCH, &manifest.source_filename)
+                    .ok_or_else(|| {
+                        EasiError::Desktop(format!(
+                            "no matching Linux release asset found on {host} for {}",
+                            manifest.name
+                        ))
+                    })?;
+            (url, ver)
         }
         UpdateSource::ZsyncUrl { url } => {
             let header = curl_text(url, &["-fsSL", "--max-time", "10", "-r", "0-4095"])
                 .map_err(EasiError::Desktop)?;
-            resolve_zsync_download_url(url, &header).ok_or_else(|| {
+            let ver = parse_zsync_version(&header);
+            let dl = resolve_zsync_download_url(url, &header).ok_or_else(|| {
                 EasiError::Desktop(format!("could not resolve download URL from {url}"))
-            })?
+            })?;
+            (dl, ver)
         }
         UpdateSource::ElectronYaml { url } => {
             let yml_url = electron_yaml_url(url, std::env::consts::ARCH);
             let body =
                 curl_text(&yml_url, &["-fsSL", "--max-time", "10"]).map_err(EasiError::Desktop)?;
-            let (_, path_opt) = parse_electron_latest_yml(&body).ok_or_else(|| {
+            let (ver, path_opt) = parse_electron_latest_yml(&body).ok_or_else(|| {
                 EasiError::Desktop(format!("could not parse download path from {yml_url}"))
             })?;
             let rel = path_opt
                 .ok_or_else(|| EasiError::Desktop(format!("no file path listed in {yml_url}")))?;
-            if rel.starts_with("https://") {
+            let dl = if rel.starts_with("https://") {
                 rel
             } else if rel.starts_with("http://") {
                 return Err(EasiError::Desktop(format!(
@@ -1061,7 +1071,8 @@ pub fn download_and_update_app(
                 format!("{base}/{rel}")
             } else {
                 rel
-            }
+            };
+            (dl, Some(ver))
         }
         UpdateSource::JetBrains { product_code } => {
             if !is_safe_product_code(product_code) {
@@ -1074,16 +1085,24 @@ pub fn download_and_update_app(
             );
             let body =
                 curl_text(&api, &["-fsSL", "--max-time", "15"]).map_err(EasiError::Desktop)?;
-            parse_jetbrains_release_json(&body, std::env::consts::ARCH)
-                .and_then(|(_, link)| link)
+            let (ver, link) = parse_jetbrains_release_json(&body, std::env::consts::ARCH)
                 .ok_or_else(|| {
                     EasiError::Desktop(format!(
                         "no Linux download found on JetBrains CDN for {product_code}"
                     ))
-                })?
+                })?;
+            let dl = link.ok_or_else(|| {
+                EasiError::Desktop(format!(
+                    "no Linux download found on JetBrains CDN for {product_code}"
+                ))
+            })?;
+            (dl, Some(ver))
         }
         UpdateSource::HttpRedirect { url } => {
-            resolve_redirect_url(url).unwrap_or_else(|_| url.clone())
+            let final_url = resolve_redirect_url(url).unwrap_or_else(|_| url.clone());
+            let fname = final_url.rsplit('/').next().unwrap_or(&final_url);
+            let ver = slug_and_version(fname).1;
+            (final_url, ver)
         }
     };
 
@@ -1116,8 +1135,12 @@ pub fn download_and_update_app(
                 .into(),
         ));
     }
-    // Preserve original app_id and update_source across updates.
+    // Preserve original app_id and update_source across updates, and stamp the authoritative
+    // upstream release version when the downloaded asset filename omits it (e.g. zed-linux-x86_64.tar.gz).
     plan.app_id = manifest.app_id.clone();
+    if known_latest_version.is_some() {
+        plan.version = known_latest_version;
+    }
     if plan.update_source.is_none() {
         plan.update_source = manifest.update_source.clone();
     }

@@ -27,6 +27,14 @@ pub fn reduce_ui(mut ui: ManagerUi, action: UiAction) -> ManagerUi {
         UiAction::SetOnboardSetupHandlers(v) => ui.onboard_setup_handlers = v,
         UiAction::SetOnboardAutoUpdate(v) => ui.onboard_auto_update = v,
         UiAction::SetOnboardBgTimer(v) => ui.onboard_bg_timer = v,
+        UiAction::SetUpdateStatuses(map) => ui.update_statuses = map,
+        UiAction::SetAppUpdateStatus {
+            app_id,
+            note,
+            has_update,
+        } => {
+            ui.update_statuses.insert(app_id, (note, has_update));
+        }
     }
     ui
 }

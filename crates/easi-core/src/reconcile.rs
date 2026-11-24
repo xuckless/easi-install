@@ -212,7 +212,27 @@ fn detect_installed_version(install_dir: &Path, files: &[PathBuf]) -> Option<Str
         }
     }
 
-    // 3. Renamed `.AppImage` filename inside `install_dir`
+    // 3. JetBrains `product-info.json`
+    if let Ok(json) = fs::read_to_string(install_dir.join("product-info.json"))
+        && let Some(ver) = extract_json_string_field(&json, "version")
+        && !ver.is_empty()
+    {
+        return Some(ver);
+    }
+
+    // 4. Firefox / Zen Browser `application.ini`
+    if let Ok(ini) = fs::read_to_string(install_dir.join("application.ini")) {
+        for line in ini.lines() {
+            if let Some(ver) = line.trim().strip_prefix("Version=") {
+                let v = ver.trim();
+                if !v.is_empty() {
+                    return Some(v.to_string());
+                }
+            }
+        }
+    }
+
+    // 5. Renamed `.AppImage` filename inside `install_dir`
     for f in files {
         let name = f
             .file_name()

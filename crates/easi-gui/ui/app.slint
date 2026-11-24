@@ -573,6 +573,7 @@ export component AppWindow inherits Window {
                                     color: Theme.ink;
                                     vertical-alignment: center;
                                     horizontal-stretch: 1;
+                                    overflow: elide;
                                 }
                                 EButton {
                                     text: root.scanning-apps ? "Scanning…" : "Refresh";
@@ -592,7 +593,26 @@ export component AppWindow inherits Window {
                                     enabled: root.installed-apps.length > 1;
                                     clicked => { root.toggle-sort-by-size(); }
                                 }
-                                if root.outdated-count > 0: EButton {
+                            }
+
+                            HorizontalLayout {
+                                spacing: Theme.s2;
+                                EField {
+                                    text: root.search-query;
+                                    placeholder: "Filter installed apps…";
+                                    horizontal-stretch: 1;
+                                    edited(q) => { root.set-search-query(q); }
+                                }
+                                ESegmented {
+                                    small: true;
+                                    item-width: 48px;
+                                    labels: ["All", "GUI", "CLI"];
+                                    current: root.filter-kind == "gui" ? 1 : root.filter-kind == "cli" ? 2 : 0;
+                                    changed(i) => {
+                                        root.set-filter-kind(i == 1 ? "gui" : i == 2 ? "cli" : "all");
+                                    }
+                                }
+                                if root.outdated-count > 0 || root.updating-app-id == "__all__": EButton {
                                     text: root.updating-app-id == "__all__"
                                         ? "Updating All…"
                                         : "Update All (" + root.outdated-count + ")";
@@ -610,6 +630,8 @@ export component AppWindow inherits Window {
                             }
 
                             if root.checking-updates || root.adopting-app-id == "__all__" || root.updating-app-id == "__all__": VerticalLayout {
+                                vertical-stretch: 0;
+                                alignment: start;
                                 spacing: Theme.s1;
                                 Text {
                                     text: root.updating-app-id == "__all__"
@@ -622,25 +644,6 @@ export component AppWindow inherits Window {
                                 }
                                 EProgress {
                                     indeterminate: true;
-                                }
-                            }
-
-                            HorizontalLayout {
-                                spacing: Theme.s2;
-                                EField {
-                                    text: root.search-query;
-                                    placeholder: "Filter installed apps…";
-                                    horizontal-stretch: 1;
-                                    edited(q) => { root.set-search-query(q); }
-                                }
-                                ESegmented {
-                                    small: true;
-                                    item-width: 52px;
-                                    labels: ["All", "GUI", "CLI"];
-                                    current: root.filter-kind == "gui" ? 1 : root.filter-kind == "cli" ? 2 : 0;
-                                    changed(i) => {
-                                        root.set-filter-kind(i == 1 ? "gui" : i == 2 ? "cli" : "all");
-                                    }
                                 }
                             }
 
