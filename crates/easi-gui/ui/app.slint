@@ -17,6 +17,8 @@ export component AppWindow inherits Window {
     // Projected state from easi-core::State
     in property <string> screen: "idle";
     in property <[InstalledRow]> installed-apps: [];
+    in property <string> easi-update-version: "";
+    in-out property <bool> auto-check-updates: true;
     in property <string> app-name: "";
     in property <string> app-version: "";
     in property <string> app-id: "";
@@ -57,6 +59,8 @@ export component AppWindow inherits Window {
     callback browse-package();
     callback open-path(string);
     callback uninstall-app(string);
+    callback run-self-update();
+    callback toggle-auto-update(bool);
     callback confirm-install();
     callback cancel();
     callback choose-candidate(int);
@@ -72,6 +76,24 @@ export component AppWindow inherits Window {
         // --- Idle: Standalone App Manager + Package Picker ---
         if root.screen == "idle": VerticalBox {
             spacing: 12px;
+            if root.easi-update-version != "": Rectangle {
+                border-width: 1px;
+                border-color: #3584e4;
+                border-radius: 6px;
+                HorizontalBox {
+                    padding: 8px;
+                    Text {
+                        text: "easi " + root.easi-update-version + " is available";
+                        vertical-alignment: center;
+                        font-weight: 700;
+                    }
+                    Button {
+                        text: "Update Now";
+                        primary: true;
+                        clicked => { root.run-self-update(); }
+                    }
+                }
+            }
             Text {
                 text: "easi — App Manager";
                 font-size: 18px;
@@ -129,6 +151,11 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
+            }
+            CheckBox {
+                text: "Check for easi updates automatically";
+                checked <=> root.auto-check-updates;
+                toggled => { root.toggle-auto-update(self.checked); }
             }
         }
 

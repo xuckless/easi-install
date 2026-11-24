@@ -7,14 +7,112 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 use crate::error::EasiError;
 use crate::install::extract_archive_safe;
 use crate::model::Format;
+use crate::roots::InstallRoots;
 
 pub const DEFAULT_REPO: &str = "xuckl/easi-install";
+const CHECK_INTERVAL_SECS: u64 = 6 * 60 * 60;
+
+fn default_true() -> bool {
+    true
+}
+
+/// User configuration persisted in `~/.local/share/easi/config.toml`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EasiConfig {
+    #[serde(default = "default_true")]
+    pub auto_check_updates: bool,
+    #[serde(default)]
+    pub last_update_check_epoch: u64,
+    #[serde(default)]
+    pub latest_known_version: Option<String>,
+}
+
+impl Default for EasiConfig {
+    fn default() -> Self {
+        Self {
+            auto_check_updates: true,
+            last_update_check_epoch: 0,
+            latest_known_version: None,
+        }
+    }
+}
+
+pub fn load_config(roots: &InstallRoots) -> EasiConfig {
+    fs::read_to_string(roots.config_path())
+        .ok()
+        .and_then(|s| toml::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_config(roots: &InstallRoots, cfg: &EasiConfig) -> Result<PathBuf, EasiError> {
+    fs::create_dir_all(&roots.easi_dir)?;
+    let path = roots.config_path();
+    let text = toml::to_string_pretty(cfg).map_err(|e| EasiError::Desktop(e.to_string()))?;
+    fs::write(&path, text)?;
+    Ok(path)
+}
+
+pub fn set_auto_check_updates(
+    roots: &InstallRoots,
+    enabled: bool,
+) -> Result<EasiConfig, EasiError> {
+    let mut cfg = load_config(roots);
+    cfg.auto_check_updates = enabled;
+    save_config(roots, &cfg)?;
+    Ok(cfg)
+}
+
+pub fn auto_update_disabled_by_env() -> bool {
+    std::env::var("EASI_NO_AUTO_UPDATE")
+        .map(|v| !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(false)
+}
+
+/// Brew-style update check on use: respects `EASI_NO_AUTO_UPDATE` and `config.toml`,
+/// caches results for 6 hours, and uses a short 2s timeout so offline use never stalls.
+/// Returns `Some(latest_version)` if a newer release is available.
+pub fn check_for_easi_update(roots: &InstallRoots, current_version: &str) -> Option<String> {
+    if auto_update_disabled_by_env() {
+        return None;
+    }
+    let mut cfg = load_config(roots);
+    if !cfg.auto_check_updates {
+        return None;
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    if now.saturating_sub(cfg.last_update_check_epoch) < CHECK_INTERVAL_SECS {
+        return cfg
+            .latest_known_version
+            .filter(|v| is_newer_version(current_version, v));
+    }
+
+    let repo = std::env::var("EASI_REPO").unwrap_or_else(|_| DEFAULT_REPO.to_string());
+    let latest_tag = fetch_latest_tag_with_timeout(&repo, 2).ok()?;
+    let latest_ver = latest_tag.trim_start_matches('v').to_string();
+
+    cfg.last_update_check_epoch = now;
+    cfg.latest_known_version = Some(latest_ver.clone());
+    let _ = save_config(roots, &cfg);
+
+    if is_newer_version(current_version, &latest_ver) {
+        Some(latest_ver)
+    } else {
+        None
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpdateOutcome {
@@ -121,9 +219,14 @@ fn current_arch() -> Result<&'static str, EasiError> {
 }
 
 fn fetch_latest_tag(repo: &str) -> Result<String, EasiError> {
+    fetch_latest_tag_with_timeout(repo, 15)
+}
+
+fn fetch_latest_tag_with_timeout(repo: &str, timeout_secs: u32) -> Result<String, EasiError> {
     let url = format!("https://api.github.com/repos/{repo}/releases/latest");
+    let timeout = timeout_secs.to_string();
     let out = Command::new("curl")
-        .args(["-fsSL", &url])
+        .args(["-fsSL", "--max-time", &timeout, &url])
         .output()
         .map_err(|e| EasiError::Desktop(format!("failed to invoke curl: {e}")))?;
     if !out.status.success() {
@@ -223,5 +326,37 @@ mod tests {
             extract_json_string_field(json, "tag_name").as_deref(),
             Some("v0.2.0")
         );
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    fn config_roundtrip_and_cached_update_check() {
+        let tmp = TempDir::new().expect("tempdir");
+        let roots = InstallRoots::from_home(tmp.path());
+
+        // Default config has auto_check_updates = true.
+        assert!(load_config(&roots).auto_check_updates);
+
+        // Turning it off persists and suppresses update check.
+        set_auto_check_updates(&roots, false).expect("disable");
+        assert!(!load_config(&roots).auto_check_updates);
+        assert_eq!(check_for_easi_update(&roots, "0.1.0"), None);
+
+        // Fresh cached version returns Some without touching network.
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_secs();
+        let cfg = EasiConfig {
+            auto_check_updates: true,
+            last_update_check_epoch: now,
+            latest_known_version: Some("0.2.0".into()),
+        };
+        save_config(&roots, &cfg).expect("save");
+        assert_eq!(
+            check_for_easi_update(&roots, "0.1.0").as_deref(),
+            Some("0.2.0")
+        );
+        assert_eq!(check_for_easi_update(&roots, "0.2.0"), None);
     }
 }

@@ -23,9 +23,28 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
     let runner = Arc::new(EffectRunner::new(roots));
     let store = Arc::new(Mutex::new(Store::new()));
     let window = ui::AppWindow::new()?;
+    let cfg = easi_core::self_update::load_config(&runner.roots);
+    window.set_auto_check_updates(cfg.auto_check_updates);
 
     if let Ok(st) = store.lock() {
         project_state(&window, st.state());
+    }
+
+    // Background brew-style update check for easi itself (never blocks startup).
+    {
+        let w = window.as_weak();
+        let roots_bg = runner.roots.clone();
+        std::thread::spawn(move || {
+            if let Some(latest) =
+                easi_core::self_update::check_for_easi_update(&roots_bg, env!("CARGO_PKG_VERSION"))
+            {
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(win) = w.upgrade() {
+                        win.set_easi_update_version(latest.into());
+                    }
+                });
+            }
+        });
     }
 
     // Wire UI callbacks -> pure dispatch into Redux store.
@@ -152,6 +171,39 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                 Action::KeepSource
             };
             dispatch_action(&w, &s, &r, act);
+        });
+    }
+    {
+        let r = Arc::clone(&runner);
+        window.on_toggle_auto_update(move |enabled| {
+            let _ = easi_core::self_update::set_auto_check_updates(&r.roots, enabled);
+        });
+    }
+    {
+        let w = window.as_weak();
+        window.on_run_self_update(move || {
+            let w = w.clone();
+            std::thread::spawn(move || {
+                let msg = match std::env::current_exe()
+                    .map_err(easi_core::EasiError::Io)
+                    .and_then(|exe| {
+                        easi_core::self_update::run_self_update(env!("CARGO_PKG_VERSION"), &exe)
+                    }) {
+                    Ok(easi_core::self_update::UpdateOutcome::Updated { to, .. }) => {
+                        format!("Updated easi to {to}. Restart easi to use the new version.")
+                    }
+                    Ok(easi_core::self_update::UpdateOutcome::AlreadyUpToDate { version }) => {
+                        format!("easi {version} is already up to date.")
+                    }
+                    Err(e) => format!("Update failed: {}", easi_core::format_user_error(&e)),
+                };
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(win) = w.upgrade() {
+                        win.set_easi_update_version("".into());
+                        win.set_status_text(msg.into());
+                    }
+                });
+            });
         });
     }
     {

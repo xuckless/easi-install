@@ -101,7 +101,8 @@ Every arrow is a row in the reducer match. Every unlisted `(state, action)` pair
 - [x] Pre-install permissions summary screen (planned writes + script capability warnings)
 - [ ] Optional system-wide installs (`/opt` via pkexec)
 - [ ] More app id / metadata sources as formats grow (snap-style `meta/`, AppImage update info, ELF `.note` / embedded version strings, icon-from-ELF resources)
-- [ ] Upstream update checks (AppImage zsync, GitHub releases)
+- [x] Automatic brew-style update check for `easi` itself (default on, 6h cache, opt-out via `easi config --auto-update false`, GUI toggle, or `EASI_NO_AUTO_UPDATE=1`)
+- [ ] Upstream update checks for installed apps (AppImage zsync, GitHub releases)
 
 ## Wishlist
 - [ ] `easi inspect <path>` — read-only inspection and trust summary without installing

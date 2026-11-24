@@ -44,6 +44,12 @@ pub enum Command {
     List,
     /// Update easi itself.
     SelfUpdate,
+    /// View or change easi settings (e.g. --auto-update true|false).
+    Config {
+        /// Enable or disable automatic easi update checks on use.
+        #[arg(long)]
+        auto_update: Option<bool>,
+    },
 }
 
 pub fn run(cli: Cli) -> ExitCode {
@@ -60,13 +66,54 @@ pub fn run(cli: Cli) -> ExitCode {
     }
 
     match cli.command {
-        Some(Command::Install { path }) => run_install_cmd(&roots, path, cli.yes),
-        Some(Command::Uninstall { app }) => run_uninstall_cmd(&roots, &app, cli.yes),
-        Some(Command::List) => run_list_cmd(&roots),
+        Some(Command::Install { path }) => {
+            maybe_notify_update(&roots);
+            run_install_cmd(&roots, path, cli.yes)
+        }
+        Some(Command::Uninstall { app }) => {
+            maybe_notify_update(&roots);
+            run_uninstall_cmd(&roots, &app, cli.yes)
+        }
+        Some(Command::List) => {
+            maybe_notify_update(&roots);
+            run_list_cmd(&roots)
+        }
         Some(Command::SelfUpdate) => run_self_update_cmd(),
+        Some(Command::Config { auto_update }) => run_config_cmd(&roots, auto_update),
         None => {
-            eprintln!("easi: pass a subcommand (`install`, `uninstall`, `list`) or `--setup`");
+            eprintln!(
+                "easi: pass a subcommand (`install`, `uninstall`, `list`, `config`) or `--setup`"
+            );
             ExitCode::FAILURE
+        }
+    }
+}
+
+fn maybe_notify_update(roots: &InstallRoots) {
+    let current = env!("CARGO_PKG_VERSION");
+    if let Some(latest) = easi_core::self_update::check_for_easi_update(roots, current) {
+        eprintln!(
+            "Notice: easi {latest} is available (current: {current}). Run `easi self-update` to upgrade (disable with `easi config --auto-update false` or EASI_NO_AUTO_UPDATE=1)."
+        );
+    }
+}
+
+fn run_config_cmd(roots: &InstallRoots, auto_update: Option<bool>) -> ExitCode {
+    match auto_update {
+        Some(enabled) => match easi_core::self_update::set_auto_check_updates(roots, enabled) {
+            Ok(cfg) => {
+                println!("auto_check_updates = {}", cfg.auto_check_updates);
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("easi: failed to save config: {}", format_user_error(&e));
+                ExitCode::FAILURE
+            }
+        },
+        None => {
+            let cfg = easi_core::self_update::load_config(roots);
+            println!("auto_check_updates = {}", cfg.auto_check_updates);
+            ExitCode::SUCCESS
         }
     }
 }

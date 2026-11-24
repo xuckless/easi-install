@@ -44,6 +44,10 @@ impl InstallRoots {
     pub fn previous_handlers_path(&self) -> PathBuf {
         self.easi_dir.join("previous_handlers.toml")
     }
+
+    pub fn config_path(&self) -> PathBuf {
+        self.easi_dir.join("config.toml")
+    }
 }
 
 /// Normalize a relative path and verify it cannot escape `root` (blocks `..`, root prefixes,
