@@ -105,7 +105,17 @@ pub fn detect_file_format(path: &Path) -> Result<Format, EasiError> {
     let mut file = File::open(path)?;
     let mut header = [0u8; 64];
     let n = file.read(&mut header)?;
-    detect_format(&header[..n]).ok_or_else(|| EasiError::UnsupportedFormat(path.to_path_buf()))
+    if let Some(fmt) = detect_format(&header[..n]) {
+        return Ok(fmt);
+    }
+    // Older AppImage Type 1 binaries omit `AI\x01` at offset 8 but carry ISO9660 `CD001` at 0x8001.
+    if n >= 4 && &header[..4] == b"\x7fELF" && file.seek(SeekFrom::Start(0x8001)).is_ok() {
+        let mut iso = [0u8; 5];
+        if file.read_exact(&mut iso).is_ok() && &iso == b"CD001" {
+            return Ok(Format::AppImageType1);
+        }
+    }
+    Err(EasiError::UnsupportedFormat(path.to_path_buf()))
 }
 
 /// Metadata collected for one entry during read-only inspection (no disk extraction).
@@ -219,6 +229,11 @@ fn list_tar<R: Read>(reader: R) -> Result<PackageContents, EasiError> {
                         contents.metainfo_files.push((raw_path.clone(), text));
                     }
                 }
+            } else if is_icon_path(&raw_path) && size <= MAX_ICON_BYTES {
+                let mut buf = Vec::new();
+                if entry.read_to_end(&mut buf).is_ok() {
+                    contents.embedded_icons.push((raw_path.clone(), buf));
+                }
             } else {
                 let mut magic = [0u8; 4];
                 let n = entry.read(&mut magic).unwrap_or(0);
@@ -276,6 +291,11 @@ fn list_zip(path: &Path) -> Result<PackageContents, EasiError> {
                     } else {
                         contents.metainfo_files.push((raw_path.clone(), text));
                     }
+                }
+            } else if is_icon_path(&raw_path) && size <= MAX_ICON_BYTES {
+                let mut buf = Vec::new();
+                if entry.read_to_end(&mut buf).is_ok() {
+                    contents.embedded_icons.push((raw_path.clone(), buf));
                 }
             } else {
                 let mut magic = [0u8; 4];

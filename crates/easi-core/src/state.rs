@@ -94,7 +94,7 @@ pub enum Effect {
         path: PathBuf,
     },
     RunInstall {
-        plan: InstallPlan,
+        plan: Box<InstallPlan>,
         replace_existing: bool,
     },
     CancelInstall,

@@ -200,6 +200,12 @@ fn project_state(win: &ui::AppWindow, state: &State) {
                 }
                 .into(),
             );
+            if let Some(img) = load_preview_icon(&plan.app_id, plan.icon_bytes.as_deref()) {
+                win.set_app_icon(img);
+                win.set_has_app_icon(true);
+            } else {
+                win.set_has_app_icon(false);
+            }
             project_trust(win, trust);
         }
         State::Conflict {
@@ -304,6 +310,30 @@ fn project_state(win: &ui::AppWindow, state: &State) {
             win.set_error_text(format!("{error}{suffix}").into());
         }
     }
+}
+
+fn load_preview_icon(app_id: &str, bytes: Option<&[u8]>) -> Option<slint::Image> {
+    let data = bytes?;
+    let ext = if data.starts_with(b"<svg") || data.starts_with(b"<?xml") {
+        "svg"
+    } else if data.starts_with(b"\x89PNG") {
+        "png"
+    } else {
+        return None;
+    };
+    let safe_id: String = app_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let path = std::env::temp_dir().join(format!("easi-preview-{safe_id}.{ext}"));
+    std::fs::write(&path, data).ok()?;
+    slint::Image::load_from_path(&path).ok()
 }
 
 fn format_bytes(bytes: u64) -> String {

@@ -173,7 +173,12 @@ pub fn score_icons(entries: &[ArchiveEntry], app_slug: &str) -> Vec<Candidate> {
             continue;
         }
         let lower = entry.path.to_ascii_lowercase();
-        if !(lower.ends_with(".png") || lower.ends_with(".svg") || lower.ends_with(".xpm")) {
+        let is_diricon = lower == ".diricon" || lower.ends_with("/.diricon");
+        if !(lower.ends_with(".png")
+            || lower.ends_with(".svg")
+            || lower.ends_with(".xpm")
+            || is_diricon)
+        {
             continue;
         }
         let base = Path::new(&entry.path)
@@ -181,7 +186,7 @@ pub fn score_icons(entries: &[ArchiveEntry], app_slug: &str) -> Vec<Candidate> {
             .map(|n| n.to_string_lossy().to_ascii_lowercase())
             .unwrap_or_default();
 
-        let mut score: i32 = 10;
+        let mut score: i32 = if is_diricon { 30 } else { 10 };
         if !app_slug.is_empty() && base.contains(app_slug) {
             score += 40;
         }
@@ -444,6 +449,13 @@ where
 
     let main_exec = exec_candidates[0].path.clone();
     let icon_path = icon_candidates.first().map(|c| c.path.clone());
+    let icon_bytes = icon_path.as_ref().and_then(|ip| {
+        contents
+            .embedded_icons
+            .iter()
+            .find(|(p, _)| p == ip)
+            .map(|(_, bytes)| bytes.clone())
+    });
     let startup_wm_class = desktop
         .and_then(|(_, text)| desktop_field(text, "StartupWMClass"))
         .or_else(|| guess_startup_wm_class(&main_exec));
@@ -458,6 +470,7 @@ where
         kind,
         main_exec,
         icon_path,
+        icon_bytes,
         desktop_entry: desktop.map(|(_, text)| text.clone()),
         startup_wm_class,
     };

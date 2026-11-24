@@ -55,6 +55,7 @@ pub struct InstallPlan {
     pub kind: AppKind,
     pub main_exec: String,
     pub icon_path: Option<String>,
+    pub icon_bytes: Option<Vec<u8>>,
     pub desktop_entry: Option<String>,
     pub startup_wm_class: Option<String>,
 }
@@ -92,6 +93,7 @@ impl ChoiceDraft {
             kind: self.kind,
             main_exec,
             icon_path: self.selected_icon,
+            icon_bytes: None,
             desktop_entry: self.desktop_entry,
             startup_wm_class: self.startup_wm_class,
         }

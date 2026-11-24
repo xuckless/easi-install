@@ -13,6 +13,8 @@ export component AppWindow inherits Window {
     in property <string> app-version: "";
     in property <string> app-id: "";
     in property <string> app-kind: "";
+    in property <image> app-icon;
+    in property <bool> has-app-icon: false;
     in property <string> status-text: "";
     in property <string> error-text: "";
     in property <string> conflict-text: "";
@@ -148,6 +150,13 @@ export component AppWindow inherits Window {
                     border-radius: 8px;
                     VerticalBox {
                         alignment: center;
+                        spacing: 4px;
+                        if root.has-app-icon: Image {
+                            source: root.app-icon;
+                            width: 40px;
+                            height: 40px;
+                            image-fit: contain;
+                        }
                         Text { text: root.app-name; horizontal-alignment: center; font-weight: 700; }
                         Text { text: root.app-kind; horizontal-alignment: center; font-size: 11px; }
                     }

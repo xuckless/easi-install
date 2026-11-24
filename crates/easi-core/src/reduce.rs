@@ -126,7 +126,7 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
                 progress: 0,
             },
             vec![Effect::RunInstall {
-                plan,
+                plan: Box::new(plan),
                 replace_existing: false,
             }],
         ),
@@ -262,7 +262,7 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
                 progress: 0,
             },
             vec![Effect::RunInstall {
-                plan,
+                plan: Box::new(plan),
                 replace_existing: true,
             }],
         ),
@@ -356,6 +356,7 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
                 kind: summary.kind,
                 main_exec: String::new(),
                 icon_path: None,
+                icon_bytes: None,
                 desktop_entry: None,
                 startup_wm_class: None,
             };
@@ -560,6 +561,7 @@ mod tests {
             kind: AppKind::Gui,
             main_exec: "foo.AppImage".into(),
             icon_path: Some("foo.png".into()),
+            icon_bytes: None,
             desktop_entry: None,
             startup_wm_class: Some("foo".into()),
         }
@@ -733,7 +735,7 @@ mod tests {
                     progress: 0,
                 },
                 expected_effects: vec![Effect::RunInstall {
-                    plan: plan.clone(),
+                    plan: Box::new(plan.clone()),
                     replace_existing: false,
                 }],
             },
@@ -761,7 +763,7 @@ mod tests {
                     progress: 0,
                 },
                 expected_effects: vec![Effect::RunInstall {
-                    plan: plan.clone(),
+                    plan: Box::new(plan.clone()),
                     replace_existing: true,
                 }],
             },

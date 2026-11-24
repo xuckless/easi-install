@@ -127,7 +127,12 @@ where
 
     let ops = plan_ops(plan.format, plan.kind);
     let mut resolved_exec: Option<PathBuf> = None;
-    let mut extracted_icon_bytes: Option<(String, Vec<u8>)> = None;
+    let mut stripped_prefix: Option<String> = None;
+    let mut extracted_icon_bytes: Option<(String, Vec<u8>)> = plan
+        .icon_path
+        .as_ref()
+        .zip(plan.icon_bytes.as_ref())
+        .map(|(p, b)| (p.clone(), b.clone()));
     let mut installed_icon_name: Option<String> = None;
 
     for (idx, op) in ops.iter().enumerate() {
@@ -170,8 +175,15 @@ where
                 extract_archive_safe(&plan.source_path, plan.format, staging.path())?;
                 fs::create_dir_all(&app_dir)?;
                 tx.record_dir(app_dir.clone());
-                copy_tree_recorded(staging.path(), &app_dir, tx)?;
-                let exec_path = safe_join(&app_dir, Path::new(&plan.main_exec))?;
+                let copy_src = if let Some(top) = single_top_dir(staging.path()) {
+                    stripped_prefix = Some(top.clone());
+                    staging.path().join(top)
+                } else {
+                    staging.path().to_path_buf()
+                };
+                copy_tree_recorded(&copy_src, &app_dir, tx)?;
+                let rel_exec = strip_top_prefix(&plan.main_exec, stripped_prefix.as_deref());
+                let exec_path = safe_join(&app_dir, Path::new(&rel_exec))?;
                 if exec_path.exists() {
                     let mut perms = fs::metadata(&exec_path)?.permissions();
                     perms.set_mode((perms.mode() & !0o6000) | 0o755);
@@ -188,7 +200,8 @@ where
                         installed_icon_name = Some(icon_name);
                     }
                 } else if let Some(icon_rel) = &plan.icon_path {
-                    let src = safe_join(&app_dir, Path::new(icon_rel))?;
+                    let rel_icon = strip_top_prefix(icon_rel, stripped_prefix.as_deref());
+                    let src = safe_join(&app_dir, Path::new(&rel_icon))?;
                     if src.exists() {
                         let bytes = fs::read(&src)?;
                         let icon_dest =
@@ -294,6 +307,29 @@ fn sanitize_dir_name(name: &str) -> String {
     }
 }
 
+fn single_top_dir(dir: &Path) -> Option<String> {
+    let mut entries = fs::read_dir(dir).ok()?.filter_map(Result::ok);
+    let first = entries.next()?;
+    if entries.next().is_some() {
+        return None;
+    }
+    if first.file_type().ok()?.is_dir() {
+        Some(first.file_name().to_string_lossy().into_owned())
+    } else {
+        None
+    }
+}
+
+fn strip_top_prefix(rel: &str, prefix: Option<&str>) -> String {
+    let cleaned = rel.trim_start_matches("./");
+    if let Some(p) = prefix
+        && let Some(rest) = cleaned.strip_prefix(&format!("{p}/"))
+    {
+        return rest.to_string();
+    }
+    cleaned.to_string()
+}
+
 fn write_hicolor_icon(
     roots: &InstallRoots,
     icon_name: &str,
@@ -302,9 +338,12 @@ fn write_hicolor_icon(
     tx: &mut Transaction,
 ) -> Result<Option<PathBuf>, EasiError> {
     let lower = rel_src.to_ascii_lowercase();
-    let (subdir, ext) = if lower.ends_with(".svg") {
+    let is_svg =
+        lower.ends_with(".svg") || bytes.starts_with(b"<svg") || bytes.starts_with(b"<?xml");
+    let is_png = lower.ends_with(".png") || bytes.starts_with(b"\x89PNG");
+    let (subdir, ext) = if is_svg {
         ("scalable/apps", "svg")
-    } else if lower.ends_with(".png") {
+    } else if is_png {
         ("256x256/apps", "png")
     } else {
         return Ok(None);
@@ -699,8 +738,8 @@ mod tests {
         let summary = execute_install(&roots, &plan, false, &cancel, |_, _| {}).expect("install");
         assert_eq!(summary.app_id, "coolapp");
 
-        // Verify installed binary has setuid stripped!
-        let bin_file = summary.install_dir.join("CoolApp/bin/coolapp");
+        // Verify installed binary has setuid stripped and single top-level dir was stripped!
+        let bin_file = summary.install_dir.join("bin/coolapp");
         assert!(bin_file.exists());
         let mode = fs::metadata(&bin_file).expect("meta").permissions().mode();
         assert_eq!(mode & 0o6000, 0, "setuid/setgid must be stripped");
@@ -709,7 +748,7 @@ mod tests {
         let desktop = roots.desktop_dir.join("coolapp.desktop");
         assert!(desktop.exists());
         let desktop_text = fs::read_to_string(&desktop).expect("read desktop");
-        assert!(desktop_text.contains("CoolApp/bin/coolapp"));
+        assert!(desktop_text.contains("bin/coolapp"));
         assert!(roots.icons_dir.join("256x256/apps/coolapp.png").exists());
         assert!(roots.bin_dir.join("coolapp").symlink_metadata().is_ok());
         assert_eq!(list_manifests(&roots).expect("list").len(), 1);
