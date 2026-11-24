@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use easi_core::desktop::{restore_handlers, run_setup, self_uninstall};
+use easi_core::desktop::{restore_handlers, run_setup_with_options, self_uninstall};
 use easi_core::install::{add_bin_to_shell_rc, find_app_data_dirs, uninstall_app_with_options};
 use easi_core::manifest::resolve_installed;
 use easi_core::reconcile::{probe_active_wm_class, reconcile_all, set_startup_wm_class};
@@ -27,9 +27,13 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     pub yes: bool,
 
-    /// Register easi as the default handler for supported package MIME types.
+    /// Register easi for AppImages (default double-click) and archives (Right-Click -> Open With).
     #[arg(long)]
     pub setup: bool,
+
+    /// Opt-in with `--setup`: also claim .zip/.tar.*/.7z/.jar as default double-click handlers.
+    #[arg(long)]
+    pub claim_archives: bool,
 
     /// Undo `easi --setup` and restore all remembered previous default MIME handlers.
     #[arg(long)]
@@ -133,7 +137,7 @@ pub fn run(cli: Cli) -> ExitCode {
     };
 
     if cli.setup {
-        return run_setup_cmd(&roots);
+        return run_setup_cmd(&roots, cli.claim_archives);
     }
     if cli.restore_handlers {
         return run_restore_handlers_cmd(&roots);
@@ -310,7 +314,7 @@ fn run_self_update_cmd() -> ExitCode {
     }
 }
 
-fn run_setup_cmd(roots: &InstallRoots) -> ExitCode {
+fn run_setup_cmd(roots: &InstallRoots, claim_archives: bool) -> ExitCode {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
@@ -318,9 +322,17 @@ fn run_setup_cmd(roots: &InstallRoots) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match run_setup(roots, &exe) {
+    match run_setup_with_options(roots, &exe, claim_archives) {
         Ok(saved) => {
-            println!("easi registered as default handler for supported package types.");
+            if claim_archives {
+                println!(
+                    "easi registered as default handler for AppImages and archives (.tar.*, .zip, .7z, .jar)."
+                );
+            } else {
+                println!(
+                    "easi registered as default handler for AppImages, and added to Right-Click -> Open With for archives (.tar.*, .zip, .7z, .jar, .sh)."
+                );
+            }
             println!(
                 "Remembered {} previous handler(s) in {}.",
                 saved.defaults.len(),

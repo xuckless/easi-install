@@ -27,7 +27,7 @@ Installs `easi` into `~/.local/bin/easi` (SHA-256 verified) and runs `easi --set
 ## Usage
 
 ### GUI
-- **Double-click** any downloaded package in your file manager (or right-click → **Open With → easi**), review the permissions/trust summary, and drag the app into **Applications** (or click **Install**).
+- **Double-click** any `.AppImage` — or **Right-Click → Open With → easi** on `.tar.*`, `.zip`, `.7z`, `.jar`, or `.sh` packages — review the permissions/trust summary, and drag the app into **Applications** (or click **Install**). *(Double-clicking regular `.zip`/`.tar.*` archives keeps your normal archive manager by default; pass `easi --setup --claim-archives` to opt in.)*
 - **Open `easi` directly** for the standalone **App Manager**: browse packages via the native OS file picker, check for upstream app updates, toggle automatic `easi` update checks, and uninstall apps in one click.
 - **Non-app archives** (documents, source trees, Windows binaries, distro packages) are handed off silently to your previous archive/file manager.
 

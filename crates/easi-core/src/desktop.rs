@@ -88,11 +88,15 @@ pub fn set_background_update_timer(
     }
 }
 
-/// MIME types easi claims as default handler on `easi --setup` (previous defaults are saved
-/// so non-app archives hand off silently).
-pub const SUPPORTED_MIMES: &[&str] = &[
-    "application/x-iso9660-appimage",
-    "application/vnd.appimage",
+/// MIME types easi claims as default double-click handler on `easi --setup`.
+/// Only AppImages are claimed by default (an AppImage is always an app, never photos/source code).
+pub const SUPPORTED_MIMES: &[&str] =
+    &["application/x-iso9660-appimage", "application/vnd.appimage"];
+
+/// MIME types advertised in `easi.desktop` for "Right-Click -> Open With -> easi" ONLY by default,
+/// so double-clicking random `.zip`/`.tar.*`/`.sh` files never hijacks the user's archive manager
+/// or text editor. Users can opt into double-click archive handling via `easi --setup --claim-archives`.
+pub const OPEN_WITH_ONLY_MIMES: &[&str] = &[
     "application/x-tar",
     "application/x-compressed-tar",
     "application/x-xz-compressed-tar",
@@ -103,12 +107,8 @@ pub const SUPPORTED_MIMES: &[&str] = &[
     "application/zip",
     "application/x-7z-compressed",
     "application/java-archive",
+    "application/x-shellscript",
 ];
-
-/// MIME types advertised in `easi.desktop` for "Right-Click -> Open With -> easi" ONLY,
-/// never hijacked as the default double-click handler (so `.sh` files still open in the user's
-/// text editor by default).
-pub const OPEN_WITH_ONLY_MIMES: &[&str] = &["application/x-shellscript"];
 
 const APPIMAGE_MIME_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
@@ -213,9 +213,20 @@ pub fn ensure_easi_desktop_and_icon(roots: &InstallRoots, easi_bin: &Path) {
     }
 }
 
-/// Register `easi.desktop`, install the Drop brand SVG icon, ensure AppImage MIME definition
-/// exists, remember previous default handlers, and set `easi.desktop` as the default handler.
+/// Register `easi.desktop`, install the Drop brand SVG icon, claim AppImages as default
+/// double-click handler, and advertise archives/scripts under Right-Click -> Open With.
 pub fn run_setup(roots: &InstallRoots, easi_bin: &Path) -> Result<SavedHandlers, EasiError> {
+    run_setup_with_options(roots, easi_bin, false)
+}
+
+/// Same as `run_setup`, with opt-in `claim_archives` to also claim `.zip`/`.tar.*`/`.7z`/`.jar`
+/// as default double-click handlers. When `claim_archives` is false, any previously claimed
+/// archive handlers are automatically restored to the user's archive manager.
+pub fn run_setup_with_options(
+    roots: &InstallRoots,
+    easi_bin: &Path,
+    claim_archives: bool,
+) -> Result<SavedHandlers, EasiError> {
     fs::create_dir_all(&roots.desktop_dir)?;
     let icon_dir = roots.icons_dir.join("scalable/apps");
     let icon_path = icon_dir.join("easi.svg");
@@ -267,7 +278,32 @@ pub fn run_setup(roots: &InstallRoots, easi_bin: &Path) -> Result<SavedHandlers,
     }
 
     let mut saved = load_saved_handlers(roots);
-    for mime in SUPPORTED_MIMES {
+    let mimes_to_claim: Vec<&str> = if claim_archives {
+        SUPPORTED_MIMES
+            .iter()
+            .chain(
+                OPEN_WITH_ONLY_MIMES
+                    .iter()
+                    .filter(|m| **m != "application/x-shellscript"),
+            )
+            .copied()
+            .collect()
+    } else {
+        // Restore any archive MIME types that an earlier version of easi may have claimed.
+        for mime in OPEN_WITH_ONLY_MIMES {
+            if let Some(prev) = saved.defaults.get(*mime)
+                && !prev.is_empty()
+                && prev != EASI_DESKTOP_ID
+            {
+                let _ = Command::new("xdg-mime")
+                    .args(["default", prev, mime])
+                    .output();
+            }
+        }
+        SUPPORTED_MIMES.to_vec()
+    };
+
+    for mime in mimes_to_claim {
         if let Ok(out) = Command::new("xdg-mime")
             .args(["query", "default", mime])
             .output()
@@ -275,7 +311,7 @@ pub fn run_setup(roots: &InstallRoots, easi_bin: &Path) -> Result<SavedHandlers,
         {
             let current = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !current.is_empty() && current != EASI_DESKTOP_ID {
-                saved.defaults.entry((*mime).to_string()).or_insert(current);
+                saved.defaults.entry(mime.to_string()).or_insert(current);
             }
         }
         let _ = Command::new("xdg-mime")

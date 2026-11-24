@@ -12,7 +12,7 @@ GitHub Releases; this file tracks only locked decisions and remaining work.
 | Lifecycle | Transactional manifest of every written file + atomic replace rollback + self-updated app reconciliation. |
 | Missing metadata | Score candidates → clear winner: DragStage + confirm. Ambiguous: step wizard (executable / icon / name). |
 | Terminal apps | Symlink into `~/.local/bin` only (no `.desktop`); offer PATH update interactively or via `--add-to-path`. |
-| File association | `easi` is default handler for supported package MIME types; previous defaults remembered and restorable; non-app archives hand off silently and close `easi`. |
+| File association | `easi` is default double-click handler for AppImages only; `.tar.*`/`.zip`/`.7z`/`.jar`/`.sh` are registered under Right-Click → Open With by default (opt-in `--claim-archives`). Previous defaults remembered and restorable; non-app archives hand off silently and close `easi`. |
 | Trust checks | Origin (`user.xdg.origin.url`) + size + SHA-256 + AppImage/detached sig verification + static script analyzer + path-escape/setuid/noexec/arch/runtime-dep guards. |
 | CLI | Full subcommand parity (`install`, `inspect`, `list`, `scan`, `adopt`, `repair`, `organize`, `forget`, `set-source`, `check-updates`, `update`, `export`, `import`, `uninstall`, `learn-wmclass`, `config`, `self-update`, `self-uninstall`). Safe `-y/--yes` (opt-in `--trash` and `--add-to-path`). |
 | GUI | Slint (Skia + FreeType renderer), Functional Calm design system + Drop brand, strict Redux projection of `Store` (`State` + `ManagerUi`). |

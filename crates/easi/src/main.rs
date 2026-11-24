@@ -53,6 +53,7 @@ fn main() -> ExitCode {
             return easi_cli::run(easi_cli::Cli {
                 yes: false,
                 setup: false,
+                claim_archives: false,
                 restore_handlers: false,
                 command: Some(easi_cli::Command::Install {
                     path,

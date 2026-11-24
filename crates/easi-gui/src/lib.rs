@@ -503,10 +503,7 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                 .map_err(easi_core::EasiError::Io)
                 .and_then(|exe| easi_core::desktop::run_setup(&r.roots, &exe))
             {
-                Ok(saved) => format!(
-                    "Registered easi for supported package types (remembered {} previous handler(s)).",
-                    saved.defaults.len()
-                ),
+                Ok(_) => "Registered easi as default for AppImages and added Right-Click → Open With for archives (restored your archive manager for .zip/.tar.*).".into(),
                 Err(e) => format!("Setup failed: {}", easi_core::format_user_error(&e)),
             };
             if let Some(win) = w.upgrade() {
