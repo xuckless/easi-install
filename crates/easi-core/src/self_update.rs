@@ -19,6 +19,8 @@ use crate::model::Format;
 use crate::roots::InstallRoots;
 
 pub const DEFAULT_REPO: &str = "xuckless/easi-install";
+pub const DEFAULT_MINISIGN_PUBKEY: &str =
+    "RWQnPmfJNaxDO2ecscxiezHEPZmmtizudyau8OENs5gw21DZWlmc2IRQ";
 const CHECK_INTERVAL_SECS: u64 = 6 * 60 * 60;
 
 fn default_true() -> bool {
@@ -151,20 +153,21 @@ pub fn run_self_update(
     download_file(&format!("{base_url}/{tarball_name}"), &tarball_path)?;
     download_file(&format!("{base_url}/SHA256SUMS"), &sums_path)?;
 
-    if let Ok(pubkey) = std::env::var("EASI_MINISIGN_PUBKEY")
-        && !pubkey.is_empty()
-    {
+    let pubkey = std::env::var("EASI_MINISIGN_PUBKEY")
+        .unwrap_or_else(|_| DEFAULT_MINISIGN_PUBKEY.to_string());
+    if !pubkey.is_empty() && has_minisign() {
         let sig_path = tmp.path().join("SHA256SUMS.minisig");
-        download_file(&format!("{base_url}/SHA256SUMS.minisig"), &sig_path)?;
-        let out = Command::new("minisign")
-            .args(["-V", "-P", &pubkey, "-m"])
-            .arg(&sums_path)
-            .output()
-            .map_err(|e| EasiError::Desktop(format!("minisign failed to run: {e}")))?;
-        if !out.status.success() {
-            return Err(EasiError::Desktop(
-                "minisign verification failed for release SHA256SUMS".into(),
-            ));
+        if download_file(&format!("{base_url}/SHA256SUMS.minisig"), &sig_path).is_ok() {
+            let out = Command::new("minisign")
+                .args(["-V", "-P", &pubkey, "-m"])
+                .arg(&sums_path)
+                .output()
+                .map_err(|e| EasiError::Desktop(format!("minisign failed to run: {e}")))?;
+            if !out.status.success() {
+                return Err(EasiError::Desktop(
+                    "minisign verification failed for release SHA256SUMS".into(),
+                ));
+            }
         }
     }
 
@@ -206,6 +209,15 @@ pub fn run_self_update(
         to: latest_ver.to_string(),
         bin_path: target_bin.to_path_buf(),
     })
+}
+
+fn has_minisign() -> bool {
+    Command::new("minisign")
+        .arg("-v")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
 }
 
 fn current_arch() -> Result<&'static str, EasiError> {

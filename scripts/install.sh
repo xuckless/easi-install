@@ -6,6 +6,7 @@ set -eu
 REPO="${EASI_REPO:-xuckless/easi-install}"
 VERSION="${EASI_VERSION:-latest}"
 BIN_DIR="${HOME}/.local/bin"
+MINISIGN_PUBKEY="${EASI_MINISIGN_PUBKEY:-RWQnPmfJNaxDO2ecscxiezHEPZmmtizudyau8OENs5gw21DZWlmc2IRQ}"
 
 die() {
     printf 'easi install error: %s\n' "$1" >&2
@@ -64,10 +65,12 @@ main() {
     curl -fsSL "${base_url}/${tarball}" -o "${tmpdir}/${tarball}"
     curl -fsSL "${base_url}/SHA256SUMS" -o "${tmpdir}/SHA256SUMS"
 
-    if [ -n "${EASI_MINISIGN_PUBKEY:-}" ] && command -v minisign >/dev/null 2>&1; then
-        curl -fsSL "${base_url}/SHA256SUMS.minisig" -o "${tmpdir}/SHA256SUMS.minisig"
-        minisign -V -P "${EASI_MINISIGN_PUBKEY}" -m "${tmpdir}/SHA256SUMS" >/dev/null \
-            || die "minisign signature verification failed"
+    if [ -n "${MINISIGN_PUBKEY}" ] && command -v minisign >/dev/null 2>&1; then
+        if curl -fsSL "${base_url}/SHA256SUMS.minisig" -o "${tmpdir}/SHA256SUMS.minisig" 2>/dev/null; then
+            minisign -V -P "${MINISIGN_PUBKEY}" -m "${tmpdir}/SHA256SUMS" >/dev/null \
+                || die "minisign signature verification failed"
+            printf 'Verified minisign signature.\n'
+        fi
     fi
 
     (cd "$tmpdir" && verify_sha256 "SHA256SUMS" "$tarball")
