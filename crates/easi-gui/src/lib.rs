@@ -181,6 +181,7 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
             let roots_bg = r.roots.clone();
             std::thread::spawn(move || {
                 let manifests = easi_core::manifest::list_manifests(&roots_bg).unwrap_or_default();
+                let mut available_count = 0usize;
                 let rows: Vec<ui::InstalledRow> = manifests
                     .iter()
                     .map(|m| {
@@ -188,7 +189,10 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                             easi_core::upstream::AppUpdateStatus::UpdateAvailable {
                                 latest_version,
                                 ..
-                            } => format!("Update available: {latest_version}"),
+                            } => {
+                                available_count += 1;
+                                format!("Update available: {latest_version}")
+                            }
                             easi_core::upstream::AppUpdateStatus::UpToDate { .. } => {
                                 "Up to date".into()
                             }
@@ -213,6 +217,12 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                         }
                     })
                     .collect();
+                if available_count > 0 {
+                    easi_core::desktop::notify(
+                        "App updates available",
+                        &format!("{available_count} installed app(s) have newer releases."),
+                    );
+                }
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(win) = w.upgrade() {
                         win.set_installed_apps(ModelRc::new(VecModel::from(rows)));
@@ -238,6 +248,10 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                         easi_core::self_update::run_self_update(env!("CARGO_PKG_VERSION"), &exe)
                     }) {
                     Ok(easi_core::self_update::UpdateOutcome::Updated { to, .. }) => {
+                        easi_core::desktop::notify(
+                            "easi updated",
+                            &format!("Updated easi to {to}. Restart easi to use it."),
+                        );
                         format!("Updated easi to {to}. Restart easi to use the new version.")
                     }
                     Ok(easi_core::self_update::UpdateOutcome::AlreadyUpToDate { version }) => {

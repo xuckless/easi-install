@@ -191,6 +191,54 @@ fn query_file_mime(path: &Path) -> Option<String> {
     if mime.is_empty() { None } else { Some(mime) }
 }
 
+/// Send a best-effort desktop notification (GNOME, KDE/SteamOS, Mint, CachyOS).
+/// Silently skipped in tests, headless sessions, or when `EASI_NO_NOTIFY=1`.
+pub fn notify(title: &str, body: &str) {
+    if cfg!(test) {
+        return;
+    }
+    if std::env::var("EASI_NO_NOTIFY")
+        .map(|v| !v.is_empty() && v != "0")
+        .unwrap_or(false)
+    {
+        return;
+    }
+    if std::env::var_os("WAYLAND_DISPLAY").is_none() && std::env::var_os("DISPLAY").is_none() {
+        return;
+    }
+    if Command::new("notify-send")
+        .args(["-a", "easi", title, body])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .is_ok()
+    {
+        return;
+    }
+    let _ = Command::new("gdbus")
+        .args([
+            "call",
+            "--session",
+            "--dest",
+            "org.freedesktop.Notifications",
+            "--object-path",
+            "/org/freedesktop/Notifications",
+            "--method",
+            "org.freedesktop.Notifications.Notify",
+            "easi",
+            "0",
+            "",
+            title,
+            body,
+            "[]",
+            "{}",
+            "5000",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {

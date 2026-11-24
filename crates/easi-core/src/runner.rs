@@ -40,11 +40,14 @@ impl EffectRunner {
                 vec![Action::InstalledLoaded(apps)]
             }
             Effect::UninstallApp { app_id } => match uninstall_app(&self.roots, &app_id) {
-                Ok(_) => vec![Action::UninstallFinished {
-                    app_id,
-                    ok: true,
-                    error: None,
-                }],
+                Ok(m) => {
+                    crate::desktop::notify("App uninstalled", &format!("Removed {}", m.name));
+                    vec![Action::UninstallFinished {
+                        app_id,
+                        ok: true,
+                        error: None,
+                    }]
+                }
                 Err(err) => vec![Action::UninstallFinished {
                     app_id,
                     ok: false,
@@ -78,7 +81,18 @@ impl EffectRunner {
                         actions.push(Action::InstallProgress { step, progress });
                     },
                 ) {
-                    Ok(summary) => actions.push(Action::InstallFinished(summary)),
+                    Ok(summary) => {
+                        let ver = summary
+                            .version
+                            .as_deref()
+                            .map(|v| format!(" {v}"))
+                            .unwrap_or_default();
+                        crate::desktop::notify(
+                            "App installed",
+                            &format!("{}{ver} is ready to use.", summary.name),
+                        );
+                        actions.push(Action::InstallFinished(summary));
+                    }
                     Err(err) => actions.push(Action::InstallFailed(format_user_error(&err))),
                 }
                 actions

@@ -109,7 +109,7 @@ Every arrow is a row in the reducer match. Every unlisted `(state, action)` pair
 - [ ] `easi inspect <path>` — read-only inspection and trust summary without installing
 - [ ] `--dry-run` flag for `easi install` — print planned writes without touching disk
 - [x] File picker button in empty GUI window (in addition to drag-and-drop and `easi <path>`)
-- [ ] Desktop notification on install completion
+- [x] Desktop notifications on install, uninstall, and updates (via `notify-send` / D-Bus fallback)
 
 ## Open questions
 - (none)

@@ -98,6 +98,10 @@ pub fn run(cli: Cli) -> ExitCode {
 fn maybe_notify_update(roots: &InstallRoots) {
     let current = env!("CARGO_PKG_VERSION");
     if let Some(latest) = easi_core::self_update::check_for_easi_update(roots, current) {
+        easi_core::desktop::notify(
+            "easi update available",
+            &format!("easi {latest} is available (run `easi self-update`)."),
+        );
         eprintln!(
             "Notice: easi {latest} is available (current: {current}). Run `easi self-update` to upgrade (disable with `easi config --auto-update false` or EASI_NO_AUTO_UPDATE=1)."
         );
@@ -136,6 +140,7 @@ fn run_check_updates_cmd(roots: &InstallRoots) -> ExitCode {
         println!("No apps installed by easi.");
         return ExitCode::SUCCESS;
     }
+    let mut available_count = 0usize;
     for m in &manifests {
         match easi_core::upstream::check_app_update(m) {
             easi_core::upstream::AppUpdateStatus::UpdateAvailable {
@@ -145,6 +150,7 @@ fn run_check_updates_cmd(roots: &InstallRoots) -> ExitCode {
                 release_url,
                 ..
             } => {
+                available_count += 1;
                 println!(
                     "{name:<24} UPDATE AVAILABLE: {current_version} -> {latest_version}  ({release_url})"
                 );
@@ -164,6 +170,12 @@ fn run_check_updates_cmd(roots: &InstallRoots) -> ExitCode {
             }
         }
     }
+    if available_count > 0 {
+        easi_core::desktop::notify(
+            "App updates available",
+            &format!("{available_count} installed app(s) have newer releases."),
+        );
+    }
     ExitCode::SUCCESS
 }
 
@@ -182,6 +194,10 @@ fn run_self_update_cmd() -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(easi_core::self_update::UpdateOutcome::Updated { from, to, bin_path }) => {
+            easi_core::desktop::notify(
+                "easi updated",
+                &format!("Updated easi from {from} to {to}."),
+            );
             println!("Updated easi from {from} to {to} ({}).", bin_path.display());
             ExitCode::SUCCESS
         }
@@ -248,6 +264,7 @@ fn run_uninstall_cmd(roots: &InstallRoots, app: &str, yes: bool) -> ExitCode {
     }
     match uninstall_app(roots, app) {
         Ok(m) => {
+            easi_core::desktop::notify("App uninstalled", &format!("Removed {}", m.name));
             println!("Uninstalled {} ({}).", m.name, m.app_id);
             ExitCode::SUCCESS
         }
