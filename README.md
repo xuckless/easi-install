@@ -1,47 +1,54 @@
 # easi
 
-Make installing *downloaded* Linux apps (AppImage, `.tar.{gz,xz,zst,bz2}`, `.zip`) as easy as macOS drag-to-Applications.
+Install *downloaded* Linux apps as easily as macOS drag-to-Applications — with clean uninstall, pre-install permissions, and zero root required.
 
 ## Quick install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/xuckl/easi-install/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/xuckless/easi-install/main/scripts/install.sh | sh
 ```
 
-The installer downloads the latest verified release binary into `~/.local/bin/easi` and runs `easi --setup` to register `easi` as the default handler for supported package MIME types (remembering your previous archive manager so non-app archives are handed off silently).
+Installs `easi` into `~/.local/bin/easi` (SHA-256 verified) and runs `easi --setup` to register it for supported package types while remembering your previous archive manager for non-app archives.
 
 ## Usage
 
 ### GUI
-- Double-click a downloaded `.AppImage`, `.tar.*`, or `.zip` in your file manager (or run `easi <path>`).
-- Drag the app icon onto **Applications** inside the window — or press **Install**.
-- If a package is ambiguous (multiple executables), a short step wizard lets you pick the main program, icon, and name.
-- Non-app archives (documents, source trees, Windows binaries) are silently handed off to your previous archive manager.
+- **Double-click** any downloaded package in your file manager (or right-click → **Open With → easi**), review the permissions/trust summary, and drag the app into **Applications** (or click **Install**).
+- **Open `easi` directly** for the standalone **App Manager**: browse packages via the native OS file picker, check for upstream app updates, toggle automatic `easi` update checks, and uninstall apps in one click.
+- **Non-app archives** (documents, source trees, Windows binaries, distro packages) are handed off silently to your previous archive/file manager.
 
 ### CLI
 ```sh
-easi install <path>        # interactive install (Y/N prompts)
-easi install -y <path>     # non-interactive / scriptable
-easi list                  # list apps installed by easi
-easi uninstall <app>       # clean uninstall (replays manifest in reverse)
-easi --setup               # register MIME types and remember previous handlers
-easi self-update           # update easi from GitHub Releases (SHA-256 verified)
+easi install <path>                # interactive install (Y/N prompts)
+easi install -y <path>             # non-interactive / scriptable
+easi list                          # list installed apps (reconciles self-updated apps)
+easi uninstall <app>               # clean uninstall (replays manifest in reverse)
+easi check-updates                 # check upstream releases (AppImage zsync / GitHub Releases)
+easi self-update                   # update easi from GitHub Releases (SHA-256 verified)
+easi config --auto-update false    # disable brew-style auto update checks (or EASI_NO_AUTO_UPDATE=1)
+easi --setup                       # register MIME types and remember previous handlers
 ```
 
-## Supported formats (v1)
-- AppImage (Type 1 and Type 2 — read via pure-Rust SquashFS, never executed during inspection)
-- `.tar.gz`, `.tar.xz`, `.tar.zst`, `.tar.bz2`
-- `.zip`
+## Supported formats
+- **AppImage** (Type 1 & Type 2 — read via pure-Rust SquashFS, never executed during inspection)
+- **Archives**: `.tar`, `.tar.gz`, `.tar.xz`, `.tar.zst`, `.tar.bz2`, `.tar.lz4`, `.zip`, `.7z`
+- **Single-file apps**: executable `.jar` (wrapped with `java -jar`), bare Linux ELF binaries
+- **Self-extracting scripts**: `.run`, `.sh`, `.bin` (statically scanned for privileges, network, system writes, and obfuscation; requires explicit user consent)
 
-## Install locations (per-user)
-`easi` never requires root in v1 and only writes under:
+*(Distro package formats like `.deb`, `.rpm`, Flatpak, Snap, and Arch `.pkg.tar.zst` are intentionally left to your distro's package manager.)*
+
+## Desktop environments
+Per-user only (works on immutable roots like SteamOS): **GNOME**, **KDE Plasma** (SteamOS / CachyOS), **Cinnamon / MATE / XFCE** (Linux Mint), **COSMIC**, **Hyprland**, and **Sway**.
+
+## Safety & install locations
+`easi` never requires root and only writes under:
 - `~/Applications/<App>/`
 - `~/.local/share/applications/`
 - `~/.local/share/icons/hicolor/`
 - `~/.local/bin/`
 - `~/.local/share/easi/installed/<app-id>.toml`
 
-Every install is transactional: failures or cancellations roll back cleanly, path escapes (`../` and symlink escapes) are blocked, setuid/setgid bits are stripped, and uninstall replays the recorded manifest in reverse.
+Every install is transactional with rollback on failure/cancel, blocks archive path/symlink escapes, strips setuid/setgid bits, reconciles apps that self-update in place, and sends desktop notifications on install, uninstall, and updates.
 
 ## Building from source
 

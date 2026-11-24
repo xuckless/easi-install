@@ -18,7 +18,7 @@ use crate::install::extract_archive_safe;
 use crate::model::Format;
 use crate::roots::InstallRoots;
 
-pub const DEFAULT_REPO: &str = "xuckl/easi-install";
+pub const DEFAULT_REPO: &str = "xuckless/easi-install";
 const CHECK_INTERVAL_SECS: u64 = 6 * 60 * 60;
 
 fn default_true() -> bool {

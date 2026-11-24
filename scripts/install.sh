@@ -1,9 +1,9 @@
 #!/bin/sh
 # easi installer — usage:
-#   curl -fsSL https://raw.githubusercontent.com/xuckl/easi-install/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/xuckless/easi-install/main/scripts/install.sh | sh
 set -eu
 
-REPO="${EASI_REPO:-xuckl/easi-install}"
+REPO="${EASI_REPO:-xuckless/easi-install}"
 VERSION="${EASI_VERSION:-latest}"
 BIN_DIR="${HOME}/.local/bin"
 
