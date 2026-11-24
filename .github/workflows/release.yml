@@ -1,0 +1,69 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev
+      - run: cargo build --release --bin easi
+      - name: Package tarball
+        env:
+          ARCH: ${{ matrix.arch }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p dist/easi
+          cp target/release/easi dist/easi/easi
+          chmod 0755 dist/easi/easi
+          tar -czf "dist/easi-${TAG}-linux-${ARCH}.tar.gz" -C dist easi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: easi-${{ matrix.arch }}
+          path: dist/easi-*.tar.gz
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Generate SHA256SUMS and optional minisign signature
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        run: |
+          cp scripts/install.sh release-assets/install.sh
+          (cd release-assets && sha256sum easi-*.tar.gz > SHA256SUMS)
+          if [ -n "${MINISIGN_SECRET_KEY}" ]; then
+            sudo apt-get update && sudo apt-get install -y minisign
+            printf '%s\n' "${MINISIGN_SECRET_KEY}" > /tmp/minisign.key
+            printf '%s\n' "${MINISIGN_PASSWORD}" | minisign -S -s /tmp/minisign.key -m release-assets/SHA256SUMS
+            rm -f /tmp/minisign.key
+          fi
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-assets/easi-*.tar.gz
+            release-assets/SHA256SUMS
+            release-assets/SHA256SUMS.minisig
+            release-assets/install.sh

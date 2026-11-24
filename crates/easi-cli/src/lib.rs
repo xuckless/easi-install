@@ -63,12 +63,34 @@ pub fn run(cli: Cli) -> ExitCode {
         Some(Command::Install { path }) => run_install_cmd(&roots, path, cli.yes),
         Some(Command::Uninstall { app }) => run_uninstall_cmd(&roots, &app, cli.yes),
         Some(Command::List) => run_list_cmd(&roots),
-        Some(Command::SelfUpdate) => {
-            eprintln!("easi: self-update ships in M5 (see TODO.md)");
-            ExitCode::FAILURE
-        }
+        Some(Command::SelfUpdate) => run_self_update_cmd(),
         None => {
             eprintln!("easi: pass a subcommand (`install`, `uninstall`, `list`) or `--setup`");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_self_update_cmd() -> ExitCode {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("easi: cannot locate current executable: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let current = env!("CARGO_PKG_VERSION");
+    match easi_core::self_update::run_self_update(current, &exe) {
+        Ok(easi_core::self_update::UpdateOutcome::AlreadyUpToDate { version }) => {
+            println!("easi {version} is already up to date.");
+            ExitCode::SUCCESS
+        }
+        Ok(easi_core::self_update::UpdateOutcome::Updated { from, to, bin_path }) => {
+            println!("Updated easi from {from} to {to} ({}).", bin_path.display());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("easi: self-update failed: {}", format_user_error(&e));
             ExitCode::FAILURE
         }
     }

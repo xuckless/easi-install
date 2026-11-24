@@ -12,6 +12,7 @@ pub mod plan;
 pub mod reduce;
 pub mod roots;
 pub mod runner;
+pub mod self_update;
 pub mod state;
 pub mod store;
 

@@ -89,10 +89,10 @@ Every arrow is a row in the reducer match. Every unlisted `(state, action)` pair
 - [x] DE quirk table: KDE Plasma (Wayland + X11) verified
 
 ## M5 — Ship easi
-- [ ] GitHub Releases pipeline: binaries + sha256 + minisign sig
-- [ ] `curl | sh` install script (installs easi via its own flow, runs `--setup`)
-- [ ] `easi self-update`
-- [ ] README / user docs
+- [x] GitHub Releases pipeline: binaries + sha256 + minisign sig
+- [x] `curl | sh` install script (installs easi via its own flow, runs `--setup`)
+- [x] `easi self-update`
+- [x] README / user docs
 
 ## Post-v1 backlog
 - [ ] Esoteric formats as encountered (`.run`/`.sh` self-extractors, 7z, bare binaries, …)
