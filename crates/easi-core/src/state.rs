@@ -1,5 +1,6 @@
 //! Explicit finite state, actions, and effects for the single easi store.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::model::{
@@ -114,6 +115,8 @@ pub struct ManagerUi {
     pub onboard_setup_handlers: bool,
     pub onboard_auto_update: bool,
     pub onboard_bg_timer: bool,
+    /// Per-app upstream update check results: `app_id -> (status_note, has_update)`.
+    pub update_statuses: BTreeMap<String, (String, bool)>,
 }
 
 impl Default for ManagerUi {
@@ -134,6 +137,7 @@ impl Default for ManagerUi {
             onboard_setup_handlers: true,
             onboard_auto_update: true,
             onboard_bg_timer: false,
+            update_statuses: BTreeMap::new(),
         }
     }
 }
@@ -156,6 +160,12 @@ pub enum UiAction {
     SetOnboardSetupHandlers(bool),
     SetOnboardAutoUpdate(bool),
     SetOnboardBgTimer(bool),
+    SetUpdateStatuses(BTreeMap<String, (String, bool)>),
+    SetAppUpdateStatus {
+        app_id: String,
+        note: String,
+        has_update: bool,
+    },
 }
 
 impl Default for State {

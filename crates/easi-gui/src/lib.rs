@@ -655,20 +655,43 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
             let s = Arc::clone(&s);
             let r = Arc::clone(&r);
             std::thread::spawn(move || {
-                let result_msg = match easi_core::manifest::resolve_installed(&r.roots, &id)
-                    .and_then(|m| easi_core::upstream::download_and_update_app(&r.roots, &m))
-                {
-                    Ok(summary) => format!(
-                        "Updated {} to {}.",
-                        summary.name,
-                        summary.version.as_deref().unwrap_or("latest")
-                    ),
-                    Err(e) => format!("Update failed: {}", easi_core::format_user_error(&e)),
-                };
+                let outcome = easi_core::manifest::resolve_installed(&r.roots, &id)
+                    .and_then(|m| easi_core::upstream::download_and_update_app(&r.roots, &m));
                 let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(win) = w.upgrade() {
-                        win.set_updating_app_id("".into());
-                        win.set_detail_feedback(result_msg.into());
+                    match outcome {
+                        Ok(summary) => {
+                            let ver = summary.version.as_deref().unwrap_or("latest");
+                            let msg = format!("Updated {} to {ver}.", summary.name);
+                            if let Some(win) = w.upgrade() {
+                                win.set_updating_app_id("".into());
+                                win.set_detail_feedback(msg.into());
+                            }
+                            dispatch_ui(
+                                &w,
+                                &s,
+                                UiAction::SetAppUpdateStatus {
+                                    app_id: id,
+                                    note: format!("Updated to {ver}"),
+                                    has_update: false,
+                                },
+                            );
+                        }
+                        Err(e) => {
+                            let err_msg = easi_core::format_user_error(&e);
+                            if let Some(win) = w.upgrade() {
+                                win.set_updating_app_id("".into());
+                                win.set_detail_feedback(format!("Update failed: {err_msg}").into());
+                            }
+                            dispatch_ui(
+                                &w,
+                                &s,
+                                UiAction::SetAppUpdateStatus {
+                                    app_id: id,
+                                    note: format!("Update failed: {err_msg}"),
+                                    has_update: true,
+                                },
+                            );
+                        }
                     }
                     dispatch_action(&w, &s, &r, Action::LoadInstalled);
                 });
@@ -782,6 +805,7 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
     }
     {
         let w = window.as_weak();
+        let s = Arc::clone(&store);
         let r = Arc::clone(&runner);
         window.on_check_app_updates(move || {
             if let Some(win) = w.upgrade() {
@@ -791,35 +815,34 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                 win.set_checking_updates(true);
             }
             let w = w.clone();
-            let roots_bg = r.roots.clone();
+            let s = Arc::clone(&s);
+            let r = Arc::clone(&r);
             std::thread::spawn(move || {
-                let manifests = easi_core::manifest::list_manifests(&roots_bg).unwrap_or_default();
+                // Reconcile first so self-updated apps have fresh local versions before comparing.
+                let manifests = easi_core::reconcile::reconcile_all(&r.roots).unwrap_or_default();
                 let mut available_count = 0usize;
-                let rows_data: Vec<(easi_core::InstalledApp, String, bool)> = manifests
-                    .iter()
-                    .map(|m| {
-                        let (note, has_update) = match easi_core::upstream::check_app_update(m) {
-                            easi_core::upstream::AppUpdateStatus::UpdateAvailable {
-                                latest_version,
-                                ..
-                            } => {
-                                available_count += 1;
-                                (format!("Update available: {latest_version}"), true)
-                            }
-                            easi_core::upstream::AppUpdateStatus::UpToDate { .. } => {
-                                ("Up to date".into(), false)
-                            }
-                            easi_core::upstream::AppUpdateStatus::Unsupported { .. } => {
-                                ("No upstream update source".into(), false)
-                            }
-                            easi_core::upstream::AppUpdateStatus::CheckFailed {
-                                reason, ..
-                            } => (format!("Check failed: {reason}"), false),
-                        };
-                        let app = m.to_installed_app_with_sizes(&roots_bg);
-                        (app, note, has_update)
-                    })
-                    .collect();
+                let mut status_map = std::collections::BTreeMap::new();
+                for m in &manifests {
+                    let (note, has_update) = match easi_core::upstream::check_app_update(m) {
+                        easi_core::upstream::AppUpdateStatus::UpdateAvailable {
+                            latest_version,
+                            ..
+                        } => {
+                            available_count += 1;
+                            (format!("Update available: {latest_version}"), true)
+                        }
+                        easi_core::upstream::AppUpdateStatus::UpToDate { .. } => {
+                            ("Up to date".into(), false)
+                        }
+                        easi_core::upstream::AppUpdateStatus::Unsupported { .. } => {
+                            ("No upstream update source".into(), false)
+                        }
+                        easi_core::upstream::AppUpdateStatus::CheckFailed { reason, .. } => {
+                            (format!("Check failed: {reason}"), false)
+                        }
+                    };
+                    status_map.insert(m.app_id.clone(), (note, has_update));
+                }
                 if available_count > 0 {
                     easi_core::desktop::notify(
                         "App updates available",
@@ -828,32 +851,10 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                 }
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(win) = w.upgrade() {
-                        let rows: Vec<ui::InstalledRow> = rows_data
-                            .into_iter()
-                            .map(|(app, note, has_update)| {
-                                let (icon, has_icon) =
-                                    load_installed_row_icon(&roots_bg, &app.app_id);
-                                ui::InstalledRow {
-                                    app_id: app.app_id.into(),
-                                    name: app.name.into(),
-                                    version: app.version.unwrap_or_default().into(),
-                                    kind: match app.kind {
-                                        AppKind::Gui => "GUI".into(),
-                                        AppKind::Terminal => "CLI".into(),
-                                    },
-                                    size_text: format_app_size(app.size_bytes, app.data_size_bytes)
-                                        .into(),
-                                    update_note: note.into(),
-                                    has_update,
-                                    icon,
-                                    has_icon,
-                                }
-                            })
-                            .collect();
-                        win.set_installed_apps(ModelRc::new(VecModel::from(rows)));
-                        win.set_outdated_count(available_count as i32);
                         win.set_checking_updates(false);
                     }
+                    dispatch_ui(&w, &s, UiAction::SetUpdateStatuses(status_map));
+                    dispatch_action(&w, &s, &r, Action::LoadInstalled);
                 });
             });
         });
@@ -873,20 +874,45 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
             let s = Arc::clone(&s);
             let r = Arc::clone(&r);
             std::thread::spawn(move || {
-                let manifests = easi_core::manifest::list_manifests(&r.roots).unwrap_or_default();
+                let manifests = easi_core::reconcile::reconcile_all(&r.roots).unwrap_or_default();
+                let mut status_map = std::collections::BTreeMap::new();
                 for m in &manifests {
-                    if matches!(
-                        easi_core::upstream::check_app_update(m),
-                        easi_core::upstream::AppUpdateStatus::UpdateAvailable { .. }
-                    ) {
-                        let _ = easi_core::upstream::download_and_update_app(&r.roots, m);
+                    match easi_core::upstream::check_app_update(m) {
+                        easi_core::upstream::AppUpdateStatus::UpdateAvailable { .. } => {
+                            match easi_core::upstream::download_and_update_app(&r.roots, m) {
+                                Ok(summary) => {
+                                    let ver = summary.version.as_deref().unwrap_or("latest");
+                                    status_map.insert(
+                                        m.app_id.clone(),
+                                        (format!("Updated to {ver}"), false),
+                                    );
+                                }
+                                Err(e) => {
+                                    status_map.insert(
+                                        m.app_id.clone(),
+                                        (
+                                            format!(
+                                                "Update failed: {}",
+                                                easi_core::format_user_error(&e)
+                                            ),
+                                            true,
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                        easi_core::upstream::AppUpdateStatus::UpToDate { .. } => {
+                            status_map.insert(m.app_id.clone(), ("Up to date".into(), false));
+                        }
+                        easi_core::upstream::AppUpdateStatus::Unsupported { .. }
+                        | easi_core::upstream::AppUpdateStatus::CheckFailed { .. } => {}
                     }
                 }
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(win) = w.upgrade() {
                         win.set_updating_app_id("".into());
-                        win.set_outdated_count(0);
                     }
+                    dispatch_ui(&w, &s, UiAction::SetUpdateStatuses(status_map));
                     dispatch_action(&w, &s, &r, Action::LoadInstalled);
                 });
             });
@@ -1297,6 +1323,12 @@ fn project_state(win: &ui::AppWindow, state: &State, ui: &ManagerUi) {
             }
 
             let roots_opt = InstallRoots::default_user().ok();
+            let outdated_count = ui
+                .update_statuses
+                .values()
+                .filter(|(_, has_update)| *has_update)
+                .count() as i32;
+            win.set_outdated_count(outdated_count);
             let rows: Vec<ui::InstalledRow> = filtered
                 .into_iter()
                 .map(|app| {
@@ -1304,6 +1336,11 @@ fn project_state(win: &ui::AppWindow, state: &State, ui: &ManagerUi) {
                         .as_ref()
                         .map(|r| load_installed_row_icon(r, &app.app_id))
                         .unwrap_or_else(|| (slint::Image::default(), false));
+                    let (update_note, has_update) = ui
+                        .update_statuses
+                        .get(&app.app_id)
+                        .cloned()
+                        .unwrap_or_default();
                     ui::InstalledRow {
                         app_id: app.app_id.clone().into(),
                         name: app.name.clone().into(),
@@ -1313,8 +1350,8 @@ fn project_state(win: &ui::AppWindow, state: &State, ui: &ManagerUi) {
                             AppKind::Terminal => "CLI".into(),
                         },
                         size_text: format_app_size(app.size_bytes, app.data_size_bytes).into(),
-                        update_note: "".into(),
-                        has_update: false,
+                        update_note: update_note.into(),
+                        has_update,
                         icon,
                         has_icon,
                     }
