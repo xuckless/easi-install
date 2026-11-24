@@ -62,16 +62,16 @@ Every arrow is a row in the reducer match. Every unlisted `(state, action)` pair
 - [x] Trust summary: origin xattr, size, sha256, signature check, perms/escape scan
 
 ## M2 — Install engine + CLI
-- [ ] Install plan as data: `Format × AppKind → [Step]`
-- [ ] Safe extractor: temp dir, canonicalized paths under root, strip setuid
-- [ ] Transaction: manifest of created files, rollback on failure/cancel
-- [ ] Wiring: `.desktop` (rewritten `Exec`/`Icon`), hicolor icons, `~/.local/bin` symlink
-- [ ] Refresh: `update-desktop-database`, `gtk-update-icon-cache` / `kbuildsycoca` (via DE table)
-- [ ] Conflict detection by app id → replace flow
-- [ ] Manifest store (`~/.local/share/easi/installed/<id>.toml`)
-- [ ] `easi install | uninstall | list`, `-y`, Y/N prompts
-- [ ] PATH check + offer to fix shell rc
-- [ ] Offer move-to-trash (XDG trash spec)
+- [x] Install plan as data: `Format × AppKind → [Step]`
+- [x] Safe extractor: temp dir, canonicalized paths under root, strip setuid
+- [x] Transaction: manifest of created files, rollback on failure/cancel
+- [x] Wiring: `.desktop` (rewritten `Exec`/`Icon`), hicolor icons, `~/.local/bin` symlink
+- [x] Refresh: `update-desktop-database`, `gtk-update-icon-cache` / `kbuildsycoca` (via DE table)
+- [x] Conflict detection by app id → replace flow
+- [x] Manifest store (`~/.local/share/easi/installed/<id>.toml`)
+- [x] `easi install | uninstall | list`, `-y`, Y/N prompts
+- [x] PATH check + offer to fix shell rc
+- [x] Offer move-to-trash (XDG trash spec)
 
 ## M3 — GUI (minimal Slint)
 - [ ] Drop window: app icon, name/version, Applications folder, in-window drag + Install button
