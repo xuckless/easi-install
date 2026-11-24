@@ -122,6 +122,7 @@ Every arrow is a row in the reducer match. Every unlisted `(state, action)` pair
 - [ ] OS drag-and-drop onto the App Manager window (drop packages straight from Nautilus/Dolphin/Nemo)
 - [ ] Launch button, "Open Folder", and search/filter (`All` / `GUI` / `CLI`) in the GUI App Manager
 - [x] `StartupWMClass` learning (`easi learn-wmclass <app> [class]` with active window `xprop` probe to prevent duplicate dock/taskbar icons)
+- [x] Distro/arch awareness: ELF arch-mismatch warning (Asahi/ARM64), NixOS `appimage-run`/`nix-ld` detection, musl-host warning (Alpine), SELinux `restorecon` (Fedora/RHEL), and Pantheon/Budgie/LXQt/Niri/River/i3/bspwm DE quirks
 - [ ] Portable app-list backup (`easi export` / `easi import`) to reinstall upstream-tracked apps on a new Linux machine or fresh SteamOS/CachyOS install
 
 ## Open questions

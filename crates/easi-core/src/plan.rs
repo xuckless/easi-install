@@ -305,6 +305,55 @@ pub const DE_QUIRKS: &[DeQuirk] = &[
         refresh_gtk_icon_cache: true,
         refresh_desktop_db: true,
     },
+    DeQuirk {
+        env_needle: "PANTHEON",
+        name: "Pantheon",
+        refresh_kde_sycoca: false,
+        refresh_gtk_icon_cache: true,
+        refresh_desktop_db: true,
+    },
+    DeQuirk {
+        env_needle: "BUDGIE",
+        name: "Budgie",
+        refresh_kde_sycoca: false,
+        refresh_gtk_icon_cache: true,
+        refresh_desktop_db: true,
+    },
+    DeQuirk {
+        env_needle: "LXQT",
+        name: "LXQt",
+        refresh_kde_sycoca: false,
+        refresh_gtk_icon_cache: true,
+        refresh_desktop_db: true,
+    },
+    DeQuirk {
+        env_needle: "NIRI",
+        name: "Niri",
+        refresh_kde_sycoca: false,
+        refresh_gtk_icon_cache: true,
+        refresh_desktop_db: true,
+    },
+    DeQuirk {
+        env_needle: "RIVER",
+        name: "River",
+        refresh_kde_sycoca: false,
+        refresh_gtk_icon_cache: true,
+        refresh_desktop_db: true,
+    },
+    DeQuirk {
+        env_needle: "I3",
+        name: "i3",
+        refresh_kde_sycoca: false,
+        refresh_gtk_icon_cache: true,
+        refresh_desktop_db: true,
+    },
+    DeQuirk {
+        env_needle: "BSPWM",
+        name: "bspwm",
+        refresh_kde_sycoca: false,
+        refresh_gtk_icon_cache: true,
+        refresh_desktop_db: true,
+    },
 ];
 
 pub const GENERIC_DE: DeQuirk = DeQuirk {

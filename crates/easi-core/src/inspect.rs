@@ -292,13 +292,55 @@ pub fn build_trust_summary(
 
     let signature = check_signature(path, contents.has_appimage_sig_section);
     let mut warnings = Vec::new();
-    if matches!(format, Format::AppImageType1 | Format::AppImageType2)
-        && !crate::install::has_libfuse2()
-    {
+    let is_appimage_fmt = matches!(format, Format::AppImageType1 | Format::AppImageType2);
+    if is_appimage_fmt && crate::install::is_nixos() {
+        if crate::install::has_appimage_run() {
+            warnings
+                .push("NixOS detected — easi will wrap this AppImage with `appimage-run`".into());
+        } else if !crate::install::has_nix_ld() {
+            warnings.push(
+                "NixOS detected without `appimage-run` or `nix-ld` — AppImages/ELFs may require `programs.nix-ld.enable = true` or `appimage-run`"
+                    .into(),
+            );
+        }
+    } else if is_appimage_fmt && !crate::install::has_libfuse2() {
         warnings.push(
             "libfuse.so.2 not found — easi will create an APPIMAGE_EXTRACT_AND_RUN=1 wrapper so this AppImage launches cleanly"
                 .into(),
         );
+    }
+    if crate::install::is_musl_only_host()
+        && (is_appimage_fmt
+            || format == Format::BareElf
+            || contents.entries.iter().any(|e| e.is_elf))
+    {
+        warnings.push(
+            "musl-only Linux host detected (e.g. Alpine/postmarketOS) — glibc binaries may need gcompat or a compatibility layer"
+                .into(),
+        );
+    }
+    // Check ELF architecture mismatch (e.g. x86_64 binary on Asahi Linux / ARM64).
+    let host_arch = std::env::consts::ARCH;
+    let elf_arch_opt = contents
+        .entries
+        .iter()
+        .find_map(|e| e.elf_arch)
+        .or_else(|| {
+            if is_appimage_fmt {
+                let mut f = File::open(path).ok()?;
+                let mut hdr = [0u8; 20];
+                let n = f.read(&mut hdr).ok()?;
+                crate::detect::elf_arch_from_header(&hdr[..n])
+            } else {
+                None
+            }
+        });
+    if let Some(bin_arch) = elf_arch_opt
+        && bin_arch != host_arch
+    {
+        warnings.push(format!(
+            "Architecture mismatch: binary is built for {bin_arch}, but this machine is {host_arch} (may not run without emulation)"
+        ));
     }
 
     for entry in &contents.entries {

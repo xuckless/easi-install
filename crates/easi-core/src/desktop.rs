@@ -218,6 +218,8 @@ pub fn handoff_non_app(roots: &InstallRoots, path: &Path) -> Result<(), EasiErro
         "caja",
         "thunar",
         "cosmic-files",
+        "pcmanfm",
+        "pcmanfm-qt",
     ] {
         if Command::new(fallback).arg(path).spawn().is_ok() {
             return Ok(());

@@ -155,9 +155,13 @@ where
                 perms.set_mode((perms.mode() & !0o6000) | 0o755);
                 fs::set_permissions(&dest, perms)?;
                 tx.record_file(dest.clone());
-                // If this is an AppImage and FUSE2 is missing (common on Ubuntu 24.04+/Fedora/CachyOS),
-                // generate a wrapper with APPIMAGE_EXTRACT_AND_RUN=1 so it always launches cleanly.
-                if matches!(op, PlanOp::CopyAppImage) && !has_libfuse2() {
+                // Wrap AppImages on NixOS (`appimage-run`) or FUSE2-less distros
+                // (`APPIMAGE_EXTRACT_AND_RUN=1`) so they always launch cleanly.
+                let nix_wrap =
+                    matches!(op, PlanOp::CopyAppImage) && is_nixos() && has_appimage_run();
+                let fuse_wrap =
+                    matches!(op, PlanOp::CopyAppImage) && !is_nixos() && !has_libfuse2();
+                if nix_wrap || fuse_wrap {
                     let bin_name = plan
                         .app_id
                         .strip_prefix("easi.")
@@ -167,10 +171,17 @@ where
                         .unwrap_or(&plan.app_id)
                         .to_ascii_lowercase();
                     let wrapper = safe_join(&app_dir, Path::new(&format!("{bin_name}-run.sh")))?;
-                    let script = format!(
-                        "#!/bin/sh\nexport APPIMAGE_EXTRACT_AND_RUN=1\nexec \"{}\" \"$@\"\n",
-                        dest.to_string_lossy()
-                    );
+                    let script = if nix_wrap {
+                        format!(
+                            "#!/bin/sh\nexec appimage-run \"{}\" \"$@\"\n",
+                            dest.to_string_lossy()
+                        )
+                    } else {
+                        format!(
+                            "#!/bin/sh\nexport APPIMAGE_EXTRACT_AND_RUN=1\nexec \"{}\" \"$@\"\n",
+                            dest.to_string_lossy()
+                        )
+                    };
                     fs::write(&wrapper, script)?;
                     fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755))?;
                     tx.record_file(wrapper.clone());
@@ -384,6 +395,34 @@ pub fn has_libfuse2() -> bool {
         "/lib64/libfuse.so.2",
     ];
     CANDIDATES.iter().any(|p| Path::new(p).exists())
+}
+
+pub fn is_nixos() -> bool {
+    Path::new("/etc/NIXOS").exists()
+}
+
+pub fn has_appimage_run() -> bool {
+    Command::new("appimage-run")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
+}
+
+pub fn has_nix_ld() -> bool {
+    Path::new("/run/current-system/sw/share/nix-ld").exists()
+        || std::env::var_os("NIX_LD").is_some()
+}
+
+pub fn is_musl_only_host() -> bool {
+    let has_musl = Path::new("/lib/ld-musl-x86_64.so.1").exists()
+        || Path::new("/lib/ld-musl-aarch64.so.1").exists();
+    let has_glibc = Path::new("/lib64/ld-linux-x86-64.so.2").exists()
+        || Path::new("/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2").exists()
+        || Path::new("/lib/ld-linux-aarch64.so.1").exists()
+        || Path::new("/usr/lib/ld-linux-x86-64.so.2").exists();
+    has_musl && !has_glibc
 }
 
 fn sanitize_dir_name(name: &str) -> String {
@@ -741,6 +780,15 @@ pub fn refresh_desktop_caches(roots: &InstallRoots) {
         let _ = Command::new("kbuildsycoca6")
             .output()
             .or_else(|_| Command::new("kbuildsycoca5").output());
+    }
+    // Keep SELinux contexts clean on Fedora/RHEL/Silverblue/Bazzite (no-op elsewhere).
+    if roots.applications_dir.exists() {
+        let _ = Command::new("restorecon")
+            .args(["-RF"])
+            .arg(&roots.applications_dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
     }
 }
 

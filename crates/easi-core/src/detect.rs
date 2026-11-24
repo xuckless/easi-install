@@ -177,7 +177,27 @@ pub struct ArchiveEntry {
     pub is_symlink: bool,
     pub symlink_target: Option<String>,
     pub is_elf: bool,
+    pub elf_arch: Option<&'static str>,
     pub is_script: bool,
+}
+
+/// Map ELF `e_machine` (offset 18, little-endian u16) to Rust's `std::env::consts::ARCH` name.
+pub fn elf_arch_from_header(header: &[u8]) -> Option<&'static str> {
+    if header.len() < 20 || &header[0..4] != b"\x7fELF" {
+        return None;
+    }
+    let machine = u16::from_le_bytes([header[18], header[19]]);
+    const ARCH_TABLE: &[(u16, &str)] = &[
+        (62, "x86_64"),
+        (183, "aarch64"),
+        (3, "x86"),
+        (40, "arm"),
+        (243, "riscv64"),
+    ];
+    ARCH_TABLE
+        .iter()
+        .find(|(m, _)| *m == machine)
+        .map(|(_, name)| *name)
 }
 
 /// Small metadata files extracted in memory during inspection.
@@ -336,6 +356,7 @@ fn list_tar<R: Read>(reader: R) -> Result<PackageContents, EasiError> {
             .map(|p| p.to_string_lossy().into_owned());
 
         let mut is_elf = false;
+        let mut elf_arch = None;
         let mut is_script = false;
 
         if !is_dir && !is_symlink && size > 0 {
@@ -361,9 +382,10 @@ fn list_tar<R: Read>(reader: R) -> Result<PackageContents, EasiError> {
                     contents.embedded_icons.push((raw_path.clone(), buf));
                 }
             } else {
-                let mut magic = [0u8; 4];
+                let mut magic = [0u8; 20];
                 let n = entry.read(&mut magic).unwrap_or(0);
-                is_elf = n >= 4 && &magic == b"\x7fELF";
+                is_elf = n >= 4 && &magic[..4] == b"\x7fELF";
+                elf_arch = elf_arch_from_header(&magic[..n]);
                 is_script = n >= 2 && &magic[..2] == b"#!";
             }
         }
@@ -376,6 +398,7 @@ fn list_tar<R: Read>(reader: R) -> Result<PackageContents, EasiError> {
             is_symlink,
             symlink_target,
             is_elf,
+            elf_arch,
             is_script,
         });
     }
@@ -399,6 +422,7 @@ fn list_zip(path: &Path) -> Result<PackageContents, EasiError> {
         let is_symlink = (mode & 0o170000) == 0o120000;
         let mut symlink_target = None;
         let mut is_elf = false;
+        let mut elf_arch = None;
         let mut is_script = false;
 
         if is_symlink && size <= 4096 {
@@ -429,9 +453,10 @@ fn list_zip(path: &Path) -> Result<PackageContents, EasiError> {
                     contents.embedded_icons.push((raw_path.clone(), buf));
                 }
             } else {
-                let mut magic = [0u8; 4];
+                let mut magic = [0u8; 20];
                 let n = entry.read(&mut magic).unwrap_or(0);
-                is_elf = n >= 4 && &magic == b"\x7fELF";
+                is_elf = n >= 4 && &magic[..4] == b"\x7fELF";
+                elf_arch = elf_arch_from_header(&magic[..n]);
                 is_script = n >= 2 && &magic[..2] == b"#!";
             }
         }
@@ -444,6 +469,7 @@ fn list_zip(path: &Path) -> Result<PackageContents, EasiError> {
             is_symlink,
             symlink_target,
             is_elf,
+            elf_arch,
             is_script,
         });
     }
@@ -615,6 +641,7 @@ fn list_appimage_type2(path: &Path) -> Result<PackageContents, EasiError> {
                     is_symlink: false,
                     symlink_target: None,
                     is_elf: false,
+                    elf_arch: None,
                     is_script: false,
                 });
             }
@@ -627,6 +654,7 @@ fn list_appimage_type2(path: &Path) -> Result<PackageContents, EasiError> {
                     is_symlink: true,
                     symlink_target: Some(sym.link.to_string_lossy().into_owned()),
                     is_elf: false,
+                    elf_arch: None,
                     is_script: false,
                 });
             }
@@ -657,6 +685,7 @@ fn list_appimage_type2(path: &Path) -> Result<PackageContents, EasiError> {
                     is_symlink: false,
                     symlink_target: None,
                     is_elf: false,
+                    elf_arch: None,
                     is_script: false,
                 });
             }
@@ -679,6 +708,7 @@ fn list_sevenz(path: &Path) -> Result<PackageContents, EasiError> {
             let size = entry.size();
             let is_dir = entry.is_directory();
             let mut is_elf = false;
+            let mut elf_arch = None;
             let mut is_script = false;
 
             if !is_dir && size > 0 {
@@ -704,9 +734,10 @@ fn list_sevenz(path: &Path) -> Result<PackageContents, EasiError> {
                         contents.embedded_icons.push((raw_path.clone(), buf));
                     }
                 } else {
-                    let mut magic = [0u8; 4];
+                    let mut magic = [0u8; 20];
                     let n = data.read(&mut magic).unwrap_or(0);
-                    is_elf = n >= 4 && &magic == b"\x7fELF";
+                    is_elf = n >= 4 && &magic[..4] == b"\x7fELF";
+                    elf_arch = elf_arch_from_header(&magic[..n]);
                     is_script = n >= 2 && &magic[..2] == b"#!";
                 }
             }
@@ -719,6 +750,7 @@ fn list_sevenz(path: &Path) -> Result<PackageContents, EasiError> {
                 is_symlink: false,
                 symlink_target: None,
                 is_elf,
+                elf_arch,
                 is_script,
             });
             Ok(true)
@@ -751,9 +783,15 @@ fn parse_elf_package_note(file: &mut File) -> (Option<String>, Option<String>) {
 
 fn list_single_executable(path: &Path) -> Result<PackageContents, EasiError> {
     let meta = std::fs::metadata(path)?;
-    let (meta_name, meta_version) = File::open(path)
-        .map(|mut f| parse_elf_package_note(&mut f))
-        .unwrap_or((None, None));
+    let (meta_name, meta_version, elf_arch) = File::open(path)
+        .map(|mut f| {
+            let mut hdr = [0u8; 20];
+            let n = f.read(&mut hdr).unwrap_or(0);
+            let arch = elf_arch_from_header(&hdr[..n]);
+            let (nm, ver) = parse_elf_package_note(&mut f);
+            (nm, ver, arch)
+        })
+        .unwrap_or((None, None, None));
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -767,6 +805,7 @@ fn list_single_executable(path: &Path) -> Result<PackageContents, EasiError> {
             is_symlink: false,
             symlink_target: None,
             is_elf: true,
+            elf_arch,
             is_script: false,
         }],
         meta_name,
@@ -889,6 +928,7 @@ fn inspect_shell_installer(path: &Path) -> Result<PackageContents, EasiError> {
             is_symlink: false,
             symlink_target: None,
             is_elf: false,
+            elf_arch: None,
             is_script: true,
         }],
         script_report: Some(report),
