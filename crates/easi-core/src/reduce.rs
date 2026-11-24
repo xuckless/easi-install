@@ -14,8 +14,8 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
         (State::Idle { .. }, Action::InstalledLoaded(installed)) => {
             (State::Idle { installed }, vec![])
         }
-        (state @ State::Idle { .. }, Action::UninstallApp(app_id)) => {
-            (state, vec![Effect::UninstallApp { app_id }])
+        (state @ State::Idle { .. }, Action::UninstallApp { app_id, purge_data }) => {
+            (state, vec![Effect::UninstallApp { app_id, purge_data }])
         }
         (state @ State::Idle { .. }, Action::UninstallFinished { ok: true, .. }) => {
             (state, vec![Effect::ListInstalled])
@@ -89,7 +89,7 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
             state @ State::Inspecting { .. },
             Action::LoadInstalled
             | Action::InstalledLoaded(_)
-            | Action::UninstallApp(_)
+            | Action::UninstallApp { .. }
             | Action::UninstallFinished { .. }
             | Action::OpenPath(_)
             | Action::HandedOff
@@ -127,7 +127,7 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
             state @ State::HandingOff { .. },
             Action::LoadInstalled
             | Action::InstalledLoaded(_)
-            | Action::UninstallApp(_)
+            | Action::UninstallApp { .. }
             | Action::UninstallFinished { .. }
             | Action::OpenPath(_)
             | Action::Inspected(_)
@@ -169,7 +169,7 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
             state @ State::Ready { .. },
             Action::LoadInstalled
             | Action::InstalledLoaded(_)
-            | Action::UninstallApp(_)
+            | Action::UninstallApp { .. }
             | Action::UninstallFinished { .. }
             | Action::OpenPath(_)
             | Action::Inspected(_)
@@ -280,7 +280,7 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
             state @ State::NeedsChoice { .. },
             Action::LoadInstalled
             | Action::InstalledLoaded(_)
-            | Action::UninstallApp(_)
+            | Action::UninstallApp { .. }
             | Action::UninstallFinished { .. }
             | Action::OpenPath(_)
             | Action::Inspected(_)
@@ -319,7 +319,7 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
             state @ State::Conflict { .. },
             Action::LoadInstalled
             | Action::InstalledLoaded(_)
-            | Action::UninstallApp(_)
+            | Action::UninstallApp { .. }
             | Action::UninstallFinished { .. }
             | Action::OpenPath(_)
             | Action::Inspected(_)
@@ -368,7 +368,7 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
             state @ State::Installing { .. },
             Action::LoadInstalled
             | Action::InstalledLoaded(_)
-            | Action::UninstallApp(_)
+            | Action::UninstallApp { .. }
             | Action::UninstallFinished { .. }
             | Action::OpenPath(_)
             | Action::Inspected(_)
@@ -429,7 +429,7 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
             state @ State::Cancelling { .. },
             Action::LoadInstalled
             | Action::InstalledLoaded(_)
-            | Action::UninstallApp(_)
+            | Action::UninstallApp { .. }
             | Action::UninstallFinished { .. }
             | Action::OpenPath(_)
             | Action::Inspected(_)
@@ -464,7 +464,7 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
             state @ State::RollingBack { .. },
             Action::LoadInstalled
             | Action::InstalledLoaded(_)
-            | Action::UninstallApp(_)
+            | Action::UninstallApp { .. }
             | Action::UninstallFinished { .. }
             | Action::OpenPath(_)
             | Action::Inspected(_)
@@ -507,7 +507,7 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
             state @ State::OfferTrash { .. },
             Action::LoadInstalled
             | Action::InstalledLoaded(_)
-            | Action::UninstallApp(_)
+            | Action::UninstallApp { .. }
             | Action::UninstallFinished { .. }
             | Action::OpenPath(_)
             | Action::Inspected(_)
@@ -551,7 +551,7 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
             state @ State::Trashing { .. },
             Action::LoadInstalled
             | Action::InstalledLoaded(_)
-            | Action::UninstallApp(_)
+            | Action::UninstallApp { .. }
             | Action::UninstallFinished { .. }
             | Action::OpenPath(_)
             | Action::Inspected(_)
@@ -585,7 +585,7 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
             state @ (State::Done { .. } | State::Cancelled | State::Failed { .. }),
             Action::LoadInstalled
             | Action::InstalledLoaded(_)
-            | Action::UninstallApp(_)
+            | Action::UninstallApp { .. }
             | Action::UninstallFinished { .. }
             | Action::Inspected(_)
             | Action::InspectFailed(_)

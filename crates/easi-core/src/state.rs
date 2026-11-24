@@ -72,7 +72,10 @@ impl Default for State {
 pub enum Action {
     LoadInstalled,
     InstalledLoaded(Vec<InstalledApp>),
-    UninstallApp(String),
+    UninstallApp {
+        app_id: String,
+        purge_data: bool,
+    },
     UninstallFinished {
         app_id: String,
         ok: bool,
@@ -110,6 +113,7 @@ pub enum Effect {
     ListInstalled,
     UninstallApp {
         app_id: String,
+        purge_data: bool,
     },
     Inspect {
         path: PathBuf,

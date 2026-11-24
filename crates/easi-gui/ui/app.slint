@@ -8,6 +8,7 @@ export struct InstalledRow {
     version: string,
     kind: string,
     update-note: string,
+    has-update: bool,
 }
 
 global Theme {
@@ -54,6 +55,8 @@ export component AppWindow inherits Window {
     in property <[InstalledRow]> installed-apps: [];
     in property <string> easi-update-version: "";
     in-out property <bool> auto-check-updates: true;
+    in-out property <bool> purge-data-on-uninstall: false;
+    in-out property <bool> confirm-self-uninstall: false;
     in property <string> app-name: "";
     in property <string> app-version: "";
     in property <string> app-id: "";
@@ -93,9 +96,11 @@ export component AppWindow inherits Window {
     // Actions dispatched back to the Redux store
     callback browse-package();
     callback open-path(string);
-    callback uninstall-app(string);
+    callback uninstall-app(string, bool);
+    callback update-app(string);
     callback check-app-updates();
     callback run-self-update();
+    callback run-self-uninstall();
     callback toggle-auto-update(bool);
     callback confirm-install();
     callback cancel();
@@ -292,9 +297,14 @@ export component AppWindow inherits Window {
                                         color: Theme.accent;
                                     }
                                 }
+                                if app.has-update: Button {
+                                    text: "Update";
+                                    primary: true;
+                                    clicked => { root.update-app(app.app-id); }
+                                }
                                 Button {
                                     text: "Uninstall";
-                                    clicked => { root.uninstall-app(app.app-id); }
+                                    clicked => { root.uninstall-app(app.app-id, root.purge-data-on-uninstall); }
                                 }
                             }
                         }
@@ -302,13 +312,22 @@ export component AppWindow inherits Window {
                 }
             }
 
-            // Footer settings row with Switch
+            // Footer settings & self-uninstall
             Rectangle {
                 height: 1px;
                 background: Theme.border-subtle;
             }
             HorizontalBox {
                 padding: 0px;
+                spacing: Theme.gap-md;
+                CheckBox {
+                    text: "Also remove app settings & cache on uninstall";
+                    checked <=> root.purge-data-on-uninstall;
+                }
+            }
+            HorizontalBox {
+                padding: 0px;
+                spacing: Theme.gap-md;
                 Text {
                     text: "Check for easi updates automatically";
                     font-size: Theme.font-caption;
@@ -319,6 +338,26 @@ export component AppWindow inherits Window {
                 Switch {
                     checked <=> root.auto-check-updates;
                     toggled => { root.toggle-auto-update(self.checked); }
+                }
+                if !root.confirm-self-uninstall: Button {
+                    text: "Uninstall easi";
+                    clicked => { root.confirm-self-uninstall = true; }
+                }
+                if root.confirm-self-uninstall: HorizontalBox {
+                    padding: 0px;
+                    spacing: Theme.gap-sm;
+                    Button {
+                        text: "Confirm Uninstall easi";
+                        primary: true;
+                        clicked => {
+                            root.confirm-self-uninstall = false;
+                            root.run-self-uninstall();
+                        }
+                    }
+                    Button {
+                        text: "Cancel";
+                        clicked => { root.confirm-self-uninstall = false; }
+                    }
                 }
             }
         }

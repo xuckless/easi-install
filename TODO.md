@@ -114,13 +114,14 @@ Every arrow is a row in the reducer match. Every unlisted `(state, action)` pair
 - [x] Desktop notifications on install, uninstall, and updates (via `notify-send` / D-Bus fallback)
 
 ## v1.1+ Elevation Ideas
-- [ ] One-click app updates (`easi update [app|--all]` + "Update" button in GUI App Manager using recorded GitHub Releases / AppImage zsync sources + transactional replace)
-- [ ] AppImage FUSE2 readiness check (detect missing `libfuse.so.2` on Ubuntu 24.04+/Fedora/CachyOS and offer `--appimage-extract-and-run` wrapper fallback so AppImages never silently fail to launch)
-- [ ] `easi --restore-handlers` (undo `easi --setup` and cleanly restore all remembered previous MIME handlers from `previous_handlers.toml`)
-- [ ] Opt-in app data cleanup on uninstall (detect `~/.config/<app>`, `~/.cache/<app>`, `~/.local/share/<app>` and offer default-off checkbox to purge user data)
+- [x] One-click app updates (`easi update [app|--all]` + "Update" button in GUI App Manager using recorded GitHub Releases / AppImage zsync sources + transactional replace)
+- [x] AppImage FUSE2 readiness check (detect missing `libfuse.so.2` on Ubuntu 24.04+/Fedora/CachyOS and create `APPIMAGE_EXTRACT_AND_RUN=1` wrapper fallback)
+- [x] `easi --restore-handlers` (undo `easi --setup` and cleanly restore all remembered previous MIME handlers from `previous_handlers.toml`)
+- [x] Clean self-uninstall (`easi self-uninstall` + "Uninstall easi" button in GUI App Manager — restores MIME handlers, removes `easi`, keeps installed apps)
+- [x] Opt-in app data cleanup on uninstall (`easi uninstall --purge-data` + default-off checkbox in GUI App Manager)
 - [ ] OS drag-and-drop onto the App Manager window (drop packages straight from Nautilus/Dolphin/Nemo)
 - [ ] Launch button, "Open Folder", and search/filter (`All` / `GUI` / `CLI`) in the GUI App Manager
-- [ ] Auto-learn real `StartupWMClass` on first launch to prevent duplicate dock/taskbar icons on GNOME/KDE
+- [x] `StartupWMClass` learning (`easi learn-wmclass <app> [class]` with active window `xprop` probe to prevent duplicate dock/taskbar icons)
 - [ ] Portable app-list backup (`easi export` / `easi import`) to reinstall upstream-tracked apps on a new Linux machine or fresh SteamOS/CachyOS install
 
 ## Open questions

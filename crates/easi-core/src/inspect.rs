@@ -263,6 +263,7 @@ pub fn common_top_dir(entries: &[ArchiveEntry]) -> Option<String> {
 /// Compute SHA-256, origin xattr, signature status, and safety warnings.
 pub fn build_trust_summary(
     path: &Path,
+    format: Format,
     contents: &PackageContents,
 ) -> Result<TrustSummary, EasiError> {
     let meta = std::fs::metadata(path)?;
@@ -291,6 +292,14 @@ pub fn build_trust_summary(
 
     let signature = check_signature(path, contents.has_appimage_sig_section);
     let mut warnings = Vec::new();
+    if matches!(format, Format::AppImageType1 | Format::AppImageType2)
+        && !crate::install::has_libfuse2()
+    {
+        warnings.push(
+            "libfuse.so.2 not found — easi will create an APPIMAGE_EXTRACT_AND_RUN=1 wrapper so this AppImage launches cleanly"
+                .into(),
+        );
+    }
 
     for entry in &contents.entries {
         if has_path_escape(&entry.path) {
@@ -366,7 +375,7 @@ where
 {
     let format = detect_file_format(path)?;
     let contents = inspect_contents(path, format)?;
-    let trust = build_trust_summary(path, &contents)?;
+    let trust = build_trust_summary(path, format, &contents)?;
 
     // Guard against Arch Linux pacman packages (`.pkg.tar.zst` / `.PKGINFO`).
     let is_distro_pkg = contents.entries.iter().any(|e| {

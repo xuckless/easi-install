@@ -93,8 +93,35 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         let w = window.as_weak();
         let s = Arc::clone(&store);
         let r = Arc::clone(&runner);
-        window.on_uninstall_app(move |app_id| {
-            dispatch_action(&w, &s, &r, Action::UninstallApp(app_id.into()));
+        window.on_uninstall_app(move |app_id, purge_data| {
+            dispatch_action(
+                &w,
+                &s,
+                &r,
+                Action::UninstallApp {
+                    app_id: app_id.into(),
+                    purge_data,
+                },
+            );
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        let r = Arc::clone(&runner);
+        window.on_update_app(move |app_id| {
+            let w = w.clone();
+            let s = Arc::clone(&s);
+            let r = Arc::clone(&r);
+            let id: String = app_id.into();
+            std::thread::spawn(move || {
+                if let Ok(m) = easi_core::manifest::resolve_installed(&r.roots, &id) {
+                    let _ = easi_core::upstream::download_and_update_app(&r.roots, &m);
+                }
+                let _ = slint::invoke_from_event_loop(move || {
+                    dispatch_action(&w, &s, &r, Action::LoadInstalled);
+                });
+            });
         });
     }
     {
@@ -185,25 +212,23 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                 let rows: Vec<ui::InstalledRow> = manifests
                     .iter()
                     .map(|m| {
-                        let note = match easi_core::upstream::check_app_update(m) {
+                        let (note, has_update) = match easi_core::upstream::check_app_update(m) {
                             easi_core::upstream::AppUpdateStatus::UpdateAvailable {
                                 latest_version,
                                 ..
                             } => {
                                 available_count += 1;
-                                format!("Update available: {latest_version}")
+                                (format!("Update available: {latest_version}"), true)
                             }
                             easi_core::upstream::AppUpdateStatus::UpToDate { .. } => {
-                                "Up to date".into()
+                                ("Up to date".into(), false)
                             }
                             easi_core::upstream::AppUpdateStatus::Unsupported { .. } => {
-                                "No upstream update source".into()
+                                ("No upstream update source".into(), false)
                             }
                             easi_core::upstream::AppUpdateStatus::CheckFailed {
                                 reason, ..
-                            } => {
-                                format!("Check failed: {reason}")
-                            }
+                            } => (format!("Check failed: {reason}"), false),
                         };
                         ui::InstalledRow {
                             app_id: m.app_id.clone().into(),
@@ -214,6 +239,7 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                                 AppKind::Terminal => "CLI".into(),
                             },
                             update_note: note.into(),
+                            has_update,
                         }
                     })
                     .collect();
@@ -266,6 +292,16 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                     }
                 });
             });
+        });
+    }
+    {
+        let w = window.as_weak();
+        let r = Arc::clone(&runner);
+        window.on_run_self_uninstall(move || {
+            let _ = easi_core::desktop::self_uninstall(&r.roots);
+            if let Some(win) = w.upgrade() {
+                let _ = win.hide();
+            }
         });
     }
     {
@@ -353,6 +389,7 @@ fn project_state(win: &ui::AppWindow, state: &State) {
                         AppKind::Terminal => "CLI".into(),
                     },
                     update_note: "".into(),
+                    has_update: false,
                 })
                 .collect();
             win.set_installed_apps(ModelRc::new(VecModel::from(rows)));

@@ -5,9 +5,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use easi_core::desktop::run_setup;
-use easi_core::install::{add_bin_to_shell_rc, uninstall_app};
-use easi_core::reconcile::reconcile_all;
+use easi_core::desktop::{restore_handlers, run_setup, self_uninstall};
+use easi_core::install::{add_bin_to_shell_rc, find_app_data_dirs, uninstall_app_with_options};
+use easi_core::manifest::resolve_installed;
+use easi_core::reconcile::{probe_active_wm_class, reconcile_all, set_startup_wm_class};
 use easi_core::roots::InstallRoots;
 use easi_core::runner::EffectRunner;
 use easi_core::{
@@ -30,6 +31,10 @@ pub struct Cli {
     #[arg(long)]
     pub setup: bool,
 
+    /// Undo `easi --setup` and restore all remembered previous default MIME handlers.
+    #[arg(long)]
+    pub restore_handlers: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -39,13 +44,33 @@ pub enum Command {
     /// Install an AppImage, tarball or zip.
     Install { path: PathBuf },
     /// Remove an app installed by easi.
-    Uninstall { app: String },
+    Uninstall {
+        app: String,
+        /// Also remove per-user app settings and cache (~/.config, ~/.cache, ~/.local/share).
+        #[arg(long)]
+        purge_data: bool,
+    },
     /// List apps installed by easi.
     List,
     /// Check upstream releases (AppImage zsync / GitHub Releases) for installed apps.
     CheckUpdates,
+    /// Update an installed app (or --all) from its recorded upstream release source.
+    Update {
+        app: Option<String>,
+        /// Update every installed app that has a newer upstream release.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Record the real StartupWMClass for an installed app (prevents duplicate dock icons).
+    LearnWmclass {
+        app: String,
+        /// Explicit WM_CLASS (if omitted, probes the active X11/XWayland window via xprop).
+        wm_class: Option<String>,
+    },
     /// Update easi itself.
     SelfUpdate,
+    /// Cleanly uninstall easi itself and restore previous MIME handlers (keeps installed apps).
+    SelfUninstall,
     /// View or change easi settings (e.g. --auto-update true|false).
     Config {
         /// Enable or disable automatic easi update checks on use.
@@ -66,15 +91,18 @@ pub fn run(cli: Cli) -> ExitCode {
     if cli.setup {
         return run_setup_cmd(&roots);
     }
+    if cli.restore_handlers {
+        return run_restore_handlers_cmd(&roots);
+    }
 
     match cli.command {
         Some(Command::Install { path }) => {
             maybe_notify_update(&roots);
             run_install_cmd(&roots, path, cli.yes)
         }
-        Some(Command::Uninstall { app }) => {
+        Some(Command::Uninstall { app, purge_data }) => {
             maybe_notify_update(&roots);
-            run_uninstall_cmd(&roots, &app, cli.yes)
+            run_uninstall_cmd(&roots, &app, purge_data, cli.yes)
         }
         Some(Command::List) => {
             maybe_notify_update(&roots);
@@ -84,11 +112,19 @@ pub fn run(cli: Cli) -> ExitCode {
             maybe_notify_update(&roots);
             run_check_updates_cmd(&roots)
         }
+        Some(Command::Update { app, all }) => {
+            maybe_notify_update(&roots);
+            run_update_cmd(&roots, app.as_deref(), all)
+        }
+        Some(Command::LearnWmclass { app, wm_class }) => {
+            run_learn_wmclass_cmd(&roots, &app, wm_class.as_deref())
+        }
         Some(Command::SelfUpdate) => run_self_update_cmd(),
+        Some(Command::SelfUninstall) => run_self_uninstall_cmd(&roots, cli.yes),
         Some(Command::Config { auto_update }) => run_config_cmd(&roots, auto_update),
         None => {
             eprintln!(
-                "easi: pass a subcommand (`install`, `uninstall`, `list`, `config`) or `--setup`"
+                "easi: pass a subcommand (`install`, `uninstall`, `list`, `update`, `check-updates`, `config`, `self-uninstall`) or `--setup` / `--restore-handlers`"
             );
             ExitCode::FAILURE
         }
@@ -257,15 +293,160 @@ fn run_list_cmd(roots: &InstallRoots) -> ExitCode {
     }
 }
 
-fn run_uninstall_cmd(roots: &InstallRoots, app: &str, yes: bool) -> ExitCode {
+fn run_restore_handlers_cmd(roots: &InstallRoots) -> ExitCode {
+    match restore_handlers(roots) {
+        Ok(n) => {
+            println!("Restored {n} previous MIME handler(s) and removed easi.desktop.");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("easi: restore failed: {}", format_user_error(&e));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_self_uninstall_cmd(roots: &InstallRoots, yes: bool) -> ExitCode {
+    if !yes
+        && !prompt_yes_no(
+            "Uninstall easi and restore previous MIME handlers? (Your installed apps in ~/Applications will be kept.)",
+            false,
+        )
+    {
+        println!("Cancelled.");
+        return ExitCode::SUCCESS;
+    }
+    match self_uninstall(roots) {
+        Ok(restored) => {
+            println!("Uninstalled easi and restored {restored} previous MIME handler(s).");
+            println!("Your installed apps in ~/Applications remain intact.");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("easi: self-uninstall failed: {}", format_user_error(&e));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_update_cmd(roots: &InstallRoots, app: Option<&str>, all: bool) -> ExitCode {
+    let targets = if all {
+        match reconcile_all(roots) {
+            Ok(list) => list
+                .into_iter()
+                .filter(|m| {
+                    matches!(
+                        easi_core::upstream::check_app_update(m),
+                        easi_core::upstream::AppUpdateStatus::UpdateAvailable { .. }
+                    )
+                })
+                .collect::<Vec<_>>(),
+            Err(e) => {
+                eprintln!("easi: {}", format_user_error(&e));
+                return ExitCode::FAILURE;
+            }
+        }
+    } else if let Some(query) = app {
+        match resolve_installed(roots, query) {
+            Ok(m) => vec![m],
+            Err(e) => {
+                eprintln!("easi: {}", format_user_error(&e));
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        eprintln!("easi: specify an app name or pass `--all`");
+        return ExitCode::FAILURE;
+    };
+
+    if targets.is_empty() {
+        println!("All installed apps are up to date.");
+        return ExitCode::SUCCESS;
+    }
+
+    let mut failed = false;
+    for m in &targets {
+        println!("Updating {}…", m.name);
+        match easi_core::upstream::download_and_update_app(roots, m) {
+            Ok(summary) => {
+                println!(
+                    "Updated {} to {}.",
+                    summary.name,
+                    summary.version.as_deref().unwrap_or("latest")
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "easi: failed to update {}: {}",
+                    m.name,
+                    format_user_error(&e)
+                );
+                failed = true;
+            }
+        }
+    }
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+fn run_learn_wmclass_cmd(roots: &InstallRoots, app: &str, wm_class: Option<&str>) -> ExitCode {
+    let class = match wm_class {
+        Some(c) => c.to_string(),
+        None => match probe_active_wm_class() {
+            Some(c) => c,
+            None => {
+                eprintln!(
+                    "easi: could not probe active window via xprop; pass the class explicitly: `easi learn-wmclass {app} <WMClass>`"
+                );
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+    match set_startup_wm_class(roots, app, &class) {
+        Ok(desktop) => {
+            println!("Set StartupWMClass={class} in {}", desktop.display());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("easi: {}", format_user_error(&e));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_uninstall_cmd(roots: &InstallRoots, app: &str, purge_data: bool, yes: bool) -> ExitCode {
     if !yes && !prompt_yes_no(&format!("Uninstall '{app}'?"), false) {
         println!("Cancelled.");
         return ExitCode::SUCCESS;
     }
-    match uninstall_app(roots, app) {
+    let mut should_purge = purge_data;
+    if !should_purge
+        && !yes
+        && let Ok(m) = resolve_installed(roots, app)
+    {
+        let dirs = find_app_data_dirs(roots, &m);
+        if !dirs.is_empty() {
+            println!("Found app settings/cache directories:");
+            for d in &dirs {
+                println!("  - {}", d.display());
+            }
+            should_purge = prompt_yes_no("Also remove these app settings & cache?", false);
+        }
+    }
+    match uninstall_app_with_options(roots, app, should_purge) {
         Ok(m) => {
             easi_core::desktop::notify("App uninstalled", &format!("Removed {}", m.name));
-            println!("Uninstalled {} ({}).", m.name, m.app_id);
+            if should_purge {
+                println!(
+                    "Uninstalled {} ({}) and removed app data.",
+                    m.name, m.app_id
+                );
+            } else {
+                println!("Uninstalled {} ({}).", m.name, m.app_id);
+            }
             ExitCode::SUCCESS
         }
         Err(e) => {

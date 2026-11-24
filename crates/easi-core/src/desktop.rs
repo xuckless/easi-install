@@ -128,6 +128,56 @@ pub fn run_setup(roots: &InstallRoots, easi_bin: &Path) -> Result<SavedHandlers,
     Ok(saved)
 }
 
+/// Undo `easi --setup`: restore all remembered previous default MIME handlers and remove
+/// `easi.desktop` + `easi-appimage.xml`.
+pub fn restore_handlers(roots: &InstallRoots) -> Result<usize, EasiError> {
+    let saved = load_saved_handlers(roots);
+    let mut restored = 0usize;
+    for (mime, prev_desktop) in &saved.defaults {
+        if !prev_desktop.is_empty() && prev_desktop != EASI_DESKTOP_ID {
+            let _ = Command::new("xdg-mime")
+                .args(["default", prev_desktop, mime])
+                .output();
+            restored += 1;
+        }
+    }
+    let desktop_path = roots.desktop_dir.join(EASI_DESKTOP_ID);
+    if desktop_path.exists() {
+        let _ = fs::remove_file(&desktop_path);
+    }
+    let mime_xml = roots
+        .home_dir
+        .join(".local/share/mime/packages/easi-appimage.xml");
+    if mime_xml.exists() {
+        let _ = fs::remove_file(&mime_xml);
+        let _ = Command::new("update-mime-database")
+            .arg(roots.home_dir.join(".local/share/mime"))
+            .output();
+    }
+    let prev_path = roots.previous_handlers_path();
+    if prev_path.exists() {
+        let _ = fs::remove_file(&prev_path);
+    }
+    refresh_desktop_caches(roots);
+    Ok(restored)
+}
+
+/// Cleanly uninstall `easi` itself: restore previous MIME handlers, remove `easi` binary
+/// from `~/.local/bin/easi`, and remove `easi` config/state files (keeps user's installed apps
+/// in `~/Applications/` untouched).
+pub fn self_uninstall(roots: &InstallRoots) -> Result<usize, EasiError> {
+    let restored = restore_handlers(roots)?;
+    let bin_path = roots.bin_dir.join("easi");
+    if bin_path.exists() || bin_path.symlink_metadata().is_ok() {
+        let _ = fs::remove_file(&bin_path);
+    }
+    let cfg_path = roots.config_path();
+    if cfg_path.exists() {
+        let _ = fs::remove_file(&cfg_path);
+    }
+    Ok(restored)
+}
+
 /// Query the MIME type of `path` and silently hand it off to the remembered previous handler.
 pub fn handoff_non_app(roots: &InstallRoots, path: &Path) -> Result<(), EasiError> {
     let saved = load_saved_handlers(roots);

@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::format_user_error;
 use crate::inspect::classify_package;
-use crate::install::{execute_install, move_to_trash, uninstall_app};
+use crate::install::{execute_install, move_to_trash, uninstall_app, uninstall_app_with_options};
 use crate::manifest::find_manifest_by_id;
 use crate::reconcile::reconcile_all;
 use crate::roots::InstallRoots;
@@ -39,21 +39,23 @@ impl EffectRunner {
                     .collect();
                 vec![Action::InstalledLoaded(apps)]
             }
-            Effect::UninstallApp { app_id } => match uninstall_app(&self.roots, &app_id) {
-                Ok(m) => {
-                    crate::desktop::notify("App uninstalled", &format!("Removed {}", m.name));
-                    vec![Action::UninstallFinished {
+            Effect::UninstallApp { app_id, purge_data } => {
+                match uninstall_app_with_options(&self.roots, &app_id, purge_data) {
+                    Ok(m) => {
+                        crate::desktop::notify("App uninstalled", &format!("Removed {}", m.name));
+                        vec![Action::UninstallFinished {
+                            app_id,
+                            ok: true,
+                            error: None,
+                        }]
+                    }
+                    Err(err) => vec![Action::UninstallFinished {
                         app_id,
-                        ok: true,
-                        error: None,
-                    }]
+                        ok: false,
+                        error: Some(format_user_error(&err)),
+                    }],
                 }
-                Err(err) => vec![Action::UninstallFinished {
-                    app_id,
-                    ok: false,
-                    error: Some(format_user_error(&err)),
-                }],
-            },
+            }
             Effect::Inspect { path } => {
                 match classify_package(&path, |id| {
                     find_manifest_by_id(&self.roots, id).map(|m| m.to_installed_app())

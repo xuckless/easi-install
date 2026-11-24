@@ -12,8 +12,11 @@ const CLI_SUBCOMMANDS: &[&str] = &[
     "install",
     "uninstall",
     "list",
-    "self-update",
+    "update",
     "check-updates",
+    "self-update",
+    "self-uninstall",
+    "learn-wmclass",
     "config",
     "help",
 ];
@@ -41,6 +44,7 @@ fn main() -> ExitCode {
             return easi_cli::run(easi_cli::Cli {
                 yes: false,
                 setup: false,
+                restore_handlers: false,
                 command: Some(easi_cli::Command::Install { path }),
             });
         }

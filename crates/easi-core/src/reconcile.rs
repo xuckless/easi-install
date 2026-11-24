@@ -81,6 +81,80 @@ pub fn reconcile_manifest(
     Ok(changed)
 }
 
+/// Update `StartupWMClass=` in an installed app's `.desktop` file so GNOME/KDE dock icons
+/// group properly without duplicates.
+pub fn set_startup_wm_class(
+    roots: &InstallRoots,
+    query: &str,
+    wm_class: &str,
+) -> Result<PathBuf, EasiError> {
+    let manifest = crate::manifest::resolve_installed(roots, query)?;
+    let desktop_path = manifest
+        .created_files
+        .iter()
+        .find(|p| {
+            p.starts_with(&roots.desktop_dir)
+                && p.extension().and_then(|s| s.to_str()) == Some("desktop")
+        })
+        .cloned()
+        .ok_or_else(|| {
+            EasiError::Desktop(format!("{} has no .desktop file to update", manifest.name))
+        })?;
+    let text = fs::read_to_string(&desktop_path)?;
+    let mut found = false;
+    let mut lines: Vec<String> = text
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with("StartupWMClass=") {
+                found = true;
+                format!("StartupWMClass={wm_class}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    if !found {
+        lines.push(format!("StartupWMClass={wm_class}"));
+    }
+    fs::write(&desktop_path, lines.join("\n") + "\n")?;
+    crate::install::refresh_desktop_caches(roots);
+    Ok(desktop_path)
+}
+
+/// Detect the active window's WM_CLASS via `xprop` (X11/XWayland) when available,
+/// or fall back to an explicit class passed by the caller.
+pub fn probe_active_wm_class() -> Option<String> {
+    let out = std::process::Command::new("xprop")
+        .args(["-root", "_NET_ACTIVE_WINDOW"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let root_text = String::from_utf8_lossy(&out.stdout);
+    let win_id = root_text.split_whitespace().last()?;
+    if !win_id.starts_with("0x") {
+        return None;
+    }
+    let cls_out = std::process::Command::new("xprop")
+        .args(["-id", win_id, "WM_CLASS"])
+        .output()
+        .ok()?;
+    if !cls_out.status.success() {
+        return None;
+    }
+    // WM_CLASS(STRING) = "instance", "ClassName"
+    let cls_text = String::from_utf8_lossy(&cls_out.stdout);
+    let last_quote = cls_text.rfind('"')?;
+    let prev_quote = cls_text[..last_quote].rfind('"')?;
+    let wm_class = cls_text[prev_quote + 1..last_quote].trim();
+    if wm_class.is_empty() {
+        None
+    } else {
+        Some(wm_class.to_string())
+    }
+}
+
 /// Reconcile every installed manifest and return the refreshed list.
 pub fn reconcile_all(roots: &InstallRoots) -> Result<Vec<Manifest>, EasiError> {
     let mut manifests = list_manifests(roots)?;
@@ -171,6 +245,34 @@ fn repair_renamed_binary_wiring(
     let Ok(target) = fs::read_link(bin_link) else {
         return false;
     };
+
+    // If symlink points to an easi FUSE2 wrapper (`*-run.sh`), check whether the AppImage it
+    // references was renamed in place and rewrite the wrapper if needed.
+    if target.exists()
+        && target
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|n| n.ends_with("-run.sh"))
+        && let Ok(script) = fs::read_to_string(&target)
+        && let Some(new_ai) = dir_files.iter().find(|f| {
+            let n = f
+                .file_name()
+                .map(|s| s.to_string_lossy())
+                .unwrap_or_default();
+            n.ends_with(".AppImage") || n.ends_with(".appimage")
+        })
+    {
+        let new_ai_str = new_ai.to_string_lossy();
+        if !script.contains(new_ai_str.as_ref()) {
+            let updated = format!(
+                "#!/bin/sh\nexport APPIMAGE_EXTRACT_AND_RUN=1\nexec \"{new_ai_str}\" \"$@\"\n"
+            );
+            let _ = fs::write(&target, updated);
+            return true;
+        }
+        return false;
+    }
+
     if target.exists() {
         return false;
     }
@@ -247,7 +349,7 @@ mod tests {
 
     use super::*;
     use crate::inspect::classify_package;
-    use crate::install::{execute_install, uninstall_app};
+    use crate::install::execute_install;
     use crate::manifest::find_manifest_by_id;
     use crate::model::Classified;
 
@@ -298,19 +400,38 @@ mod tests {
             "stray setuid must be stripped"
         );
 
-        // Verify symlink and .desktop now point to 2.0.0 AppImage
+        // Verify symlink / FUSE2 wrapper and .desktop now point to 2.0.0 AppImage
         let link_target = fs::read_link(roots.bin_dir.join("myapp")).expect("readlink");
-        assert_eq!(link_target, new_ai);
-        let desktop_text =
-            fs::read_to_string(roots.desktop_dir.join("easi.myapp.desktop")).expect("desktop");
-        assert!(desktop_text.contains("MyApp-2.0.0.AppImage"));
+        if link_target.to_string_lossy().ends_with("-run.sh") {
+            let wrapper_text = fs::read_to_string(&link_target).expect("read wrapper");
+            assert!(wrapper_text.contains("MyApp-2.0.0.AppImage"));
+        } else {
+            assert_eq!(link_target, new_ai);
+            let desktop_text =
+                fs::read_to_string(roots.desktop_dir.join("easi.myapp.desktop")).expect("desktop");
+            assert!(desktop_text.contains("MyApp-2.0.0.AppImage"));
+        }
 
-        // Clean uninstall removes EVERY file including the self-updater's new file!
-        uninstall_app(&roots, &summary.app_id).expect("uninstall");
+        // Test set_startup_wm_class updates .desktop cleanly
+        let dp =
+            set_startup_wm_class(&roots, &summary.app_id, "MyCustomWMClass").expect("set wmclass");
+        assert!(
+            fs::read_to_string(&dp)
+                .expect("read desktop")
+                .contains("StartupWMClass=MyCustomWMClass")
+        );
+
+        // Clean uninstall with purge_data removes app data dirs too!
+        let cfg_dir = roots.home_dir.join(".config/myapp");
+        fs::create_dir_all(&cfg_dir).expect("mkdir cfg");
+        fs::write(cfg_dir.join("prefs.json"), "{}").expect("write prefs");
+        crate::install::uninstall_app_with_options(&roots, &summary.app_id, true)
+            .expect("uninstall");
         assert!(
             !extra.exists(),
             "self-updated file must be removed on uninstall"
         );
+        assert!(!cfg_dir.exists(), "purged config dir must be removed");
         assert!(!new_ai.exists());
         assert!(!summary.install_dir.exists());
     }

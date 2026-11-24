@@ -155,7 +155,29 @@ where
                 perms.set_mode((perms.mode() & !0o6000) | 0o755);
                 fs::set_permissions(&dest, perms)?;
                 tx.record_file(dest.clone());
-                resolved_exec = Some(dest);
+                // If this is an AppImage and FUSE2 is missing (common on Ubuntu 24.04+/Fedora/CachyOS),
+                // generate a wrapper with APPIMAGE_EXTRACT_AND_RUN=1 so it always launches cleanly.
+                if matches!(op, PlanOp::CopyAppImage) && !has_libfuse2() {
+                    let bin_name = plan
+                        .app_id
+                        .strip_prefix("easi.")
+                        .unwrap_or(&plan.app_id)
+                        .split('.')
+                        .next_back()
+                        .unwrap_or(&plan.app_id)
+                        .to_ascii_lowercase();
+                    let wrapper = safe_join(&app_dir, Path::new(&format!("{bin_name}-run.sh")))?;
+                    let script = format!(
+                        "#!/bin/sh\nexport APPIMAGE_EXTRACT_AND_RUN=1\nexec \"{}\" \"$@\"\n",
+                        dest.to_string_lossy()
+                    );
+                    fs::write(&wrapper, script)?;
+                    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755))?;
+                    tx.record_file(wrapper.clone());
+                    resolved_exec = Some(wrapper);
+                } else {
+                    resolved_exec = Some(dest);
+                }
             }
             PlanOp::CopyJarWithWrapper => {
                 on_progress(InstallStep::Extracting, pct);
@@ -348,6 +370,20 @@ where
         kind: plan.kind,
         bin_on_path: is_bin_dir_on_path(&roots.bin_dir),
     })
+}
+
+/// Check whether FUSE2 (`libfuse.so.2`) is present on standard Linux library paths.
+pub fn has_libfuse2() -> bool {
+    const CANDIDATES: &[&str] = &[
+        "/usr/lib/libfuse.so.2",
+        "/usr/lib64/libfuse.so.2",
+        "/usr/lib/x86_64-linux-gnu/libfuse.so.2",
+        "/usr/lib/aarch64-linux-gnu/libfuse.so.2",
+        "/lib/x86_64-linux-gnu/libfuse.so.2",
+        "/lib/aarch64-linux-gnu/libfuse.so.2",
+        "/lib64/libfuse.so.2",
+    ];
+    CANDIDATES.iter().any(|p| Path::new(p).exists())
 }
 
 fn sanitize_dir_name(name: &str) -> String {
@@ -708,13 +744,76 @@ pub fn refresh_desktop_caches(roots: &InstallRoots) {
     }
 }
 
+/// Find likely per-user XDG settings/cache/data directories created by an installed app
+/// (`~/.config/<slug>`, `~/.cache/<slug>`, `~/.local/share/<slug>`).
+pub fn find_app_data_dirs(roots: &InstallRoots, manifest: &Manifest) -> Vec<PathBuf> {
+    let bare_id = manifest
+        .app_id
+        .strip_prefix("easi.")
+        .unwrap_or(&manifest.app_id);
+    let last_seg = bare_id.split('.').next_back().unwrap_or(bare_id);
+    let mut names = vec![
+        manifest.app_id.clone(),
+        bare_id.to_string(),
+        last_seg.to_string(),
+        manifest.name.clone(),
+        manifest.name.to_ascii_lowercase(),
+    ];
+    names.sort();
+    names.dedup();
+
+    let xdg_roots = [
+        roots.home_dir.join(".config"),
+        roots.home_dir.join(".cache"),
+        roots.home_dir.join(".local/share"),
+    ];
+
+    let mut found = Vec::new();
+    for base in xdg_roots {
+        for name in &names {
+            if name.is_empty()
+                || name == "easi"
+                || name == "applications"
+                || name == "icons"
+                || name == "Trash"
+                || name.contains('/')
+                || name.contains("..")
+            {
+                continue;
+            }
+            let cand = base.join(name);
+            if cand.is_dir() && !found.contains(&cand) {
+                found.push(cand);
+            }
+        }
+    }
+    found
+}
+
 /// Replay manifest in reverse and remove the manifest file.
 /// Reconciles first so any files added by an app's own self-updater inside `install_dir`
 /// are also cleaned up.
 pub fn uninstall_app(roots: &InstallRoots, query: &str) -> Result<Manifest, EasiError> {
+    uninstall_app_with_options(roots, query, false)
+}
+
+/// Uninstall an app, optionally purging its XDG config/cache/data directories when `purge_data` is true.
+pub fn uninstall_app_with_options(
+    roots: &InstallRoots,
+    query: &str,
+    purge_data: bool,
+) -> Result<Manifest, EasiError> {
     let mut manifest = resolve_installed(roots, query)?;
     let _ = crate::reconcile::reconcile_manifest(roots, &mut manifest);
+    let data_dirs = if purge_data {
+        find_app_data_dirs(roots, &manifest)
+    } else {
+        vec![]
+    };
     rollback_paths(&manifest.created_files, &manifest.created_dirs);
+    for dir in data_dirs {
+        let _ = fs::remove_dir_all(dir);
+    }
     delete_manifest(roots, &manifest.app_id)?;
     refresh_desktop_caches(roots);
     Ok(manifest)
