@@ -29,7 +29,7 @@ pub enum State {
         step: WizardStep,
     },
     Conflict {
-        existing: InstalledApp,
+        existing: Box<InstalledApp>,
         plan: InstallPlan,
         trust: TrustSummary,
     },

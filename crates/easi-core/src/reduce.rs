@@ -414,6 +414,9 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
                 icon_bytes: None,
                 desktop_entry: None,
                 startup_wm_class: None,
+                developer: None,
+                origin_url: None,
+                signature_summary: None,
                 update_source: None,
                 planned_writes: vec![],
             };
@@ -643,6 +646,9 @@ mod tests {
             icon_bytes: None,
             desktop_entry: None,
             startup_wm_class: Some("foo".into()),
+            developer: None,
+            origin_url: None,
+            signature_summary: None,
             update_source: None,
             planned_writes: vec![],
         }
@@ -656,8 +662,12 @@ mod tests {
             source_filename: "foo-0.9.AppImage".into(),
             install_dir: PathBuf::from("/tmp/apps/Foo"),
             kind: AppKind::Gui,
+            developer: None,
+            origin_url: None,
+            signature_summary: None,
             size_bytes: 0,
             data_size_bytes: 0,
+            cache_size_bytes: 0,
         }
     }
 
@@ -765,12 +775,12 @@ mod tests {
                 name: "inspecting + conflict -> conflict",
                 from: State::Inspecting { path: p.clone() },
                 action: Action::Inspected(Box::new(Classified::Conflict {
-                    existing: existing.clone(),
+                    existing: Box::new(existing.clone()),
                     plan: plan.clone(),
                     trust: trust.clone(),
                 })),
                 expected_state: State::Conflict {
-                    existing: existing.clone(),
+                    existing: Box::new(existing.clone()),
                     plan: plan.clone(),
                     trust: trust.clone(),
                 },
@@ -835,7 +845,7 @@ mod tests {
             Row {
                 name: "conflict + confirm -> installing(replace=true)",
                 from: State::Conflict {
-                    existing: existing.clone(),
+                    existing: Box::new(existing.clone()),
                     plan: plan.clone(),
                     trust: trust.clone(),
                 },

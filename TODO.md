@@ -125,6 +125,7 @@ Every arrow is a row in the reducer match. Every unlisted `(state, action)` pair
 - [x] Distro/arch awareness: ELF arch-mismatch warning (Asahi/ARM64), loud fail with install command for missing runtime deps (`gcompat` on musl/Alpine, `appimage-run`/`nix-ld` on NixOS, `java` for `.jar`), SELinux `restorecon` (Fedora/RHEL), and Pantheon/Budgie/LXQt/Niri/River/i3/bspwm DE quirks
 - [x] Suggestive failures & warnings: Windows/macOS package detection (`.exe`/`.msi`/`.dmg`), friendly distro-package redirects (`.deb`/`.rpm`/`.flatpak`/`.snap`), safe `ld-linux --list` missing shared library warnings, and `/proc/self/mounts` `noexec` mount detection
 - [x] Hardening: atomic replace backup/restore on rollback, pre-install extracted-size & compression-ratio overridable warning, real AppImage `.sha256_sig` GPG verification, live GUI progress streaming, and temp preview icon cleanup
+- [x] Dedicated Settings page (auto-update switch, uninstall defaults, file association register/restore, Danger Zone for Uninstall easi) and Android-style Per-App Info page (icon, developer, signature, origin, App/User Data/Cache storage breakdown, Clear Cache, Clear Data, Uninstall)
 - [ ] Portable app-list backup (`easi export` / `easi import`) to reinstall upstream-tracked apps on a new Linux machine or fresh SteamOS/CachyOS install
 
 ## Open questions

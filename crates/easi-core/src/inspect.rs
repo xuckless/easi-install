@@ -735,6 +735,21 @@ where
         metainfo.map(|(_, xml)| xml.as_str()),
     );
 
+    let developer = metainfo
+        .and_then(|(_, xml)| crate::appid::extract_xml_tag(xml, "developer_name"))
+        .or_else(|| {
+            update_source.as_ref().and_then(|src| match src {
+                crate::model::UpdateSource::GitHubRelease { owner, .. } => Some(owner.clone()),
+                crate::model::UpdateSource::ZsyncUrl { .. } => None,
+            })
+        });
+    let signature_summary = match &trust.signature {
+        SignatureStatus::Verified(m) => Some(format!("Verified ({m})")),
+        SignatureStatus::PresentUnverified(m) => Some(format!("Unverified ({m})")),
+        SignatureStatus::Invalid(m) => Some(format!("Invalid ({m})")),
+        SignatureStatus::None => Some("None".into()),
+    };
+
     let plan = InstallPlan {
         source_path: path.to_path_buf(),
         format,
@@ -748,13 +763,16 @@ where
         icon_bytes,
         desktop_entry: desktop.map(|(_, text)| text.clone()),
         startup_wm_class,
+        developer,
+        origin_url: trust.origin_url.clone(),
+        signature_summary,
         update_source,
         planned_writes,
     };
 
     if let Some(existing) = find_existing(&app_id) {
         return Ok(Classified::Conflict {
-            existing,
+            existing: Box::new(existing),
             plan,
             trust,
         });

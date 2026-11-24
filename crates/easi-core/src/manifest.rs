@@ -18,6 +18,12 @@ pub struct Manifest {
     pub kind: AppKind,
     pub install_dir: PathBuf,
     #[serde(default)]
+    pub developer: Option<String>,
+    #[serde(default)]
+    pub origin_url: Option<String>,
+    #[serde(default)]
+    pub signature_summary: Option<String>,
+    #[serde(default)]
     pub update_source: Option<UpdateSource>,
     pub created_files: Vec<PathBuf>,
     pub created_dirs: Vec<PathBuf>,
@@ -32,21 +38,39 @@ impl Manifest {
             source_filename: self.source_filename.clone(),
             install_dir: self.install_dir.clone(),
             kind: self.kind,
+            developer: self.developer.clone(),
+            origin_url: self.origin_url.clone(),
+            signature_summary: self.signature_summary.clone(),
             size_bytes: dir_size_bytes(&self.install_dir),
             data_size_bytes: 0,
+            cache_size_bytes: 0,
         }
     }
 
     pub fn to_installed_app_with_sizes(&self, roots: &InstallRoots) -> InstalledApp {
-        let data_size_bytes = crate::install::find_app_data_dirs(roots, self)
+        let data_size_bytes = crate::install::find_app_user_data_dirs(roots, self)
+            .iter()
+            .map(|d| dir_size_bytes(d))
+            .sum();
+        let cache_size_bytes = crate::install::find_app_cache_dirs(roots, self)
             .iter()
             .map(|d| dir_size_bytes(d))
             .sum();
         InstalledApp {
             data_size_bytes,
+            cache_size_bytes,
             ..self.to_installed_app()
         }
     }
+}
+
+/// Locate the hicolor icon file installed for `app_id`, if any.
+pub fn find_installed_icon(roots: &InstallRoots, app_id: &str) -> Option<PathBuf> {
+    let candidates = [
+        roots.icons_dir.join(format!("scalable/apps/{app_id}.svg")),
+        roots.icons_dir.join(format!("256x256/apps/{app_id}.png")),
+    ];
+    candidates.into_iter().find(|p| p.exists())
 }
 
 /// Sum regular file bytes under `path` without following symlinks.

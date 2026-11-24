@@ -25,6 +25,7 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
     let window = ui::AppWindow::new()?;
     let cfg = easi_core::self_update::load_config(&runner.roots);
     window.set_auto_check_updates(cfg.auto_check_updates);
+    window.set_easi_version(env!("CARGO_PKG_VERSION").into());
 
     if let Ok(st) = store.lock() {
         project_state(&window, st.state());
@@ -87,6 +88,98 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         let r = Arc::clone(&runner);
         window.on_open_path(move |p| {
             dispatch_action(&w, &s, &r, Action::OpenPath(PathBuf::from(p.as_str())));
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        let r = Arc::clone(&runner);
+        window.on_open_app_info(move |app_id| {
+            let id: String = app_id.into();
+            if let (Some(win), Ok(st)) = (w.upgrade(), s.lock())
+                && let State::Idle { installed } = st.state()
+                && let Some(app) = installed.iter().find(|a| a.app_id == id)
+            {
+                project_app_detail(&win, &r.roots, app);
+                win.set_detail_feedback("".into());
+                win.set_detail_confirm_clear_data(false);
+                win.set_detail_confirm_uninstall(false);
+                win.set_detail_purge_checked(win.get_purge_data_on_uninstall());
+                win.set_manager_page("app_info".into());
+            }
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        let r = Arc::clone(&runner);
+        window.on_clear_app_cache(move |app_id| {
+            let id: String = app_id.into();
+            let msg = match easi_core::install::clear_app_cache(&r.roots, &id) {
+                Ok(freed) => format!(
+                    "Cleared cache ({} freed).",
+                    easi_core::manifest::format_human_bytes(freed)
+                ),
+                Err(e) => format!(
+                    "Failed to clear cache: {}",
+                    easi_core::format_user_error(&e)
+                ),
+            };
+            if let Some(win) = w.upgrade() {
+                win.set_detail_feedback(msg.into());
+            }
+            dispatch_action(&w, &s, &r, Action::LoadInstalled);
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        let r = Arc::clone(&runner);
+        window.on_clear_app_data(move |app_id| {
+            let id: String = app_id.into();
+            let msg = match easi_core::install::clear_app_user_data(&r.roots, &id) {
+                Ok(freed) => format!(
+                    "Cleared user data ({} freed).",
+                    easi_core::manifest::format_human_bytes(freed)
+                ),
+                Err(e) => format!("Failed to clear data: {}", easi_core::format_user_error(&e)),
+            };
+            if let Some(win) = w.upgrade() {
+                win.set_detail_feedback(msg.into());
+            }
+            dispatch_action(&w, &s, &r, Action::LoadInstalled);
+        });
+    }
+    {
+        let w = window.as_weak();
+        let r = Arc::clone(&runner);
+        window.on_run_setup_handlers(move || {
+            let msg = match std::env::current_exe()
+                .map_err(easi_core::EasiError::Io)
+                .and_then(|exe| easi_core::desktop::run_setup(&r.roots, &exe))
+            {
+                Ok(saved) => format!(
+                    "Registered easi for supported package types (remembered {} previous handler(s)).",
+                    saved.defaults.len()
+                ),
+                Err(e) => format!("Setup failed: {}", easi_core::format_user_error(&e)),
+            };
+            if let Some(win) = w.upgrade() {
+                win.set_settings_feedback(msg.into());
+            }
+        });
+    }
+    {
+        let w = window.as_weak();
+        let r = Arc::clone(&runner);
+        window.on_run_restore_handlers(move || {
+            let msg = match easi_core::desktop::restore_handlers(&r.roots) {
+                Ok(n) => format!("Restored {n} previous handler(s) and removed easi.desktop."),
+                Err(e) => format!("Restore failed: {}", easi_core::format_user_error(&e)),
+            };
+            if let Some(win) = w.upgrade() {
+                win.set_settings_feedback(msg.into());
+            }
         });
     }
     {
@@ -475,6 +568,15 @@ fn project_state(win: &ui::AppWindow, state: &State) {
                 })
                 .collect();
             win.set_installed_apps(ModelRc::new(VecModel::from(rows)));
+            // If currently viewing an app's detail page, keep its storage numbers fresh.
+            let active_detail = win.get_detail_app_id().to_string();
+            if win.get_manager_page() == "app_info"
+                && !active_detail.is_empty()
+                && let Some(app) = installed.iter().find(|a| a.app_id == active_detail)
+                && let Ok(roots) = InstallRoots::default_user()
+            {
+                project_app_detail(win, &roots, app);
+            }
         }
         State::Inspecting { path } => {
             win.set_screen("inspecting".into());
@@ -659,6 +761,41 @@ fn load_preview_icon(app_id: &str, bytes: Option<&[u8]>) -> Option<slint::Image>
     let path = std::env::temp_dir().join(format!("easi-preview-{safe_id}.{ext}"));
     std::fs::write(&path, data).ok()?;
     slint::Image::load_from_path(&path).ok()
+}
+
+fn project_app_detail(win: &ui::AppWindow, roots: &InstallRoots, app: &easi_core::InstalledApp) {
+    win.set_detail_app_id(app.app_id.clone().into());
+    win.set_detail_name(app.name.clone().into());
+    win.set_detail_version(app.version.clone().unwrap_or_default().into());
+    win.set_detail_kind(
+        match app.kind {
+            AppKind::Gui => "GUI Application",
+            AppKind::Terminal => "Terminal Command",
+        }
+        .into(),
+    );
+    win.set_detail_developer(app.developer.clone().unwrap_or_default().into());
+    win.set_detail_origin(app.origin_url.clone().unwrap_or_default().into());
+    win.set_detail_signature(app.signature_summary.clone().unwrap_or_default().into());
+    win.set_detail_install_dir(app.install_dir.display().to_string().into());
+    win.set_detail_app_size(easi_core::manifest::format_human_bytes(app.size_bytes).into());
+    win.set_detail_data_size(easi_core::manifest::format_human_bytes(app.data_size_bytes).into());
+    win.set_detail_cache_size(easi_core::manifest::format_human_bytes(app.cache_size_bytes).into());
+    let total = app
+        .size_bytes
+        .saturating_add(app.data_size_bytes)
+        .saturating_add(app.cache_size_bytes);
+    win.set_detail_total_size(easi_core::manifest::format_human_bytes(total).into());
+    win.set_detail_has_cache(app.cache_size_bytes > 0);
+    win.set_detail_has_data(app.data_size_bytes > 0);
+    if let Some(icon_path) = easi_core::manifest::find_installed_icon(roots, &app.app_id)
+        && let Ok(img) = slint::Image::load_from_path(&icon_path)
+    {
+        win.set_detail_icon(img);
+        win.set_detail_has_icon(true);
+    } else {
+        win.set_detail_has_icon(false);
+    }
 }
 
 fn format_app_size(size_bytes: u64, data_size_bytes: u64) -> String {

@@ -84,6 +84,9 @@ pub struct InstallPlan {
     pub icon_bytes: Option<Vec<u8>>,
     pub desktop_entry: Option<String>,
     pub startup_wm_class: Option<String>,
+    pub developer: Option<String>,
+    pub origin_url: Option<String>,
+    pub signature_summary: Option<String>,
     pub update_source: Option<UpdateSource>,
     pub planned_writes: Vec<String>,
 }
@@ -124,6 +127,9 @@ impl ChoiceDraft {
             icon_bytes: None,
             desktop_entry: self.desktop_entry,
             startup_wm_class: self.startup_wm_class,
+            developer: None,
+            origin_url: None,
+            signature_summary: None,
             update_source: None,
             planned_writes: vec![],
         }
@@ -145,8 +151,12 @@ pub struct InstalledApp {
     pub source_filename: String,
     pub install_dir: PathBuf,
     pub kind: AppKind,
+    pub developer: Option<String>,
+    pub origin_url: Option<String>,
+    pub signature_summary: Option<String>,
     pub size_bytes: u64,
     pub data_size_bytes: u64,
+    pub cache_size_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,7 +186,7 @@ pub enum Classified {
         trust: TrustSummary,
     },
     Conflict {
-        existing: InstalledApp,
+        existing: Box<InstalledApp>,
         plan: InstallPlan,
         trust: TrustSummary,
     },

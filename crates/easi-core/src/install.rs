@@ -415,6 +415,9 @@ where
                     source_filename,
                     kind: plan.kind,
                     install_dir: app_dir.clone(),
+                    developer: plan.developer.clone(),
+                    origin_url: plan.origin_url.clone(),
+                    signature_summary: plan.signature_summary.clone(),
                     update_source: plan.update_source.clone(),
                     created_files: tx.created_files.clone(),
                     created_dirs: tx.created_dirs.clone(),
@@ -1028,9 +1031,7 @@ pub fn refresh_desktop_caches(roots: &InstallRoots) {
     }
 }
 
-/// Find likely per-user XDG settings/cache/data directories created by an installed app
-/// (`~/.config/<slug>`, `~/.cache/<slug>`, `~/.local/share/<slug>`).
-pub fn find_app_data_dirs(roots: &InstallRoots, manifest: &Manifest) -> Vec<PathBuf> {
+fn candidate_xdg_names(manifest: &Manifest) -> Vec<String> {
     let bare_id = manifest
         .app_id
         .strip_prefix("easi.")
@@ -1045,15 +1046,13 @@ pub fn find_app_data_dirs(roots: &InstallRoots, manifest: &Manifest) -> Vec<Path
     ];
     names.sort();
     names.dedup();
+    names
+}
 
-    let xdg_roots = [
-        roots.home_dir.join(".config"),
-        roots.home_dir.join(".cache"),
-        roots.home_dir.join(".local/share"),
-    ];
-
+fn find_matching_dirs(bases: &[PathBuf], manifest: &Manifest) -> Vec<PathBuf> {
+    let names = candidate_xdg_names(manifest);
     let mut found = Vec::new();
-    for base in xdg_roots {
+    for base in bases {
         for name in &names {
             if name.is_empty()
                 || name == "easi"
@@ -1072,6 +1071,53 @@ pub fn find_app_data_dirs(roots: &InstallRoots, manifest: &Manifest) -> Vec<Path
         }
     }
     found
+}
+
+/// Find per-user cache directories (`~/.cache/<slug>`) for an installed app.
+pub fn find_app_cache_dirs(roots: &InstallRoots, manifest: &Manifest) -> Vec<PathBuf> {
+    find_matching_dirs(&[roots.home_dir.join(".cache")], manifest)
+}
+
+/// Find per-user settings/data directories (`~/.config/<slug>`, `~/.local/share/<slug>`).
+pub fn find_app_user_data_dirs(roots: &InstallRoots, manifest: &Manifest) -> Vec<PathBuf> {
+    find_matching_dirs(
+        &[
+            roots.home_dir.join(".config"),
+            roots.home_dir.join(".local/share"),
+        ],
+        manifest,
+    )
+}
+
+/// Find all likely per-user XDG settings/cache/data directories created by an installed app.
+pub fn find_app_data_dirs(roots: &InstallRoots, manifest: &Manifest) -> Vec<PathBuf> {
+    let mut all = find_app_user_data_dirs(roots, manifest);
+    all.extend(find_app_cache_dirs(roots, manifest));
+    all
+}
+
+/// Clear only the `~/.cache/<slug>` directories for an installed app. Returns freed bytes.
+pub fn clear_app_cache(roots: &InstallRoots, query: &str) -> Result<u64, EasiError> {
+    let manifest = resolve_installed(roots, query)?;
+    let dirs = find_app_cache_dirs(roots, &manifest);
+    let mut freed = 0u64;
+    for dir in dirs {
+        freed = freed.saturating_add(crate::manifest::dir_size_bytes(&dir));
+        let _ = fs::remove_dir_all(&dir);
+    }
+    Ok(freed)
+}
+
+/// Clear `~/.config/<slug>` and `~/.local/share/<slug>` user data for an installed app.
+pub fn clear_app_user_data(roots: &InstallRoots, query: &str) -> Result<u64, EasiError> {
+    let manifest = resolve_installed(roots, query)?;
+    let dirs = find_app_user_data_dirs(roots, &manifest);
+    let mut freed = 0u64;
+    for dir in dirs {
+        freed = freed.saturating_add(crate::manifest::dir_size_bytes(&dir));
+        let _ = fs::remove_dir_all(&dir);
+    }
+    Ok(freed)
 }
 
 /// Replay manifest in reverse and remove the manifest file.
@@ -1349,5 +1395,17 @@ mod tests {
         );
         let m = find_manifest_by_id(&roots, "coolapp").expect("v1 manifest must remain");
         assert_eq!(m.version.as_deref(), Some("1.0.0"));
+
+        // Verify clear_app_cache removes only ~/.cache/coolapp and leaves ~/.config/coolapp intact.
+        let cache_dir = roots.home_dir.join(".cache/coolapp");
+        let config_dir = roots.home_dir.join(".config/coolapp");
+        fs::create_dir_all(&cache_dir).expect("mkdir cache");
+        fs::create_dir_all(&config_dir).expect("mkdir config");
+        fs::write(cache_dir.join("tmp.bin"), b"123456").expect("write cache");
+        fs::write(config_dir.join("settings.toml"), b"ok=true").expect("write config");
+        let freed = clear_app_cache(&roots, "coolapp").expect("clear cache");
+        assert_eq!(freed, 6);
+        assert!(!cache_dir.exists());
+        assert!(config_dir.exists());
     }
 }

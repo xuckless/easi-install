@@ -46,13 +46,15 @@ component Card inherits Rectangle {
 
 export component AppWindow inherits Window {
     title: "easi";
-    preferred-width: 640px;
-    preferred-height: 540px;
-    min-width: 520px;
-    min-height: 440px;
+    preferred-width: 660px;
+    preferred-height: 560px;
+    min-width: 540px;
+    min-height: 460px;
 
     // Projected state from easi-core::State
     in property <string> screen: "idle";
+    in-out property <string> manager-page: "apps"; // "apps" | "settings" | "app_info"
+    in property <string> easi-version: "";
     in property <[InstalledRow]> installed-apps: [];
     in property <string> total-size-text: "";
     in-out property <string> search-query: "";
@@ -62,6 +64,31 @@ export component AppWindow inherits Window {
     in-out property <bool> auto-check-updates: true;
     in-out property <bool> purge-data-on-uninstall: false;
     in-out property <bool> confirm-self-uninstall: false;
+    in property <string> settings-feedback: "";
+
+    // Selected App Info (Android-style per-app view)
+    in property <string> detail-app-id: "";
+    in property <string> detail-name: "";
+    in property <string> detail-version: "";
+    in property <string> detail-kind: "";
+    in property <string> detail-developer: "";
+    in property <string> detail-origin: "";
+    in property <string> detail-signature: "";
+    in property <string> detail-install-dir: "";
+    in property <string> detail-app-size: "";
+    in property <string> detail-data-size: "";
+    in property <string> detail-cache-size: "";
+    in property <string> detail-total-size: "";
+    in property <bool> detail-has-cache: false;
+    in property <bool> detail-has-data: false;
+    in property <image> detail-icon;
+    in property <bool> detail-has-icon: false;
+    in property <string> detail-feedback: "";
+    in-out property <bool> detail-purge-checked: false;
+    in-out property <bool> detail-confirm-clear-data: false;
+    in-out property <bool> detail-confirm-uninstall: false;
+
+    // Installer flow projections
     in property <string> app-name: "";
     in property <string> app-version: "";
     in property <string> app-id: "";
@@ -103,6 +130,9 @@ export component AppWindow inherits Window {
     // Actions dispatched back to the Redux store
     callback browse-package();
     callback open-path(string);
+    callback open-app-info(string);
+    callback clear-app-cache(string);
+    callback clear-app-data(string);
     callback uninstall-app(string, bool);
     callback update-app(string);
     callback launch-app(string);
@@ -111,6 +141,8 @@ export component AppWindow inherits Window {
     callback copy-suggested-command(string);
     callback check-app-updates();
     callback run-self-update();
+    callback run-setup-handlers();
+    callback run-restore-handlers();
     callback run-self-uninstall();
     callback toggle-auto-update(bool);
     callback confirm-install();
@@ -125,17 +157,19 @@ export component AppWindow inherits Window {
         padding: Theme.pad-outer;
         spacing: Theme.gap-lg;
 
-        // --- Idle: Standalone App Manager + Package Picker ---
+        // --- Idle: Standalone App Manager (Apps / App Info / Settings pages) ---
         if root.screen == "idle": VerticalBox {
-            spacing: Theme.gap-lg;
+            spacing: Theme.gap-md;
             padding: 0px;
 
-            // Header
+            // Top bar with page navigation
             HorizontalBox {
                 padding: 0px;
+                spacing: Theme.gap-sm;
                 VerticalBox {
                     padding: 0px;
                     spacing: 2px;
+                    horizontal-stretch: 1;
                     Text {
                         text: "easi";
                         font-size: Theme.font-title;
@@ -147,222 +181,239 @@ export component AppWindow inherits Window {
                         color: Theme.muted-text;
                     }
                 }
-            }
-
-            // Optional easi self-update banner
-            if root.easi-update-version != "": Rectangle {
-                border-width: 1px;
-                border-color: Theme.accent;
-                border-radius: Theme.radius-card;
-                background: Theme.accent-tint;
-                HorizontalBox {
-                    padding: Theme.pad-card;
-                    spacing: Theme.gap-md;
-                    Text {
-                        text: "easi " + root.easi-update-version + " is available";
-                        font-size: Theme.font-body;
-                        font-weight: 700;
-                        vertical-alignment: center;
-                        horizontal-stretch: 1;
+                Button {
+                    text: "Apps";
+                    primary: root.manager-page == "apps" || root.manager-page == "app_info";
+                    clicked => {
+                        root.manager-page = "apps";
+                        root.confirm-self-uninstall = false;
                     }
-                    Button {
-                        text: "Update Now";
-                        primary: true;
-                        clicked => { root.run-self-update(); }
+                }
+                Button {
+                    text: "Settings";
+                    primary: root.manager-page == "settings";
+                    clicked => {
+                        root.manager-page = "settings";
+                        root.confirm-self-uninstall = false;
                     }
                 }
             }
 
-            // Install a package card
-            Card {
-                VerticalBox {
-                    padding: Theme.pad-card;
-                    spacing: Theme.gap-sm;
-                    Text {
-                        text: "Install a Package";
-                        font-size: Theme.font-section;
-                        font-weight: 700;
-                    }
-                    Text {
-                        text: "Supports AppImage, .tar.*, .zip, .7z, .jar, bare ELF, and .run/.sh/.bin";
-                        font-size: Theme.font-caption;
-                        color: Theme.muted-text;
-                    }
+            // === PAGE 1: Apps ===
+            if root.manager-page == "apps": VerticalBox {
+                padding: 0px;
+                spacing: Theme.gap-md;
+                vertical-stretch: 1;
+
+                if root.easi-update-version != "": Rectangle {
+                    border-width: 1px;
+                    border-color: Theme.accent;
+                    border-radius: Theme.radius-card;
+                    background: Theme.accent-tint;
                     HorizontalBox {
-                        padding: 0px;
-                        spacing: Theme.gap-sm;
-                        Button {
-                            text: "Install Package…";
-                            primary: true;
-                            clicked => { root.browse-package(); }
-                        }
-                        LineEdit {
-                            text <=> root.idle-path-input;
-                            placeholder-text: "Or paste path to package…";
+                        padding: Theme.pad-card;
+                        spacing: Theme.gap-md;
+                        Text {
+                            text: "easi " + root.easi-update-version + " is available";
+                            font-size: Theme.font-body;
+                            font-weight: 700;
+                            vertical-alignment: center;
                             horizontal-stretch: 1;
                         }
                         Button {
-                            text: "Open";
-                            enabled: root.idle-path-input != "";
-                            clicked => { root.open-path(root.idle-path-input); }
+                            text: "Update Now";
+                            primary: true;
+                            clicked => { root.run-self-update(); }
                         }
                     }
                 }
-            }
 
-            // Installed apps section
-            VerticalBox {
-                padding: 0px;
-                spacing: Theme.gap-sm;
-                vertical-stretch: 1;
-
-                HorizontalBox {
-                    padding: 0px;
-                    spacing: Theme.gap-sm;
-                    Text {
-                        text: "Installed Apps (" + root.installed-apps.length + ")" + (root.total-size-text != "" ? "  •  " + root.total-size-text : "");
-                        font-size: Theme.font-section;
-                        font-weight: 700;
-                        vertical-alignment: center;
-                        horizontal-stretch: 1;
-                    }
-                    Button {
-                        text: root.sort-by-size ? "Sort: Largest" : "Sort: Name";
-                        enabled: root.installed-apps.length > 1;
-                        clicked => {
-                            root.sort-by-size = !root.sort-by-size;
-                            root.filter-changed();
-                        }
-                    }
-                    Button {
-                        text: "Check Updates";
-                        enabled: root.installed-apps.length > 0;
-                        clicked => { root.check-app-updates(); }
-                    }
-                }
-
-                // Search & kind filter row
-                HorizontalBox {
-                    padding: 0px;
-                    spacing: Theme.gap-sm;
-                    LineEdit {
-                        text <=> root.search-query;
-                        placeholder-text: "Filter installed apps…";
-                        horizontal-stretch: 1;
-                        edited => { root.filter-changed(); }
-                    }
-                    Button {
-                        text: "All";
-                        primary: root.filter-kind == "all";
-                        clicked => { root.filter-kind = "all"; root.filter-changed(); }
-                    }
-                    Button {
-                        text: "GUI";
-                        primary: root.filter-kind == "gui";
-                        clicked => { root.filter-kind = "gui"; root.filter-changed(); }
-                    }
-                    Button {
-                        text: "CLI";
-                        primary: root.filter-kind == "cli";
-                        clicked => { root.filter-kind = "cli"; root.filter-changed(); }
-                    }
-                }
-
-                if root.installed-apps.length == 0: Card {
-                    vertical-stretch: 1;
+                // Install a package card
+                Card {
                     VerticalBox {
-                        alignment: center;
-                        padding: Theme.pad-outer;
+                        padding: Theme.pad-card;
                         spacing: Theme.gap-sm;
                         Text {
-                            text: "No apps installed by easi yet";
-                            font-size: Theme.font-body;
-                            font-weight: 600;
-                            horizontal-alignment: center;
+                            text: "Install a Package";
+                            font-size: Theme.font-section;
+                            font-weight: 700;
                         }
                         Text {
-                            text: "Click “Install Package…” above or double-click any downloaded package in your file manager.";
+                            text: "Supports AppImage, .tar.*, .zip, .7z, .jar, bare ELF, and .run/.sh/.bin";
                             font-size: Theme.font-caption;
                             color: Theme.muted-text;
-                            horizontal-alignment: center;
-                            wrap: word-wrap;
+                        }
+                        HorizontalBox {
+                            padding: 0px;
+                            spacing: Theme.gap-sm;
+                            Button {
+                                text: "Install Package…";
+                                primary: true;
+                                clicked => { root.browse-package(); }
+                            }
+                            LineEdit {
+                                text <=> root.idle-path-input;
+                                placeholder-text: "Or paste path to package…";
+                                horizontal-stretch: 1;
+                            }
+                            Button {
+                                text: "Open";
+                                enabled: root.idle-path-input != "";
+                                clicked => { root.open-path(root.idle-path-input); }
+                            }
                         }
                     }
                 }
 
-                if root.installed-apps.length > 0: ScrollView {
+                // Installed apps section
+                VerticalBox {
+                    padding: 0px;
+                    spacing: Theme.gap-sm;
                     vertical-stretch: 1;
-                    min-height: 160px;
-                    VerticalBox {
-                        padding: 2px;
+
+                    HorizontalBox {
+                        padding: 0px;
                         spacing: Theme.gap-sm;
-                        for app in root.installed-apps: Card {
-                            HorizontalBox {
-                                padding: Theme.pad-card;
-                                spacing: Theme.gap-md;
-                                VerticalBox {
-                                    padding: 0px;
-                                    spacing: 3px;
-                                    horizontal-stretch: 1;
-                                    HorizontalBox {
+                        Text {
+                            text: "Installed Apps (" + root.installed-apps.length + ")" + (root.total-size-text != "" ? "  •  " + root.total-size-text : "");
+                            font-size: Theme.font-section;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        Button {
+                            text: root.sort-by-size ? "Sort: Largest" : "Sort: Name";
+                            enabled: root.installed-apps.length > 1;
+                            clicked => {
+                                root.sort-by-size = !root.sort-by-size;
+                                root.filter-changed();
+                            }
+                        }
+                        Button {
+                            text: "Check Updates";
+                            enabled: root.installed-apps.length > 0;
+                            clicked => { root.check-app-updates(); }
+                        }
+                    }
+
+                    HorizontalBox {
+                        padding: 0px;
+                        spacing: Theme.gap-sm;
+                        LineEdit {
+                            text <=> root.search-query;
+                            placeholder-text: "Filter installed apps…";
+                            horizontal-stretch: 1;
+                            edited => { root.filter-changed(); }
+                        }
+                        Button {
+                            text: "All";
+                            primary: root.filter-kind == "all";
+                            clicked => { root.filter-kind = "all"; root.filter-changed(); }
+                        }
+                        Button {
+                            text: "GUI";
+                            primary: root.filter-kind == "gui";
+                            clicked => { root.filter-kind = "gui"; root.filter-changed(); }
+                        }
+                        Button {
+                            text: "CLI";
+                            primary: root.filter-kind == "cli";
+                            clicked => { root.filter-kind = "cli"; root.filter-changed(); }
+                        }
+                    }
+
+                    if root.installed-apps.length == 0: Card {
+                        vertical-stretch: 1;
+                        VerticalBox {
+                            alignment: center;
+                            padding: Theme.pad-outer;
+                            spacing: Theme.gap-sm;
+                            Text {
+                                text: "No apps installed by easi yet";
+                                font-size: Theme.font-body;
+                                font-weight: 600;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: "Click “Install Package…” above or double-click any downloaded package in your file manager.";
+                                font-size: Theme.font-caption;
+                                color: Theme.muted-text;
+                                horizontal-alignment: center;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+
+                    if root.installed-apps.length > 0: ScrollView {
+                        vertical-stretch: 1;
+                        min-height: 180px;
+                        VerticalBox {
+                            padding: 2px;
+                            spacing: Theme.gap-sm;
+                            for app in root.installed-apps: Card {
+                                HorizontalBox {
+                                    padding: Theme.pad-card;
+                                    spacing: Theme.gap-md;
+                                    VerticalBox {
                                         padding: 0px;
-                                        spacing: Theme.gap-sm;
-                                        Text {
-                                            text: app.name + (app.version != "" ? "  v" + app.version : "");
-                                            font-size: Theme.font-body;
-                                            font-weight: 700;
-                                            vertical-alignment: center;
-                                        }
-                                        Rectangle {
-                                            border-width: 1px;
-                                            border-color: Theme.border-subtle;
-                                            border-radius: 4px;
-                                            background: Theme.surface-tint;
-                                            HorizontalBox {
-                                                padding-left: 6px;
-                                                padding-right: 6px;
-                                                padding-top: 1px;
-                                                padding-bottom: 1px;
-                                                Text {
-                                                    text: app.kind;
-                                                    font-size: 10px;
-                                                    font-weight: 600;
-                                                    color: Theme.muted-text;
+                                        spacing: 3px;
+                                        horizontal-stretch: 1;
+                                        HorizontalBox {
+                                            padding: 0px;
+                                            spacing: Theme.gap-sm;
+                                            Text {
+                                                text: app.name + (app.version != "" ? "  v" + app.version : "");
+                                                font-size: Theme.font-body;
+                                                font-weight: 700;
+                                                vertical-alignment: center;
+                                            }
+                                            Rectangle {
+                                                border-width: 1px;
+                                                border-color: Theme.border-subtle;
+                                                border-radius: 4px;
+                                                background: Theme.surface-tint;
+                                                HorizontalBox {
+                                                    padding-left: 6px;
+                                                    padding-right: 6px;
+                                                    padding-top: 1px;
+                                                    padding-bottom: 1px;
+                                                    Text {
+                                                        text: app.kind;
+                                                        font-size: 10px;
+                                                        font-weight: 600;
+                                                        color: Theme.muted-text;
+                                                    }
                                                 }
                                             }
                                         }
+                                        Text {
+                                            text: app.app-id + (app.size-text != "" ? "  •  " + app.size-text : "");
+                                            font-size: Theme.font-caption;
+                                            color: Theme.muted-text;
+                                        }
+                                        if app.update-note != "": Text {
+                                            text: app.update-note;
+                                            font-size: Theme.font-caption;
+                                            font-weight: 600;
+                                            color: Theme.accent;
+                                        }
                                     }
-                                    Text {
-                                        text: app.app-id + (app.size-text != "" ? "  •  " + app.size-text : "");
-                                        font-size: Theme.font-caption;
-                                        color: Theme.muted-text;
-                                    }
-                                    if app.update-note != "": Text {
-                                        text: app.update-note;
-                                        font-size: Theme.font-caption;
-                                        font-weight: 600;
-                                        color: Theme.accent;
-                                    }
-                                }
-                                HorizontalBox {
-                                    padding: 0px;
-                                    spacing: Theme.gap-sm;
-                                    if app.has-update: Button {
-                                        text: "Update";
-                                        primary: true;
-                                        clicked => { root.update-app(app.app-id); }
-                                    }
-                                    Button {
-                                        text: "Launch";
-                                        clicked => { root.launch-app(app.app-id); }
-                                    }
-                                    Button {
-                                        text: "Folder";
-                                        clicked => { root.open-app-folder(app.app-id); }
-                                    }
-                                    Button {
-                                        text: "Uninstall";
-                                        clicked => { root.uninstall-app(app.app-id, root.purge-data-on-uninstall); }
+                                    HorizontalBox {
+                                        padding: 0px;
+                                        spacing: Theme.gap-sm;
+                                        if app.has-update: Button {
+                                            text: "Update";
+                                            primary: true;
+                                            clicked => { root.update-app(app.app-id); }
+                                        }
+                                        Button {
+                                            text: "Launch";
+                                            clicked => { root.launch-app(app.app-id); }
+                                        }
+                                        Button {
+                                            text: "App Info";
+                                            clicked => { root.open-app-info(app.app-id); }
+                                        }
                                     }
                                 }
                             }
@@ -371,51 +422,408 @@ export component AppWindow inherits Window {
                 }
             }
 
-            // Footer settings & self-uninstall
-            Rectangle {
-                height: 1px;
-                background: Theme.border-subtle;
-            }
-            HorizontalBox {
-                padding: 0px;
-                spacing: Theme.gap-md;
-                CheckBox {
-                    text: "Also remove app settings & cache on uninstall";
-                    checked <=> root.purge-data-on-uninstall;
-                }
-            }
-            HorizontalBox {
-                padding: 0px;
-                spacing: Theme.gap-md;
-                Text {
-                    text: "Check for easi updates automatically";
-                    font-size: Theme.font-caption;
-                    color: Theme.muted-text;
-                    vertical-alignment: center;
-                    horizontal-stretch: 1;
-                }
-                Switch {
-                    checked <=> root.auto-check-updates;
-                    toggled => { root.toggle-auto-update(self.checked); }
-                }
-                if !root.confirm-self-uninstall: Button {
-                    text: "Uninstall easi";
-                    clicked => { root.confirm-self-uninstall = true; }
-                }
-                if root.confirm-self-uninstall: HorizontalBox {
-                    padding: 0px;
-                    spacing: Theme.gap-sm;
-                    Button {
-                        text: "Confirm Uninstall easi";
-                        primary: true;
-                        clicked => {
-                            root.confirm-self-uninstall = false;
-                            root.run-self-uninstall();
+            // === PAGE 2: Android-style Per-App Info ===
+            if root.manager-page == "app_info": ScrollView {
+                vertical-stretch: 1;
+                VerticalBox {
+                    padding: 2px;
+                    spacing: Theme.gap-md;
+
+                    HorizontalBox {
+                        padding: 0px;
+                        Button {
+                            text: "← Back to Apps";
+                            clicked => {
+                                root.manager-page = "apps";
+                                root.detail-confirm-uninstall = false;
+                                root.detail-confirm-clear-data = false;
+                            }
                         }
                     }
-                    Button {
-                        text: "Cancel";
-                        clicked => { root.confirm-self-uninstall = false; }
+
+                    // Identity & metadata card
+                    Card {
+                        HorizontalBox {
+                            padding: Theme.pad-card;
+                            spacing: Theme.gap-md;
+                            if root.detail-has-icon: Image {
+                                source: root.detail-icon;
+                                width: 52px;
+                                height: 52px;
+                                image-fit: contain;
+                            }
+                            VerticalBox {
+                                padding: 0px;
+                                spacing: 3px;
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: root.detail-name + (root.detail-version != "" ? "  v" + root.detail-version : "");
+                                    font-size: Theme.font-title;
+                                    font-weight: 700;
+                                }
+                                Text {
+                                    text: root.detail-kind + "  •  " + root.detail-app-id;
+                                    font-size: Theme.font-caption;
+                                    color: Theme.muted-text;
+                                }
+                                if root.detail-developer != "": Text {
+                                    text: "Developer: " + root.detail-developer;
+                                    font-size: Theme.font-caption;
+                                    color: Theme.muted-text;
+                                }
+                                if root.detail-signature != "": Text {
+                                    text: "Signature: " + root.detail-signature;
+                                    font-size: Theme.font-caption;
+                                    color: Theme.muted-text;
+                                }
+                                if root.detail-origin != "": Text {
+                                    text: "Origin: " + root.detail-origin;
+                                    font-size: Theme.font-caption;
+                                    color: Theme.muted-text;
+                                    wrap: word-wrap;
+                                }
+                                Text {
+                                    text: "Location: " + root.detail-install-dir;
+                                    font-size: Theme.font-caption;
+                                    color: Theme.muted-text;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+                    }
+
+                    // Quick actions
+                    HorizontalBox {
+                        padding: 0px;
+                        spacing: Theme.gap-sm;
+                        Button {
+                            text: "Launch";
+                            primary: true;
+                            clicked => { root.launch-app(root.detail-app-id); }
+                        }
+                        Button {
+                            text: "Open Folder";
+                            clicked => { root.open-app-folder(root.detail-app-id); }
+                        }
+                        Button {
+                            text: "Update";
+                            clicked => { root.update-app(root.detail-app-id); }
+                        }
+                    }
+
+                    // Storage card (Android App Info breakdown: App / User Data / Cache / Total)
+                    Card {
+                        VerticalBox {
+                            padding: Theme.pad-card;
+                            spacing: Theme.gap-sm;
+                            Text {
+                                text: "Storage";
+                                font-size: Theme.font-section;
+                                font-weight: 700;
+                            }
+                            HorizontalBox {
+                                padding: 0px;
+                                Text { text: "App"; font-size: Theme.font-body; horizontal-stretch: 1; }
+                                Text { text: root.detail-app-size; font-size: Theme.font-body; font-weight: 600; }
+                            }
+                            HorizontalBox {
+                                padding: 0px;
+                                Text { text: "User data (~/.config, ~/.local/share)"; font-size: Theme.font-body; horizontal-stretch: 1; }
+                                Text { text: root.detail-data-size; font-size: Theme.font-body; font-weight: 600; }
+                            }
+                            HorizontalBox {
+                                padding: 0px;
+                                Text { text: "Cache (~/.cache)"; font-size: Theme.font-body; horizontal-stretch: 1; }
+                                Text { text: root.detail-cache-size; font-size: Theme.font-body; font-weight: 600; }
+                            }
+                            Rectangle { height: 1px; background: Theme.border-subtle; }
+                            HorizontalBox {
+                                padding: 0px;
+                                Text { text: "Total"; font-size: Theme.font-body; font-weight: 700; horizontal-stretch: 1; }
+                                Text { text: root.detail-total-size; font-size: Theme.font-body; font-weight: 700; }
+                            }
+                            HorizontalBox {
+                                padding: 0px;
+                                spacing: Theme.gap-sm;
+                                Button {
+                                    text: "Clear Cache";
+                                    enabled: root.detail-has-cache;
+                                    clicked => { root.clear-app-cache(root.detail-app-id); }
+                                }
+                                if !root.detail-confirm-clear-data: Button {
+                                    text: "Clear Data";
+                                    enabled: root.detail-has-data;
+                                    clicked => { root.detail-confirm-clear-data = true; }
+                                }
+                                if root.detail-confirm-clear-data: HorizontalBox {
+                                    padding: 0px;
+                                    spacing: Theme.gap-sm;
+                                    Button {
+                                        text: "Confirm Clear Data";
+                                        primary: true;
+                                        clicked => {
+                                            root.detail-confirm-clear-data = false;
+                                            root.clear-app-data(root.detail-app-id);
+                                        }
+                                    }
+                                    Button {
+                                        text: "Cancel";
+                                        clicked => { root.detail-confirm-clear-data = false; }
+                                    }
+                                }
+                            }
+                            if root.detail-feedback != "": Text {
+                                text: root.detail-feedback;
+                                font-size: Theme.font-caption;
+                                color: Theme.success;
+                            }
+                        }
+                    }
+
+                    // Uninstall card
+                    Rectangle {
+                        border-width: 1px;
+                        border-color: Theme.danger;
+                        border-radius: Theme.radius-card;
+                        background: Theme.danger-tint;
+                        VerticalBox {
+                            padding: Theme.pad-card;
+                            spacing: Theme.gap-sm;
+                            Text {
+                                text: "Uninstall";
+                                font-size: Theme.font-section;
+                                font-weight: 700;
+                                color: Theme.danger;
+                            }
+                            CheckBox {
+                                text: "Also remove user data & cache";
+                                checked <=> root.detail-purge-checked;
+                            }
+                            HorizontalBox {
+                                padding: 0px;
+                                spacing: Theme.gap-sm;
+                                if !root.detail-confirm-uninstall: Button {
+                                    text: "Uninstall " + root.detail-name;
+                                    clicked => { root.detail-confirm-uninstall = true; }
+                                }
+                                if root.detail-confirm-uninstall: HorizontalBox {
+                                    padding: 0px;
+                                    spacing: Theme.gap-sm;
+                                    Button {
+                                        text: "Confirm Uninstall";
+                                        primary: true;
+                                        clicked => {
+                                            root.detail-confirm-uninstall = false;
+                                            root.manager-page = "apps";
+                                            root.uninstall-app(root.detail-app-id, root.detail-purge-checked);
+                                        }
+                                    }
+                                    Button {
+                                        text: "Cancel";
+                                        clicked => { root.detail-confirm-uninstall = false; }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // === PAGE 3: Settings ===
+            if root.manager-page == "settings": ScrollView {
+                vertical-stretch: 1;
+                VerticalBox {
+                    padding: 2px;
+                    spacing: Theme.gap-md;
+
+                    Card {
+                        VerticalBox {
+                            padding: Theme.pad-card;
+                            spacing: Theme.gap-sm;
+                            Text {
+                                text: "Updates";
+                                font-size: Theme.font-section;
+                                font-weight: 700;
+                            }
+                            HorizontalBox {
+                                padding: 0px;
+                                Text {
+                                    text: "Check for easi updates automatically";
+                                    font-size: Theme.font-body;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                }
+                                Switch {
+                                    checked <=> root.auto-check-updates;
+                                    toggled => { root.toggle-auto-update(self.checked); }
+                                }
+                            }
+                            HorizontalBox {
+                                padding: 0px;
+                                spacing: Theme.gap-sm;
+                                Text {
+                                    text: "Installed version: easi " + root.easi-version;
+                                    font-size: Theme.font-caption;
+                                    color: Theme.muted-text;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                }
+                                Button {
+                                    text: root.easi-update-version != "" ? "Update to " + root.easi-update-version : "Check for easi Update";
+                                    primary: root.easi-update-version != "";
+                                    clicked => { root.run-self-update(); }
+                                }
+                            }
+                        }
+                    }
+
+                    Card {
+                        VerticalBox {
+                            padding: Theme.pad-card;
+                            spacing: Theme.gap-sm;
+                            Text {
+                                text: "Uninstall Defaults";
+                                font-size: Theme.font-section;
+                                font-weight: 700;
+                            }
+                            HorizontalBox {
+                                padding: 0px;
+                                Text {
+                                    text: "Also remove app settings & cache by default";
+                                    font-size: Theme.font-body;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                }
+                                Switch {
+                                    checked <=> root.purge-data-on-uninstall;
+                                }
+                            }
+                        }
+                    }
+
+                    Card {
+                        VerticalBox {
+                            padding: Theme.pad-card;
+                            spacing: Theme.gap-sm;
+                            Text {
+                                text: "Desktop File Associations";
+                                font-size: Theme.font-section;
+                                font-weight: 700;
+                            }
+                            Text {
+                                text: "Register easi to handle downloaded AppImages and archives, or restore your previous archive manager.";
+                                font-size: Theme.font-caption;
+                                color: Theme.muted-text;
+                                wrap: word-wrap;
+                            }
+                            HorizontalBox {
+                                padding: 0px;
+                                spacing: Theme.gap-sm;
+                                Button {
+                                    text: "Register File Associations";
+                                    clicked => { root.run-setup-handlers(); }
+                                }
+                                Button {
+                                    text: "Restore Previous Handlers";
+                                    clicked => { root.run-restore-handlers(); }
+                                }
+                            }
+                            if root.settings-feedback != "": Text {
+                                text: root.settings-feedback;
+                                font-size: Theme.font-caption;
+                                color: Theme.success;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+
+                    // Danger Zone safely tucked at the bottom of Settings
+                    Rectangle {
+                        border-width: 1.5px;
+                        border-color: Theme.danger;
+                        border-radius: Theme.radius-card;
+                        background: Theme.danger-tint;
+                        VerticalBox {
+                            padding: Theme.pad-card;
+                            spacing: Theme.gap-sm;
+                            Text {
+                                text: "Danger Zone";
+                                font-size: Theme.font-section;
+                                font-weight: 700;
+                                color: Theme.danger;
+                            }
+                            Text {
+                                text: "Uninstall easi and restore your previous file handlers. Apps you installed in ~/Applications remain intact.";
+                                font-size: Theme.font-caption;
+                                color: Theme.muted-text;
+                                wrap: word-wrap;
+                            }
+                            HorizontalBox {
+                                padding: 0px;
+                                spacing: Theme.gap-sm;
+                                if !root.confirm-self-uninstall: Button {
+                                    text: "Uninstall easi";
+                                    clicked => { root.confirm-self-uninstall = true; }
+                                }
+                                if root.confirm-self-uninstall: HorizontalBox {
+                                    padding: 0px;
+                                    spacing: Theme.gap-sm;
+                                    Button {
+                                        text: "Confirm Uninstall easi";
+                                        primary: true;
+                                        clicked => {
+                                            root.confirm-self-uninstall = false;
+                                            root.run-self-uninstall();
+                                        }
+                                    }
+                                    Button {
+                                        text: "Cancel";
+                                        clicked => { root.confirm-self-uninstall = false; }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // About section
+                    Card {
+                        VerticalBox {
+                            padding: Theme.pad-card;
+                            spacing: 4px;
+                            HorizontalBox {
+                                padding: 0px;
+                                VerticalBox {
+                                    padding: 0px;
+                                    spacing: 2px;
+                                    horizontal-stretch: 1;
+                                    Text {
+                                        text: "About easi";
+                                        font-size: Theme.font-section;
+                                        font-weight: 700;
+                                    }
+                                    Text {
+                                        text: "Version " + root.easi-version + "  •  Developer: xuckless";
+                                        font-size: Theme.font-caption;
+                                        color: Theme.muted-text;
+                                    }
+                                    Text {
+                                        text: "Copyright © 2026 xuckless  •  Apache-2.0 License";
+                                        font-size: Theme.font-caption;
+                                        color: Theme.muted-text;
+                                    }
+                                    Text {
+                                        text: "github.com/xuckless/easi-install";
+                                        font-size: Theme.font-caption;
+                                        color: Theme.muted-text;
+                                    }
+                                }
+                                Button {
+                                    text: root.easi-update-version != "" ? "Update to " + root.easi-update-version : "Check for Update";
+                                    primary: root.easi-update-version != "";
+                                    clicked => { root.run-self-update(); }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -561,7 +969,6 @@ export component AppWindow inherits Window {
                 }
             }
 
-            // Script warning banner (only shown for .run / .sh / .bin installers)
             if root.has-script-warning: Rectangle {
                 border-width: 1.5px;
                 border-color: Theme.danger;
@@ -588,7 +995,6 @@ export component AppWindow inherits Window {
                 }
             }
 
-            // Permissions & Trust summary card
             Card {
                 vertical-stretch: 1;
                 ScrollView {
