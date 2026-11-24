@@ -110,7 +110,17 @@ const SOURCE_MARKERS: &[&str] = &[
     "pyproject.toml",
 ];
 
-pub fn score_executables(entries: &[ArchiveEntry], app_slug: &str) -> Vec<Candidate> {
+pub fn score_executables(
+    entries: &[ArchiveEntry],
+    app_slug: &str,
+    desktop_exec_hint: Option<&str>,
+) -> Vec<Candidate> {
+    let desktop_exec_base = desktop_exec_hint.and_then(|raw| {
+        let first = raw.split_whitespace().next()?;
+        Path::new(first)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_ascii_lowercase())
+    });
     let mut out = Vec::new();
     for entry in entries {
         if entry.is_dir || entry.is_symlink {
@@ -132,6 +142,9 @@ pub fn score_executables(entries: &[ArchiveEntry], app_slug: &str) -> Vec<Candid
         let mut score: i32 = if entry.is_elf { 50 } else { 20 };
         if exec_bit {
             score += 15;
+        }
+        if desktop_exec_base.as_deref() == Some(base.as_str()) {
+            score += 60;
         }
         if !app_slug.is_empty() && (base == app_slug || base.starts_with(app_slug)) {
             score += 45;
@@ -344,6 +357,7 @@ where
     let metainfo = contents.metainfo_files.first();
     let desktop = contents.desktop_files.first();
 
+    let desktop_exec_hint = desktop.and_then(|(_, text)| desktop_field(text, "Exec"));
     let is_appimage = matches!(format, Format::AppImageType1 | Format::AppImageType2);
     let exec_candidates = if is_appimage {
         vec![Candidate {
@@ -351,7 +365,7 @@ where
             score: 100,
         }]
     } else {
-        score_executables(&contents.entries, &file_slug)
+        score_executables(&contents.entries, &file_slug, desktop_exec_hint.as_deref())
     };
 
     if exec_candidates.is_empty() {

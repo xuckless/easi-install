@@ -465,6 +465,9 @@ fn extract_zip_safe(path: &Path, dest_root: &Path) -> Result<(), EasiError> {
             .by_index(i)
             .map_err(|e| EasiError::Archive(e.to_string()))?;
         let rel = PathBuf::from(entry.name());
+        if rel.as_os_str().is_empty() || rel == Path::new(".") || rel == Path::new("./") {
+            continue;
+        }
         let dest = safe_join(dest_root, &rel)?;
         let mode = entry.unix_mode().unwrap_or(0o644) & !0o6000;
 

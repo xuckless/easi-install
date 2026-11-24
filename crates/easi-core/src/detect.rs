@@ -144,7 +144,11 @@ fn is_metainfo_path(path: &str) -> bool {
 
 fn is_icon_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
-    lower.ends_with(".png") || lower.ends_with(".svg") || lower.ends_with(".xpm")
+    lower.ends_with(".png")
+        || lower.ends_with(".svg")
+        || lower.ends_with(".xpm")
+        || lower == ".diricon"
+        || lower.ends_with("/.diricon")
 }
 
 /// Inspect archive or AppImage without extracting to disk or executing untrusted code.
