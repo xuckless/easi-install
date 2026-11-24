@@ -290,10 +290,39 @@ pub fn build_trust_summary(
         .flatten()
         .and_then(|bytes| String::from_utf8(bytes).ok());
 
-    let signature = check_signature(path, contents.has_appimage_sig_section);
+    let signature = check_signature(
+        path,
+        contents.has_appimage_sig_section,
+        contents.appimage_sig_section.as_ref(),
+    );
     let mut warnings = Vec::new();
     let is_appimage_fmt = matches!(format, Format::AppImageType1 | Format::AppImageType2);
     let has_elf = contents.entries.iter().any(|e| e.is_elf);
+
+    // Pre-install extracted-size & decompression-ratio estimation (overridable warning — never
+    // interrupts legitimate large apps mid-install).
+    if !is_appimage_fmt
+        && format != Format::BareElf
+        && format != Format::Jar
+        && format != Format::ShellInstaller
+    {
+        let est_bytes: u64 = contents.entries.iter().map(|e| e.size).sum();
+        let entry_count = contents.entries.len();
+        let ratio = est_bytes.checked_div(size_bytes).unwrap_or(0);
+        const FOUR_GIB: u64 = 4 * 1024 * 1024 * 1024;
+        const RATIO_MIN_BYTES: u64 = 256 * 1024 * 1024;
+        if est_bytes > FOUR_GIB
+            || entry_count > 50_000
+            || (ratio >= 100 && est_bytes > RATIO_MIN_BYTES)
+        {
+            warnings.push(format!(
+                "Large or high-ratio archive: extracts to ~{} across {} entries ({}x ratio) — verify free disk space and trust this source",
+                crate::manifest::format_human_bytes(est_bytes),
+                entry_count,
+                ratio.max(1)
+            ));
+        }
+    }
 
     // Fail loudly with an actionable terminal command if host lacks required runtime deps
     // (e.g. musl host without `gcompat`, NixOS without `appimage-run`/`nix-ld`, or `.jar` without Java).
@@ -366,7 +395,11 @@ pub fn build_trust_summary(
     })
 }
 
-fn check_signature(path: &Path, has_appimage_sig_section: bool) -> SignatureStatus {
+fn check_signature(
+    path: &Path,
+    has_appimage_sig_section: bool,
+    appimage_sig_section: Option<&(u64, u64, Vec<u8>)>,
+) -> SignatureStatus {
     for ext in [".sig", ".asc"] {
         let mut sig_os = path.as_os_str().to_os_string();
         sig_os.push(ext);
@@ -395,10 +428,97 @@ fn check_signature(path: &Path, has_appimage_sig_section: bool) -> SignatureStat
         }
     }
 
+    if let Some((sig_off, sig_size, sig_bytes)) = appimage_sig_section {
+        return verify_appimage_embedded_sig(path, *sig_off, *sig_size, sig_bytes);
+    }
+
     if has_appimage_sig_section {
         return SignatureStatus::PresentUnverified("AppImage embedded .sha256_sig present".into());
     }
     SignatureStatus::None
+}
+
+/// Verify an AppImage Type 2 embedded `.sha256_sig` section via `gpg` by hashing the file
+/// with `.sha256_sig` zeroed out per the AppImage specification.
+fn verify_appimage_embedded_sig(
+    path: &Path,
+    sig_off: u64,
+    sig_size: u64,
+    sig_bytes: &[u8],
+) -> SignatureStatus {
+    let trimmed_sig: Vec<u8> = sig_bytes.iter().copied().take_while(|&b| b != 0).collect();
+    if trimmed_sig.is_empty() {
+        return SignatureStatus::None;
+    }
+
+    let Ok(mut file) = File::open(path) else {
+        return SignatureStatus::PresentUnverified("AppImage embedded .sha256_sig present".into());
+    };
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    let mut pos = 0u64;
+    let sig_end = sig_off.saturating_add(sig_size);
+    loop {
+        let Ok(n) = file.read(&mut buf) else {
+            return SignatureStatus::PresentUnverified(
+                "AppImage embedded .sha256_sig present".into(),
+            );
+        };
+        if n == 0 {
+            break;
+        }
+        let chunk_end = pos + n as u64;
+        if chunk_end > sig_off && pos < sig_end {
+            let z_start = sig_off.saturating_sub(pos) as usize;
+            let z_end = (sig_end.min(chunk_end) - pos) as usize;
+            buf[z_start..z_end].fill(0);
+        }
+        hasher.update(&buf[..n]);
+        pos = chunk_end;
+    }
+    let hex_digest: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+
+    let Ok(tmp) = tempfile::TempDir::new() else {
+        return SignatureStatus::PresentUnverified("AppImage embedded .sha256_sig present".into());
+    };
+    let digest_path = tmp.path().join("digest.txt");
+    let sig_path = tmp.path().join("digest.sig");
+    if std::fs::write(&digest_path, &hex_digest).is_err()
+        || std::fs::write(&sig_path, &trimmed_sig).is_err()
+    {
+        return SignatureStatus::PresentUnverified("AppImage embedded .sha256_sig present".into());
+    }
+
+    match Command::new("gpg")
+        .args(["--batch", "--verify"])
+        .arg(&sig_path)
+        .arg(&digest_path)
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            SignatureStatus::Verified("AppImage embedded .sha256_sig verified via gpg".into())
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if stderr.contains("No public key") || stderr.contains("public key not found") {
+                SignatureStatus::PresentUnverified(
+                    "AppImage embedded .sha256_sig present (signing key not in local gpg keyring)"
+                        .into(),
+                )
+            } else {
+                SignatureStatus::Invalid(
+                    "AppImage embedded .sha256_sig failed gpg verification".into(),
+                )
+            }
+        }
+        Err(_) => SignatureStatus::PresentUnverified(
+            "AppImage embedded .sha256_sig present (gpg unavailable)".into(),
+        ),
+    }
 }
 
 pub fn has_path_escape(rel_path: &str) -> bool {

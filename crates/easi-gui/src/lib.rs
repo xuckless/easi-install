@@ -347,7 +347,23 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         dispatch_action(&window.as_weak(), &store, &runner, Action::LoadInstalled);
     }
 
-    window.run()
+    let res = window.run();
+    cleanup_preview_icons();
+    res
+}
+
+fn cleanup_preview_icons() {
+    if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
+        for entry in entries.flatten() {
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(|n| n.starts_with("easi-preview-"))
+            {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
 }
 
 fn dispatch_action(
@@ -377,11 +393,13 @@ fn dispatch_action(
         let s = Arc::clone(store);
         let r = Arc::clone(runner);
         std::thread::spawn(move || {
-            let actions = r.run(effect);
-            let _ = slint::invoke_from_event_loop(move || {
-                for next in actions {
+            r.run_streaming(effect, |next| {
+                let w = w.clone();
+                let s = Arc::clone(&s);
+                let r = Arc::clone(&r);
+                let _ = slint::invoke_from_event_loop(move || {
                     dispatch_action(&w, &s, &r, next);
-                }
+                });
             });
         });
     }

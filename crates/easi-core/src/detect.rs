@@ -277,6 +277,7 @@ pub struct PackageContents {
     pub metainfo_files: Vec<(String, String)>,
     pub embedded_icons: Vec<(String, Vec<u8>)>,
     pub has_appimage_sig_section: bool,
+    pub appimage_sig_section: Option<(u64, u64, Vec<u8>)>,
     pub appimage_upd_info: Option<String>,
     pub meta_name: Option<String>,
     pub meta_version: Option<String>,
@@ -611,8 +612,12 @@ fn check_elf_section_name(file: &mut File, hdr: &[u8; 64], target: &[u8]) -> Opt
     Some(strtab.windows(target.len()).any(|w| w == target))
 }
 
-/// Read a small ELF64 section's raw bytes by section name (e.g. `.upd_info`).
-fn read_elf_section_bytes(file: &mut File, hdr: &[u8; 64], target: &[u8]) -> Option<Vec<u8>> {
+/// Read a small ELF64 section's `(offset, size, bytes)` by section name (e.g. `.upd_info`, `.sha256_sig`).
+fn read_elf_section_info(
+    file: &mut File,
+    hdr: &[u8; 64],
+    target: &[u8],
+) -> Option<(u64, u64, Vec<u8>)> {
     if &hdr[0..4] != b"\x7fELF" || hdr[4] != 2 || hdr[5] != 1 {
         return None;
     }
@@ -659,26 +664,33 @@ fn read_elf_section_bytes(file: &mut File, hdr: &[u8; 64], target: &[u8]) -> Opt
             file.seek(SeekFrom::Start(sec_off)).ok()?;
             let mut data = vec![0u8; sec_size as usize];
             file.read_exact(&mut data).ok()?;
-            return Some(data);
+            return Some((sec_off, sec_size, data));
         }
     }
     None
 }
 
+fn read_elf_section_bytes(file: &mut File, hdr: &[u8; 64], target: &[u8]) -> Option<Vec<u8>> {
+    read_elf_section_info(file, hdr, target).map(|(_, _, b)| b)
+}
+
 fn list_appimage_type2(path: &Path) -> Result<PackageContents, EasiError> {
     let mut file = File::open(path)?;
     let (offset, has_sig_section) = find_appimage_squashfs_offset(&mut file)?;
-    let appimage_upd_info = {
+    let (appimage_upd_info, appimage_sig_section) = {
         let mut hdr = [0u8; 64];
         if file.seek(SeekFrom::Start(0)).is_ok() && file.read_exact(&mut hdr).is_ok() {
-            read_elf_section_bytes(&mut file, &hdr, b".upd_info").and_then(|bytes| {
+            let upd = read_elf_section_bytes(&mut file, &hdr, b".upd_info").and_then(|bytes| {
                 let text = String::from_utf8_lossy(&bytes)
                     .trim_matches(|c: char| c == '\0' || c.is_whitespace())
                     .to_string();
                 if text.is_empty() { None } else { Some(text) }
-            })
+            });
+            let sig = read_elf_section_info(&mut file, &hdr, b".sha256_sig")
+                .filter(|(_, _, b)| b.iter().any(|&x| x != 0));
+            (upd, sig)
         } else {
-            None
+            (None, None)
         }
     };
     let reader = BufReader::new(file);
@@ -687,6 +699,7 @@ fn list_appimage_type2(path: &Path) -> Result<PackageContents, EasiError> {
 
     let mut contents = PackageContents {
         has_appimage_sig_section: has_sig_section,
+        appimage_sig_section,
         appimage_upd_info,
         ..Default::default()
     };

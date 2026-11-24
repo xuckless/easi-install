@@ -30,6 +30,17 @@ impl EffectRunner {
     }
 
     pub fn run(&self, effect: Effect) -> Vec<Action> {
+        let mut actions = Vec::new();
+        self.run_streaming(effect, |act| actions.push(act));
+        actions
+    }
+
+    /// Execute `effect`, invoking `emit` immediately for each produced `Action` (allows the
+    /// GUI to stream `InstallProgress` updates in real time).
+    pub fn run_streaming<F>(&self, effect: Effect, mut emit: F)
+    where
+        F: FnMut(Action),
+    {
         match effect {
             Effect::ListInstalled => {
                 let apps = reconcile_all(&self.roots)
@@ -37,50 +48,49 @@ impl EffectRunner {
                     .into_iter()
                     .map(|m| m.to_installed_app_with_sizes(&self.roots))
                     .collect();
-                vec![Action::InstalledLoaded(apps)]
+                emit(Action::InstalledLoaded(apps));
             }
             Effect::UninstallApp { app_id, purge_data } => {
                 match uninstall_app_with_options(&self.roots, &app_id, purge_data) {
                     Ok(m) => {
                         crate::desktop::notify("App uninstalled", &format!("Removed {}", m.name));
-                        vec![Action::UninstallFinished {
+                        emit(Action::UninstallFinished {
                             app_id,
                             ok: true,
                             error: None,
-                        }]
+                        });
                     }
-                    Err(err) => vec![Action::UninstallFinished {
+                    Err(err) => emit(Action::UninstallFinished {
                         app_id,
                         ok: false,
                         error: Some(format_user_error(&err)),
-                    }],
+                    }),
                 }
             }
             Effect::Inspect { path } => {
                 match classify_package(&path, |id| {
                     find_manifest_by_id(&self.roots, id).map(|m| m.to_installed_app())
                 }) {
-                    Ok(classified) => vec![Action::Inspected(Box::new(classified))],
-                    Err(err) => vec![Action::InspectFailed(format_user_error(&err))],
+                    Ok(classified) => emit(Action::Inspected(Box::new(classified))),
+                    Err(err) => emit(Action::InspectFailed(format_user_error(&err))),
                 }
             }
             Effect::HandOff { path } => match (self.handoff_fn)(&self.roots, &path) {
-                Ok(()) => vec![Action::HandedOff],
-                Err(err) => vec![Action::HandOffFailed(format_user_error(&err))],
+                Ok(()) => emit(Action::HandedOff),
+                Err(err) => emit(Action::HandOffFailed(format_user_error(&err))),
             },
             Effect::RunInstall {
                 plan,
                 replace_existing,
             } => {
                 self.cancel_flag.store(false, Ordering::Relaxed);
-                let mut actions = Vec::new();
                 match execute_install(
                     &self.roots,
                     &plan,
                     replace_existing,
                     &self.cancel_flag,
                     |step, progress| {
-                        actions.push(Action::InstallProgress { step, progress });
+                        emit(Action::InstallProgress { step, progress });
                     },
                 ) {
                     Ok(summary) => {
@@ -93,24 +103,22 @@ impl EffectRunner {
                             "App installed",
                             &format!("{}{ver} is ready to use.", summary.name),
                         );
-                        actions.push(Action::InstallFinished(summary));
+                        emit(Action::InstallFinished(summary));
                     }
-                    Err(err) => actions.push(Action::InstallFailed(format_user_error(&err))),
+                    Err(err) => emit(Action::InstallFailed(format_user_error(&err))),
                 }
-                actions
             }
             Effect::CancelInstall => {
                 self.cancel_flag.store(true, Ordering::Relaxed);
-                vec![]
             }
             Effect::Rollback { app_id } => {
                 let ok = uninstall_app(&self.roots, &app_id).is_ok()
                     || find_manifest_by_id(&self.roots, &app_id).is_none();
-                vec![Action::RollbackFinished { ok }]
+                emit(Action::RollbackFinished { ok });
             }
             Effect::MoveToTrash { path } => match move_to_trash(&self.roots, &path) {
-                Ok(_) => vec![Action::Trashed],
-                Err(err) => vec![Action::TrashFailed(format_user_error(&err))],
+                Ok(_) => emit(Action::Trashed),
+                Err(err) => emit(Action::TrashFailed(format_user_error(&err))),
             },
         }
     }

@@ -84,6 +84,41 @@ where
         None
     };
 
+    // Atomic replace backup: move existing app directory aside before replacing so a failed
+    // or cancelled update restores the previous working app cleanly.
+    let mut backup_dir: Option<(PathBuf, PathBuf)> = None;
+    let mut old_external_backup: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let backup_tmp = TempDir::new()?;
+
+    if let Some(old) = &old_manifest {
+        if old.install_dir.exists() {
+            let safe = sanitize_dir_name(&old.name);
+            let aside = roots.applications_dir.join(format!(".{safe}.easi-backup"));
+            if aside.exists() {
+                let _ = fs::remove_dir_all(&aside);
+            }
+            if fs::rename(&old.install_dir, &aside).is_ok() {
+                backup_dir = Some((aside, old.install_dir.clone()));
+            }
+        }
+        for (i, path) in old
+            .created_files
+            .iter()
+            .filter(|p| !p.starts_with(&old.install_dir))
+            .enumerate()
+        {
+            if let Ok(meta) = fs::symlink_metadata(path) {
+                if !meta.file_type().is_symlink() {
+                    let saved = backup_tmp.path().join(format!("ext_{i}"));
+                    if fs::copy(path, &saved).is_ok() {
+                        old_external_backup.push((saved, path.clone()));
+                    }
+                }
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+
     let mut tx = Transaction::default();
     let result = run_install_ops(
         roots,
@@ -95,9 +130,27 @@ where
     );
 
     match result {
-        Ok(summary) => Ok(summary),
+        Ok(summary) => {
+            if let Some((aside, _)) = backup_dir {
+                let _ = fs::remove_dir_all(aside);
+            }
+            Ok(summary)
+        }
         Err(err) => {
             tx.rollback();
+            // Restore previous working app if this was a replace/update.
+            if let Some((aside, orig)) = backup_dir {
+                let _ = fs::rename(aside, orig);
+            }
+            for (saved, orig) in old_external_backup {
+                if let Some(parent) = orig.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                let _ = fs::copy(saved, orig);
+            }
+            if let Some(old) = &old_manifest {
+                let _ = save_manifest(roots, old);
+            }
             Err(err)
         }
     }
@@ -114,11 +167,7 @@ fn run_install_ops<P>(
 where
     P: FnMut(InstallStep, u8),
 {
-    // If replacing an existing install, remove its managed files first.
-    if let Some(old) = old_manifest {
-        rollback_paths(&old.created_files, &old.created_dirs);
-    }
-
+    // Old install files were already moved aside atomically in `execute_install`.
     let safe_dir_name = sanitize_dir_name(&plan.name);
     let app_dir = roots.applications_dir.join(&safe_dir_name);
     if is_path_on_noexec_mount(&roots.applications_dir) {
@@ -1259,5 +1308,46 @@ mod tests {
             mounts,
             Path::new("/home/user/Applications/Foo")
         ));
+    }
+
+    #[test]
+    fn atomic_replace_restores_old_app_on_cancel() {
+        let tmp = TempDir::new().expect("tempdir");
+        let roots = InstallRoots::from_home(tmp.path());
+        let dl_dir = tmp.path().join("Downloads");
+        fs::create_dir_all(&dl_dir).expect("mkdir");
+
+        let pkg_v1 = make_gui_tarball(&dl_dir, "CoolApp-1.0.0.tar.gz");
+        let Classified::Ready { plan: plan_v1, .. } =
+            classify_package(&pkg_v1, |_| None).expect("classify v1")
+        else {
+            panic!("expected Ready");
+        };
+        let cancel = AtomicBool::new(false);
+        let s1 = execute_install(&roots, &plan_v1, false, &cancel, |_, _| {}).expect("install v1");
+        let marker = s1.install_dir.join("v1_marker.txt");
+        fs::write(&marker, "still-here").expect("write marker");
+
+        // Attempt replace with cancel already set -> must fail AND restore v1 cleanly!
+        let pkg_v2 = make_gui_tarball(&dl_dir, "CoolApp-2.0.0.tar.gz");
+        let Classified::Conflict { plan: plan_v2, .. } = classify_package(&pkg_v2, |id| {
+            find_manifest_by_id(&roots, id).map(|m| m.to_installed_app())
+        })
+        .expect("classify v2") else {
+            panic!("expected Conflict");
+        };
+        let cancelled = AtomicBool::new(true);
+        assert!(execute_install(&roots, &plan_v2, true, &cancelled, |_, _| {}).is_err());
+
+        assert!(
+            marker.exists(),
+            "v1 install dir must be restored on failed replace"
+        );
+        assert!(
+            roots.desktop_dir.join("coolapp.desktop").exists(),
+            "v1 .desktop must be restored on failed replace"
+        );
+        let m = find_manifest_by_id(&roots, "coolapp").expect("v1 manifest must remain");
+        assert_eq!(m.version.as_deref(), Some("1.0.0"));
     }
 }
