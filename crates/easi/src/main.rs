@@ -60,6 +60,7 @@ fn main() -> ExitCode {
                     dry_run: false,
                     trash: false,
                     add_to_path: false,
+                    allow_script: false,
                 }),
             });
         }

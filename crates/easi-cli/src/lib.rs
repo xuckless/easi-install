@@ -57,6 +57,9 @@ pub enum Command {
         /// Add ~/.local/bin to your shell profile if missing (opt-in under -y).
         #[arg(long)]
         add_to_path: bool,
+        /// Explicitly consent to running an untrusted .run/.sh/.bin installer script under -y.
+        #[arg(long)]
+        allow_script: bool,
     },
     /// Inspect a package and print its trust summary and planned writes without installing.
     Inspect { path: PathBuf },
@@ -149,12 +152,13 @@ pub fn run(cli: Cli) -> ExitCode {
             dry_run,
             trash,
             add_to_path,
+            allow_script,
         }) => {
             maybe_notify_update(&roots);
             if dry_run {
                 run_inspect_cmd(&roots, path)
             } else {
-                run_install_cmd(&roots, path, cli.yes, trash, add_to_path)
+                run_install_cmd(&roots, path, cli.yes, trash, add_to_path, allow_script)
             }
         }
         Some(Command::Inspect { path }) => run_inspect_cmd(&roots, path),
@@ -896,6 +900,7 @@ fn run_install_cmd(
     yes: bool,
     opt_in_trash: bool,
     opt_in_add_to_path: bool,
+    allow_script: bool,
 ) -> ExitCode {
     let runner = EffectRunner::new(roots.clone());
     let mut store = Store::new();
@@ -937,11 +942,17 @@ fn run_install_cmd(
                             "    * Note: script is obfuscated or contains binary data — exact commands cannot be fully verified."
                         );
                     }
-                    if !yes && !prompt_yes_no("Allow easi to execute this installer script?", false)
-                    {
-                        Action::Cancel
-                    } else {
+                    if allow_script {
                         Action::ConfirmInstall
+                    } else if yes {
+                        eprintln!(
+                            "easi: refusing to run installer script under -y without explicit `--allow-script`."
+                        );
+                        Action::Cancel
+                    } else if prompt_yes_no("Allow easi to execute this installer script?", false) {
+                        Action::ConfirmInstall
+                    } else {
+                        Action::Cancel
                     }
                 } else if yes || prompt_yes_no("Install?", true) {
                     Action::ConfirmInstall

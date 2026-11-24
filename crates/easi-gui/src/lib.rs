@@ -53,6 +53,10 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
     let sock_path = single_instance_socket_path();
     let _ = std::fs::remove_file(&sock_path);
     let listener = UnixListener::bind(&sock_path).ok();
+    if listener.is_some() {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600));
+    }
 
     let roots = InstallRoots::default_user().unwrap_or_else(|_| {
         InstallRoots::from_home(&std::env::temp_dir().join("easi-fallback-home"))

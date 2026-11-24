@@ -37,7 +37,11 @@ pub fn set_background_update_timer(
 
     if enabled {
         fs::create_dir_all(&unit_dir)?;
-        let exec = easi_bin.to_string_lossy();
+        let exec: String = easi_bin
+            .to_string_lossy()
+            .chars()
+            .filter(|c| !matches!(c, '\r' | '\n' | '"'))
+            .collect();
         let service = format!(
             "[Unit]\n\
              Description=Check upstream updates for easi-managed apps\n\
@@ -514,7 +518,7 @@ pub fn notify(title: &str, body: &str) {
         return;
     }
     if Command::new("notify-send")
-        .args(["-a", "easi", title, body])
+        .args(["-a", "easi", "--", title, body])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()

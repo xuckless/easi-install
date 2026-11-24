@@ -175,17 +175,17 @@ pub fn run_self_update(
         .unwrap_or_else(|_| DEFAULT_MINISIGN_PUBKEY.to_string());
     if !pubkey.is_empty() && has_minisign() {
         let sig_path = tmp.path().join("SHA256SUMS.minisig");
-        if download_file(&format!("{base_url}/SHA256SUMS.minisig"), &sig_path).is_ok() {
-            let out = Command::new("minisign")
-                .args(["-V", "-P", &pubkey, "-m"])
-                .arg(&sums_path)
-                .output()
-                .map_err(|e| EasiError::Desktop(format!("minisign failed to run: {e}")))?;
-            if !out.status.success() {
-                return Err(EasiError::Desktop(
-                    "minisign verification failed for release SHA256SUMS".into(),
-                ));
-            }
+        // Fail-closed: if minisign is available, a missing/blocked signature MUST abort the update.
+        download_file(&format!("{base_url}/SHA256SUMS.minisig"), &sig_path)?;
+        let out = Command::new("minisign")
+            .args(["-V", "-P", &pubkey, "-m"])
+            .arg(&sums_path)
+            .output()
+            .map_err(|e| EasiError::Desktop(format!("minisign failed to run: {e}")))?;
+        if !out.status.success() {
+            return Err(EasiError::Desktop(
+                "minisign verification failed for release SHA256SUMS".into(),
+            ));
         }
     }
 
@@ -256,10 +256,27 @@ fn fetch_latest_tag(repo: &str) -> Result<String, EasiError> {
 }
 
 fn fetch_latest_tag_with_timeout(repo: &str, timeout_secs: u32) -> Result<String, EasiError> {
+    if !repo
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'))
+        || repo.contains("..")
+    {
+        return Err(EasiError::Desktop(format!("invalid EASI_REPO: {repo}")));
+    }
     let url = format!("https://api.github.com/repos/{repo}/releases/latest");
     let timeout = timeout_secs.to_string();
     let out = Command::new("curl")
-        .args(["-fsSL", "--max-time", &timeout, &url])
+        .args([
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "-fsSL",
+            "--max-time",
+            &timeout,
+            "--",
+            &url,
+        ])
         .output()
         .map_err(|e| EasiError::Desktop(format!("failed to invoke curl: {e}")))?;
     if !out.status.success() {
@@ -268,15 +285,33 @@ fn fetch_latest_tag_with_timeout(repo: &str, timeout_secs: u32) -> Result<String
         )));
     }
     let body = String::from_utf8_lossy(&out.stdout);
-    extract_json_string_field(&body, "tag_name").ok_or_else(|| {
+    let tag = extract_json_string_field(&body, "tag_name").ok_or_else(|| {
         EasiError::Desktop("could not parse tag_name from GitHub API response".into())
-    })
+    })?;
+    if tag.contains('/') || tag.contains('\\') || tag.contains("..") {
+        return Err(EasiError::Desktop(format!("invalid release tag: {tag}")));
+    }
+    Ok(tag)
 }
 
 fn download_file(url: &str, dest: &Path) -> Result<(), EasiError> {
+    if !url.starts_with("https://") {
+        return Err(EasiError::Desktop(format!(
+            "refusing non-HTTPS download URL: {url}"
+        )));
+    }
     let out = Command::new("curl")
-        .args(["-fsSL", url, "-o"])
+        .args([
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "-fsSL",
+            "-o",
+        ])
         .arg(dest)
+        .arg("--")
+        .arg(url)
         .output()
         .map_err(|e| EasiError::Desktop(format!("failed to invoke curl: {e}")))?;
     if !out.status.success() {

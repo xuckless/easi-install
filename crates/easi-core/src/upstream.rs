@@ -456,7 +456,7 @@ pub fn parse_electron_app_update_yml(yaml: &str) -> Option<UpdateSource> {
         provider.as_str(),
         "generic" | "s3" | "spaces" | "custom" | ""
     ) && let Some(url) = yaml_field(yaml, "url")
-        && (url.starts_with("https://") || url.starts_with("http://"))
+        && url.starts_with("https://")
     {
         return Some(UpdateSource::ElectronYaml { url });
     }
@@ -493,13 +493,22 @@ pub fn parse_user_update_url(input: &str) -> Option<UpdateSource> {
             });
         }
     }
-    // Any other HTTP(S) URL -> direct CDN / proxy redirect check.
-    if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
+    // Any other HTTPS URL -> direct CDN / proxy redirect check (plain HTTP refused to prevent MITM).
+    if trimmed.starts_with("https://") {
         return Some(UpdateSource::HttpRedirect {
             url: trimmed.to_string(),
         });
     }
     None
+}
+
+fn require_https_url(url: &str) -> Result<(), String> {
+    if !url.starts_with("https://") {
+        return Err(format!(
+            "refusing non-HTTPS update URL (MITM protection): {url}"
+        ));
+    }
+    Ok(())
 }
 
 fn parse_forge_or_known_url(raw: &str) -> Option<UpdateSource> {
@@ -508,12 +517,12 @@ fn parse_forge_or_known_url(raw: &str) -> Option<UpdateSource> {
         .strip_prefix("git+")
         .unwrap_or(raw.trim())
         .trim_end_matches('/');
-    if url.ends_with(".zsync") {
+    if url.starts_with("https://") && url.ends_with(".zsync") {
         return Some(UpdateSource::ZsyncUrl {
             url: url.to_string(),
         });
     }
-    if url.ends_with(".yml") || url.ends_with(".yaml") {
+    if url.starts_with("https://") && (url.ends_with(".yml") || url.ends_with(".yaml")) {
         return Some(UpdateSource::ElectronYaml {
             url: url.to_string(),
         });
@@ -562,9 +571,11 @@ pub fn parse_appimage_upd_info(upd: &str) -> Option<UpdateSource> {
             repo: parts[2].to_string(),
             asset_pattern: parts.get(4).map(|s| (*s).to_string()),
         }),
-        "zsync" if parts.len() >= 2 => Some(UpdateSource::ZsyncUrl {
-            url: parts[1].to_string(),
-        }),
+        "zsync" if parts.len() >= 2 && parts[1].starts_with("https://") => {
+            Some(UpdateSource::ZsyncUrl {
+                url: parts[1].to_string(),
+            })
+        }
         _ => None,
     }
 }
@@ -782,8 +793,11 @@ pub fn check_app_update(manifest: &Manifest) -> AppUpdateStatus {
 }
 
 fn curl_text(url: &str, args: &[&str]) -> Result<String, String> {
+    require_https_url(url)?;
     let out = Command::new("curl")
+        .args(["--proto", "=https", "--proto-redir", "=https"])
         .args(args)
+        .arg("--")
         .arg(url)
         .output()
         .map_err(|e| format!("curl failed: {e}"))?;
@@ -794,8 +808,13 @@ fn curl_text(url: &str, args: &[&str]) -> Result<String, String> {
 }
 
 fn resolve_redirect_url(url: &str) -> Result<String, String> {
+    require_https_url(url)?;
     let out = Command::new("curl")
         .args([
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
             "-fsSLI",
             "--max-time",
             "5",
@@ -803,6 +822,7 @@ fn resolve_redirect_url(url: &str) -> Result<String, String> {
             "/dev/null",
             "-w",
             "%{url_effective}",
+            "--",
         ])
         .arg(url)
         .output()
@@ -810,7 +830,9 @@ fn resolve_redirect_url(url: &str) -> Result<String, String> {
     if !out.status.success() {
         return Err(format!("HTTP HEAD failed for {url}"));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    let final_url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    require_https_url(&final_url)?;
+    Ok(final_url)
 }
 
 /// Extract all `browser_download_url` / `direct_asset_url` values from a forge Releases JSON payload.
@@ -855,6 +877,9 @@ pub fn select_best_github_asset(
 
     let mut best: Option<(i32, &String)> = None;
     for url in urls {
+        if !url.starts_with("https://") {
+            continue;
+        }
         let lower = url.to_ascii_lowercase();
         if lower.ends_with(".sha256")
             || lower.ends_with(".sig")
@@ -957,8 +982,12 @@ pub fn download_and_update_app(
             })?;
             let rel = path_opt
                 .ok_or_else(|| EasiError::Desktop(format!("no file path listed in {yml_url}")))?;
-            if rel.starts_with("http://") || rel.starts_with("https://") {
+            if rel.starts_with("https://") {
                 rel
+            } else if rel.starts_with("http://") {
+                return Err(EasiError::Desktop(format!(
+                    "refusing non-HTTPS update URL in {yml_url}: {rel}"
+                )));
             } else if let Some((base, _)) = yml_url.rsplit_once('/') {
                 format!("{base}/{rel}")
             } else {
@@ -985,15 +1014,15 @@ pub fn download_and_update_app(
     };
 
     let tmp = TempDir::new()?;
-    let fname = download_url
+    let raw_fname = download_url
         .split('?')
         .next()
         .unwrap_or(&download_url)
         .rsplit('/')
         .next()
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty() && *s != "." && *s != "..")
         .unwrap_or("update.pkg");
-    let dest = tmp.path().join(fname);
+    let dest = crate::roots::safe_join(tmp.path(), Path::new(raw_fname))?;
     download_to_file(&download_url, &dest)?;
 
     let classified = classify_package(&dest, |_| Some(manifest.to_installed_app()))?;
@@ -1006,6 +1035,13 @@ pub fn download_and_update_app(
             )));
         }
     };
+    // Security guard: NEVER auto-execute an untrusted shell script during an automated update!
+    if plan.format == crate::model::Format::ShellInstaller {
+        return Err(EasiError::Desktop(
+            "refusing to execute a shell installer script during automated update — download and review it manually"
+                .into(),
+        ));
+    }
     // Preserve original app_id and update_source across updates.
     plan.app_id = manifest.app_id.clone();
     if plan.update_source.is_none() {
@@ -1029,8 +1065,11 @@ fn resolve_zsync_download_url(zsync_url: &str, header: &str) -> Option<String> {
         for line in header.lines() {
             if let Some(val) = line.strip_prefix(prefix) {
                 let v = val.trim();
-                if v.starts_with("http://") || v.starts_with("https://") {
+                if v.starts_with("https://") {
                     return Some(v.to_string());
+                }
+                if v.starts_with("http://") {
+                    return None;
                 }
                 if !v.is_empty()
                     && let Some((base, _)) = zsync_url.rsplit_once('/')
@@ -1044,9 +1083,19 @@ fn resolve_zsync_download_url(zsync_url: &str, header: &str) -> Option<String> {
 }
 
 fn download_to_file(url: &str, dest: &Path) -> Result<(), EasiError> {
+    require_https_url(url).map_err(EasiError::Desktop)?;
     let out = Command::new("curl")
-        .args(["-fsSL", url, "-o"])
+        .args([
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "-fsSL",
+            "-o",
+        ])
         .arg(dest)
+        .arg("--")
+        .arg(url)
         .output()
         .map_err(|e| EasiError::Desktop(format!("curl failed: {e}")))?;
     if !out.status.success() {
@@ -1224,6 +1273,28 @@ mod tests {
         assert!(exported.contains("zen-browser"));
         assert!(
             exported.contains("zen-browser/desktop") || exported.contains("repo = \"desktop\"")
+        );
+
+        // 7. Security: plain HTTP and flag-injection strings are refused
+        assert_eq!(
+            parse_user_update_url("http://evil.example/app.tar.gz"),
+            None
+        );
+        assert_eq!(parse_user_update_url("--output=/tmp/pwn"), None);
+        assert_eq!(
+            parse_electron_app_update_yml("provider: generic\nurl: http://evil.example/updates\n"),
+            None
+        );
+        assert_eq!(
+            parse_appimage_upd_info("zsync|http://evil.example/app.zsync"),
+            None
+        );
+        assert_eq!(
+            resolve_zsync_download_url(
+                "https://good.example/app.zsync",
+                "URL: http://evil.example/app.AppImage\n"
+            ),
+            None
         );
     }
 }
