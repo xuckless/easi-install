@@ -97,6 +97,17 @@ pub enum ConfirmPrompt {
     SelfUninstall,
 }
 
+/// Exclusive async update lifecycle so Check Updates, Update One, and Update All can never collide
+/// or get out of sync between App Info and the Apps list.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum UpdateActivity {
+    #[default]
+    Idle,
+    Checking,
+    UpdatingOne(String),
+    UpdatingAll,
+}
+
 /// Pure UI state owned by `Store` so views are strictly functions of state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagerUi {
@@ -115,6 +126,7 @@ pub struct ManagerUi {
     pub onboard_setup_handlers: bool,
     pub onboard_auto_update: bool,
     pub onboard_bg_timer: bool,
+    pub update_activity: UpdateActivity,
     /// Per-app upstream update check results: `app_id -> (status_note, has_update)`.
     pub update_statuses: BTreeMap<String, (String, bool)>,
 }
@@ -137,6 +149,7 @@ impl Default for ManagerUi {
             onboard_setup_handlers: true,
             onboard_auto_update: true,
             onboard_bg_timer: false,
+            update_activity: UpdateActivity::Idle,
             update_statuses: BTreeMap::new(),
         }
     }
@@ -160,12 +173,16 @@ pub enum UiAction {
     SetOnboardSetupHandlers(bool),
     SetOnboardAutoUpdate(bool),
     SetOnboardBgTimer(bool),
-    SetUpdateStatuses(BTreeMap<String, (String, bool)>),
-    SetAppUpdateStatus {
+    StartCheckingUpdates,
+    FinishCheckingUpdates(BTreeMap<String, (String, bool)>),
+    StartUpdatingApp(String),
+    FinishUpdatingApp {
         app_id: String,
         note: String,
         has_update: bool,
     },
+    StartUpdatingAll,
+    FinishUpdatingAll(BTreeMap<String, (String, bool)>),
 }
 
 impl Default for State {

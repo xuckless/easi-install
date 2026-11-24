@@ -15,7 +15,7 @@ use easi_core::roots::InstallRoots;
 use easi_core::runner::EffectRunner;
 use easi_core::{
     Action, AppKind, ConfirmPrompt, DoneOutcome, Effect, FilterKind, ManagerPage, ManagerUi,
-    SignatureStatus, State, Store, TrustSummary, UiAction, WizardStep,
+    SignatureStatus, State, Store, TrustSummary, UiAction, UpdateActivity, WizardStep,
 };
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
 
@@ -644,13 +644,17 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         let r = Arc::clone(&runner);
         window.on_update_app(move |app_id| {
             let id: String = app_id.into();
+            let started = s
+                .lock()
+                .ok()
+                .is_some_and(|st| st.ui().update_activity == UpdateActivity::Idle);
+            if !started {
+                return;
+            }
             if let Some(win) = w.upgrade() {
-                if !win.get_updating_app_id().is_empty() {
-                    return;
-                }
-                win.set_updating_app_id(id.clone().into());
                 win.set_detail_feedback("".into());
             }
+            dispatch_ui(&w, &s, UiAction::StartUpdatingApp(id.clone()));
             let w = w.clone();
             let s = Arc::clone(&s);
             let r = Arc::clone(&r);
@@ -663,13 +667,12 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                             let ver = summary.version.as_deref().unwrap_or("latest");
                             let msg = format!("Updated {} to {ver}.", summary.name);
                             if let Some(win) = w.upgrade() {
-                                win.set_updating_app_id("".into());
                                 win.set_detail_feedback(msg.into());
                             }
                             dispatch_ui(
                                 &w,
                                 &s,
-                                UiAction::SetAppUpdateStatus {
+                                UiAction::FinishUpdatingApp {
                                     app_id: id,
                                     note: format!("Updated to {ver}"),
                                     has_update: false,
@@ -679,13 +682,12 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                         Err(e) => {
                             let err_msg = easi_core::format_user_error(&e);
                             if let Some(win) = w.upgrade() {
-                                win.set_updating_app_id("".into());
                                 win.set_detail_feedback(format!("Update failed: {err_msg}").into());
                             }
                             dispatch_ui(
                                 &w,
                                 &s,
-                                UiAction::SetAppUpdateStatus {
+                                UiAction::FinishUpdatingApp {
                                     app_id: id,
                                     note: format!("Update failed: {err_msg}"),
                                     has_update: true,
@@ -725,6 +727,34 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         window.on_copy_suggested_command(move |cmd| {
             let _ = easi_core::desktop::copy_to_clipboard(cmd.as_str());
             dispatch_ui(&w, &s, UiAction::SetCommandCopied(true));
+        });
+    }
+    {
+        window.on_open_blocked_folder(move |blocked| {
+            let p = PathBuf::from(blocked.as_str());
+            let dir = p.parent().unwrap_or(&p);
+            let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        let r = Arc::clone(&runner);
+        window.on_delete_blocked_path(move |blocked| {
+            let p = PathBuf::from(blocked.as_str());
+            if r.roots.is_within_allowed_write_roots(&p) {
+                let removed = if p.symlink_metadata().is_ok_and(|m| m.is_dir()) {
+                    std::fs::remove_dir_all(&p)
+                } else {
+                    std::fs::remove_file(&p)
+                };
+                if removed.is_ok() {
+                    if let Some(win) = w.upgrade() {
+                        win.set_blocked_path("".into());
+                    }
+                    dispatch_action(&w, &s, &r, Action::Reset);
+                }
+            }
         });
     }
     {
@@ -808,12 +838,14 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         let s = Arc::clone(&store);
         let r = Arc::clone(&runner);
         window.on_check_app_updates(move || {
-            if let Some(win) = w.upgrade() {
-                if win.get_checking_updates() {
-                    return;
-                }
-                win.set_checking_updates(true);
+            let idle = s
+                .lock()
+                .ok()
+                .is_some_and(|st| st.ui().update_activity == UpdateActivity::Idle);
+            if !idle {
+                return;
             }
+            dispatch_ui(&w, &s, UiAction::StartCheckingUpdates);
             let w = w.clone();
             let s = Arc::clone(&s);
             let r = Arc::clone(&r);
@@ -850,10 +882,7 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                     );
                 }
                 let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(win) = w.upgrade() {
-                        win.set_checking_updates(false);
-                    }
-                    dispatch_ui(&w, &s, UiAction::SetUpdateStatuses(status_map));
+                    dispatch_ui(&w, &s, UiAction::FinishCheckingUpdates(status_map));
                     dispatch_action(&w, &s, &r, Action::LoadInstalled);
                 });
             });
@@ -864,12 +893,14 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         let s = Arc::clone(&store);
         let r = Arc::clone(&runner);
         window.on_update_all_apps(move || {
-            if let Some(win) = w.upgrade() {
-                if !win.get_updating_app_id().is_empty() {
-                    return;
-                }
-                win.set_updating_app_id("__all__".into());
+            let idle = s
+                .lock()
+                .ok()
+                .is_some_and(|st| st.ui().update_activity == UpdateActivity::Idle);
+            if !idle {
+                return;
             }
+            dispatch_ui(&w, &s, UiAction::StartUpdatingAll);
             let w = w.clone();
             let s = Arc::clone(&s);
             let r = Arc::clone(&r);
@@ -909,10 +940,7 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                     }
                 }
                 let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(win) = w.upgrade() {
-                        win.set_updating_app_id("".into());
-                    }
-                    dispatch_ui(&w, &s, UiAction::SetUpdateStatuses(status_map));
+                    dispatch_ui(&w, &s, UiAction::FinishUpdatingAll(status_map));
                     dispatch_action(&w, &s, &r, Action::LoadInstalled);
                 });
             });
@@ -1188,6 +1216,15 @@ fn project_ui(win: &ui::AppWindow, ui: &ManagerUi) {
     win.set_onboard_setup_handlers(ui.onboard_setup_handlers);
     win.set_onboard_auto_update(ui.onboard_auto_update);
     win.set_onboard_bg_timer(ui.onboard_bg_timer);
+    win.set_checking_updates(ui.update_activity == UpdateActivity::Checking);
+    win.set_updating_app_id(
+        match &ui.update_activity {
+            UpdateActivity::UpdatingOne(id) => id.as_str(),
+            UpdateActivity::UpdatingAll => "__all__",
+            UpdateActivity::Idle | UpdateActivity::Checking => "",
+        }
+        .into(),
+    );
 }
 
 fn dispatch_action(
@@ -1519,13 +1556,17 @@ fn project_state(win: &ui::AppWindow, state: &State, ui: &ManagerUi) {
         State::Failed { error } => {
             set_screen_with_dir(win, "failed");
             let cmd = extract_suggested_command(error).unwrap_or_default();
+            let blocked = extract_blocked_path(error).unwrap_or_default();
             win.set_suggested_command(cmd.into());
+            win.set_blocked_path(blocked.into());
             win.set_error_text(error.clone().into());
         }
         State::FailedRolledBack { error } => {
             set_screen_with_dir(win, "failed");
             let cmd = extract_suggested_command(error).unwrap_or_default();
+            let blocked = extract_blocked_path(error).unwrap_or_default();
             win.set_suggested_command(cmd.into());
+            win.set_blocked_path(blocked.into());
             win.set_error_text(format!("{error} (rolled back cleanly)").into());
         }
     }
@@ -1629,6 +1670,17 @@ fn format_app_size(size_bytes: u64, data_size_bytes: u64) -> String {
         )
     } else {
         app_str
+    }
+}
+
+fn extract_blocked_path(error: &str) -> Option<String> {
+    let prefix = "refusing to overwrite unmanaged path: ";
+    let line = error.lines().find(|l| l.starts_with(prefix))?;
+    let path = line.strip_prefix(prefix)?.trim();
+    if path.is_empty() {
+        None
+    } else {
+        Some(path.to_string())
     }
 }
 

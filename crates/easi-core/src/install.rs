@@ -409,8 +409,10 @@ where
                         .unwrap_or(&plan.app_id)
                         .to_ascii_lowercase();
                     let link_path = safe_join(&roots.bin_dir, Path::new(&bin_name))?;
+                    let is_dangling_symlink =
+                        link_path.symlink_metadata().is_ok() && !link_path.exists();
                     if link_path.exists() || link_path.symlink_metadata().is_ok() {
-                        if old_manifest.is_some() {
+                        if old_manifest.is_some() || is_dangling_symlink {
                             let _ = fs::remove_file(&link_path);
                         } else {
                             return Err(EasiError::UnmanagedOverwrite(link_path));

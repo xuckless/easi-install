@@ -129,10 +129,10 @@ component KindGlyph inherits Rectangle {
 export component AppWindow inherits Window {
     title: "easi";
     icon: @image-url("logo-drop.svg");
-    preferred-width: 700px;
-    preferred-height: 600px;
-    min-width: 620px;
-    min-height: 480px;
+    preferred-width: 760px;
+    preferred-height: 640px;
+    min-width: 680px;
+    min-height: 520px;
     background: Theme.ground;
     default-font-family: Theme.font-ui;
 
@@ -205,6 +205,7 @@ export component AppWindow inherits Window {
     in property <bool> has-app-icon: false;
     in property <string> status-text: "";
     in property <string> error-text: "";
+    in property <string> blocked-path: "";
     in property <string> suggested-command: "";
     in property <bool> command-copied: false;
     in property <string> conflict-text: "";
@@ -268,6 +269,8 @@ export component AppWindow inherits Window {
     callback open-app-folder(string);
     callback filter-changed();
     callback copy-suggested-command(string);
+    callback open-blocked-folder(string);
+    callback delete-blocked-path(string);
     callback check-app-updates();
     callback update-all-apps();
     callback run-self-update();
@@ -984,23 +987,28 @@ export component AppWindow inherits Window {
                                 EButton {
                                     text: "Launch";
                                     kind: "primary";
+                                    small: true;
                                     clicked => { root.launch-app(root.detail-app-id); }
                                 }
                                 EButton {
                                     text: "Open Folder";
+                                    small: true;
                                     clicked => { root.open-app-folder(root.detail-app-id); }
                                 }
                                 EButton {
                                     text: root.updating-app-id == root.detail-app-id ? "Updating…" : "Update";
-                                    enabled: root.updating-app-id == "";
+                                    small: true;
+                                    enabled: root.updating-app-id == "" && !root.checking-updates;
                                     clicked => { root.update-app(root.detail-app-id); }
                                 }
                                 EButton {
-                                    text: "Repair Icon & Launcher";
+                                    text: "Repair Launcher";
+                                    small: true;
                                     clicked => { root.repair-app(root.detail-app-id); }
                                 }
                                 if root.detail-can-organize: EButton {
                                     text: "Move to ~/Applications";
+                                    small: true;
                                     clicked => { root.organize-app(root.detail-app-id); }
                                 }
                             }
@@ -1994,6 +2002,15 @@ export component AppWindow inherits Window {
             HorizontalLayout {
                 alignment: center;
                 spacing: Theme.s2;
+                if root.screen == "failed" && root.blocked-path != "": EButton {
+                    text: "Open Folder";
+                    clicked => { root.open-blocked-folder(root.blocked-path); }
+                }
+                if root.screen == "failed" && root.blocked-path != "": EButton {
+                    text: "Delete Blocking File";
+                    kind: "danger";
+                    clicked => { root.delete-blocked-path(root.blocked-path); }
+                }
                 if root.screen == "failed" && root.suggested-command != "": EButton {
                     text: root.command-copied ? "Copied!" : "Copy Command";
                     clicked => { root.copy-suggested-command(root.suggested-command); }

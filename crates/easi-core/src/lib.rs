@@ -28,5 +28,6 @@ pub use model::{
 pub use reduce::{reduce, reduce_ui};
 pub use state::{
     Action, ConfirmPrompt, Effect, FilterKind, ManagerPage, ManagerUi, State, UiAction,
+    UpdateActivity,
 };
 pub use store::Store;

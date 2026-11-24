@@ -1,7 +1,7 @@
 //! Pure Redux reducer. Every `(State, Action)` pair is handled explicitly — no `_ =>` catch-all.
 
 use crate::model::{Classified, DoneOutcome, InstallStep, RollbackReason, WizardStep};
-use crate::state::{Action, ConfirmPrompt, Effect, ManagerUi, State, UiAction};
+use crate::state::{Action, ConfirmPrompt, Effect, ManagerUi, State, UiAction, UpdateActivity};
 
 /// Pure UI state reducer — exhaustive over all `UiAction` variants.
 pub fn reduce_ui(mut ui: ManagerUi, action: UiAction) -> ManagerUi {
@@ -27,13 +27,42 @@ pub fn reduce_ui(mut ui: ManagerUi, action: UiAction) -> ManagerUi {
         UiAction::SetOnboardSetupHandlers(v) => ui.onboard_setup_handlers = v,
         UiAction::SetOnboardAutoUpdate(v) => ui.onboard_auto_update = v,
         UiAction::SetOnboardBgTimer(v) => ui.onboard_bg_timer = v,
-        UiAction::SetUpdateStatuses(map) => ui.update_statuses = map,
-        UiAction::SetAppUpdateStatus {
+        UiAction::StartCheckingUpdates => {
+            if ui.update_activity == UpdateActivity::Idle {
+                ui.update_activity = UpdateActivity::Checking;
+            }
+        }
+        UiAction::FinishCheckingUpdates(map) => {
+            if ui.update_activity == UpdateActivity::Checking {
+                ui.update_activity = UpdateActivity::Idle;
+                ui.update_statuses = map;
+            }
+        }
+        UiAction::StartUpdatingApp(app_id) => {
+            if ui.update_activity == UpdateActivity::Idle {
+                ui.update_activity = UpdateActivity::UpdatingOne(app_id);
+            }
+        }
+        UiAction::FinishUpdatingApp {
             app_id,
             note,
             has_update,
         } => {
-            ui.update_statuses.insert(app_id, (note, has_update));
+            if matches!(&ui.update_activity, UpdateActivity::UpdatingOne(cur) if cur == &app_id) {
+                ui.update_activity = UpdateActivity::Idle;
+                ui.update_statuses.insert(app_id, (note, has_update));
+            }
+        }
+        UiAction::StartUpdatingAll => {
+            if ui.update_activity == UpdateActivity::Idle {
+                ui.update_activity = UpdateActivity::UpdatingAll;
+            }
+        }
+        UiAction::FinishUpdatingAll(map) => {
+            if ui.update_activity == UpdateActivity::UpdatingAll {
+                ui.update_activity = UpdateActivity::Idle;
+                ui.update_statuses = map;
+            }
         }
     }
     ui
@@ -1111,5 +1140,161 @@ mod tests {
                 row.name
             );
         }
+    }
+
+    #[test]
+    fn ui_update_activity_permutation_table() {
+        use std::collections::BTreeMap;
+
+        use crate::state::ManagerPage;
+
+        let mut initial_statuses = BTreeMap::new();
+        initial_statuses.insert("app.a".into(), ("Update available: 2.0".into(), true));
+        initial_statuses.insert("app.b".into(), ("Update available: 3.0".into(), true));
+
+        let make_ui = |activity: UpdateActivity| ManagerUi {
+            update_activity: activity,
+            update_statuses: initial_statuses.clone(),
+            confirm: ConfirmPrompt::UninstallApp,
+            ..ManagerUi::default()
+        };
+
+        // 1. Exhaustive start/reject matrix across all 4 UpdateActivity states × 3 start intents.
+        let start_cases: &[(&str, UpdateActivity, UiAction, UpdateActivity)] = &[
+            (
+                "idle + start check -> checking",
+                UpdateActivity::Idle,
+                UiAction::StartCheckingUpdates,
+                UpdateActivity::Checking,
+            ),
+            (
+                "idle + start update one -> updating_one",
+                UpdateActivity::Idle,
+                UiAction::StartUpdatingApp("app.a".into()),
+                UpdateActivity::UpdatingOne("app.a".into()),
+            ),
+            (
+                "idle + start update all -> updating_all",
+                UpdateActivity::Idle,
+                UiAction::StartUpdatingAll,
+                UpdateActivity::UpdatingAll,
+            ),
+            // While Checking: all other update starts must be rejected!
+            (
+                "checking + start check -> stays checking",
+                UpdateActivity::Checking,
+                UiAction::StartCheckingUpdates,
+                UpdateActivity::Checking,
+            ),
+            (
+                "checking + start update one -> stays checking",
+                UpdateActivity::Checking,
+                UiAction::StartUpdatingApp("app.a".into()),
+                UpdateActivity::Checking,
+            ),
+            (
+                "checking + start update all -> stays checking",
+                UpdateActivity::Checking,
+                UiAction::StartUpdatingAll,
+                UpdateActivity::Checking,
+            ),
+            // While UpdatingOne("app.a") (e.g. pressed inside App Info): Update All / Check / Update B rejected!
+            (
+                "updating_one + start check -> stays updating_one",
+                UpdateActivity::UpdatingOne("app.a".into()),
+                UiAction::StartCheckingUpdates,
+                UpdateActivity::UpdatingOne("app.a".into()),
+            ),
+            (
+                "updating_one + start update other -> stays updating_one",
+                UpdateActivity::UpdatingOne("app.a".into()),
+                UiAction::StartUpdatingApp("app.b".into()),
+                UpdateActivity::UpdatingOne("app.a".into()),
+            ),
+            (
+                "updating_one + start update all -> stays updating_one",
+                UpdateActivity::UpdatingOne("app.a".into()),
+                UiAction::StartUpdatingAll,
+                UpdateActivity::UpdatingOne("app.a".into()),
+            ),
+            // While UpdatingAll: all other update starts must be rejected!
+            (
+                "updating_all + start check -> stays updating_all",
+                UpdateActivity::UpdatingAll,
+                UiAction::StartCheckingUpdates,
+                UpdateActivity::UpdatingAll,
+            ),
+            (
+                "updating_all + start update one -> stays updating_all",
+                UpdateActivity::UpdatingAll,
+                UiAction::StartUpdatingApp("app.a".into()),
+                UpdateActivity::UpdatingAll,
+            ),
+            (
+                "updating_all + start update all -> stays updating_all",
+                UpdateActivity::UpdatingAll,
+                UiAction::StartUpdatingAll,
+                UpdateActivity::UpdatingAll,
+            ),
+        ];
+
+        for (label, from_act, action, expected_act) in start_cases {
+            let next = reduce_ui(make_ui(from_act.clone()), action.clone());
+            assert_eq!(
+                next.update_activity, *expected_act,
+                "activity mismatch in '{label}'"
+            );
+        }
+
+        // 2. Finishing a single app update clears UpdatingOne -> Idle and decrements outdated count.
+        let updating_a = make_ui(UpdateActivity::UpdatingOne("app.a".into()));
+        // Mismatched finish (wrong app_id) is ignored.
+        let ignored = reduce_ui(
+            updating_a.clone(),
+            UiAction::FinishUpdatingApp {
+                app_id: "app.b".into(),
+                note: "Updated to 3.0".into(),
+                has_update: false,
+            },
+        );
+        assert_eq!(
+            ignored.update_activity,
+            UpdateActivity::UpdatingOne("app.a".into())
+        );
+
+        let finished_a = reduce_ui(
+            updating_a,
+            UiAction::FinishUpdatingApp {
+                app_id: "app.a".into(),
+                note: "Updated to 2.0".into(),
+                has_update: false,
+            },
+        );
+        assert_eq!(finished_a.update_activity, UpdateActivity::Idle);
+        assert_eq!(
+            finished_a.update_statuses.get("app.a"),
+            Some(&("Updated to 2.0".into(), false))
+        );
+        // Only app.b remains outdated!
+        assert_eq!(
+            finished_a
+                .update_statuses
+                .values()
+                .filter(|(_, has)| *has)
+                .count(),
+            1
+        );
+
+        // 3. Navigating from AppInfo -> Apps preserves in-flight UpdatingOne and clears confirm prompts.
+        let nav = reduce_ui(
+            make_ui(UpdateActivity::UpdatingOne("app.a".into())),
+            UiAction::Navigate(ManagerPage::Apps),
+        );
+        assert_eq!(nav.page, ManagerPage::Apps);
+        assert_eq!(
+            nav.update_activity,
+            UpdateActivity::UpdatingOne("app.a".into())
+        );
+        assert_eq!(nav.confirm, ConfirmPrompt::None);
     }
 }
