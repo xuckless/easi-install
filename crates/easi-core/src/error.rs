@@ -33,6 +33,11 @@ pub enum EasiError {
     #[error("desktop integration error: {0}")]
     Desktop(String),
 
+    #[error(
+        "you don't have the supported dependencies to run this app: {detail}\nTo install it, run this command in your terminal:\n  {fix_command}"
+    )]
+    MissingRuntimeDependency { detail: String, fix_command: String },
+
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
 }

@@ -293,29 +293,17 @@ pub fn build_trust_summary(
     let signature = check_signature(path, contents.has_appimage_sig_section);
     let mut warnings = Vec::new();
     let is_appimage_fmt = matches!(format, Format::AppImageType1 | Format::AppImageType2);
-    if is_appimage_fmt && crate::install::is_nixos() {
-        if crate::install::has_appimage_run() {
-            warnings
-                .push("NixOS detected — easi will wrap this AppImage with `appimage-run`".into());
-        } else if !crate::install::has_nix_ld() {
-            warnings.push(
-                "NixOS detected without `appimage-run` or `nix-ld` — AppImages/ELFs may require `programs.nix-ld.enable = true` or `appimage-run`"
-                    .into(),
-            );
-        }
+    let has_elf = contents.entries.iter().any(|e| e.is_elf);
+
+    // Fail loudly with an actionable terminal command if host lacks required runtime deps
+    // (e.g. musl host without `gcompat`, NixOS without `appimage-run`/`nix-ld`, or `.jar` without Java).
+    crate::install::check_host_runtime_deps(format, has_elf)?;
+
+    if is_appimage_fmt && crate::install::is_nixos() && crate::install::has_appimage_run() {
+        warnings.push("NixOS detected — easi will wrap this AppImage with `appimage-run`".into());
     } else if is_appimage_fmt && !crate::install::has_libfuse2() {
         warnings.push(
             "libfuse.so.2 not found — easi will create an APPIMAGE_EXTRACT_AND_RUN=1 wrapper so this AppImage launches cleanly"
-                .into(),
-        );
-    }
-    if crate::install::is_musl_only_host()
-        && (is_appimage_fmt
-            || format == Format::BareElf
-            || contents.entries.iter().any(|e| e.is_elf))
-    {
-        warnings.push(
-            "musl-only Linux host detected (e.g. Alpine/postmarketOS) — glibc binaries may need gcompat or a compatibility layer"
                 .into(),
         );
     }

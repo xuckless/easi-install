@@ -425,6 +425,128 @@ pub fn is_musl_only_host() -> bool {
     has_musl && !has_glibc
 }
 
+pub fn has_gcompat() -> bool {
+    Path::new("/lib/libgcompat.so.0").exists() || Path::new("/usr/lib/libgcompat.so.0").exists()
+}
+
+pub fn has_java() -> bool {
+    Command::new("java")
+        .arg("-version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
+}
+
+/// Distro-aware install command lookup table for missing runtime dependencies.
+pub fn distro_install_cmd(pkg_kind: &str) -> String {
+    let os_release = fs::read_to_string("/etc/os-release")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    struct CmdRow {
+        distro_needle: &'static str,
+        gcompat_cmd: &'static str,
+        java_cmd: &'static str,
+    }
+    const TABLE: &[CmdRow] = &[
+        CmdRow {
+            distro_needle: "alpine",
+            gcompat_cmd: "sudo apk add gcompat",
+            java_cmd: "sudo apk add openjdk21-jre",
+        },
+        CmdRow {
+            distro_needle: "postmarketos",
+            gcompat_cmd: "sudo apk add gcompat",
+            java_cmd: "sudo apk add openjdk21-jre",
+        },
+        CmdRow {
+            distro_needle: "chimera",
+            gcompat_cmd: "doas apk add gcompat",
+            java_cmd: "doas apk add openjdk21-jre",
+        },
+        CmdRow {
+            distro_needle: "arch",
+            gcompat_cmd: "sudo pacman -S glibc",
+            java_cmd: "sudo pacman -S jre-openjdk",
+        },
+        CmdRow {
+            distro_needle: "cachyos",
+            gcompat_cmd: "sudo pacman -S glibc",
+            java_cmd: "sudo pacman -S jre-openjdk",
+        },
+        CmdRow {
+            distro_needle: "fedora",
+            gcompat_cmd: "sudo dnf install glibc",
+            java_cmd: "sudo dnf install java-latest-openjdk",
+        },
+        CmdRow {
+            distro_needle: "ubuntu",
+            gcompat_cmd: "sudo apt install libc6",
+            java_cmd: "sudo apt install default-jre",
+        },
+        CmdRow {
+            distro_needle: "mint",
+            gcompat_cmd: "sudo apt install libc6",
+            java_cmd: "sudo apt install default-jre",
+        },
+        CmdRow {
+            distro_needle: "debian",
+            gcompat_cmd: "sudo apt install libc6",
+            java_cmd: "sudo apt install default-jre",
+        },
+    ];
+    for row in TABLE {
+        if os_release.contains(row.distro_needle) {
+            return match pkg_kind {
+                "gcompat" => row.gcompat_cmd.to_string(),
+                "java" => row.java_cmd.to_string(),
+                _ => String::new(),
+            };
+        }
+    }
+    match pkg_kind {
+        "gcompat" => {
+            "Install `gcompat` using your distro's package manager (e.g. `sudo apk add gcompat`)"
+                .into()
+        }
+        "java" => "Install a Java runtime (OpenJDK JRE) using your distro's package manager".into(),
+        _ => String::new(),
+    }
+}
+
+/// Fail loudly with an actionable terminal command if the host lacks required runtime
+/// dependencies to execute this package format.
+pub fn check_host_runtime_deps(format: Format, has_elf: bool) -> Result<(), EasiError> {
+    let is_appimage = matches!(format, Format::AppImageType1 | Format::AppImageType2);
+    let needs_glibc = is_appimage || format == Format::BareElf || has_elf;
+
+    if needs_glibc && is_musl_only_host() && !has_gcompat() {
+        return Err(EasiError::MissingRuntimeDependency {
+            detail: "this musl-based system does not have `gcompat` installed to run glibc binaries/AppImages"
+                .into(),
+            fix_command: distro_install_cmd("gcompat"),
+        });
+    }
+
+    if needs_glibc && is_nixos() && !has_appimage_run() && !has_nix_ld() {
+        return Err(EasiError::MissingRuntimeDependency {
+            detail: "NixOS requires `appimage-run` or `nix-ld` to run standard Linux binaries/AppImages"
+                .into(),
+            fix_command: "nix-shell -p appimage-run   # or set `programs.nix-ld.enable = true;` in configuration.nix"
+                .into(),
+        });
+    }
+
+    if format == Format::Jar && !has_java() {
+        return Err(EasiError::MissingRuntimeDependency {
+            detail: "Java (`java`) is not installed to run .jar applications".into(),
+            fix_command: distro_install_cmd("java"),
+        });
+    }
+
+    Ok(())
+}
+
 fn sanitize_dir_name(name: &str) -> String {
     let cleaned: String = name
         .chars()
