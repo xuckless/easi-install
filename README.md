@@ -7,7 +7,7 @@
 
 **Install, manage and remove your Linux apps, easily.**
 
-<a href="https://github.com/xuckless/easi-install/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/xuckless/easi-install?style=flat-square&color=4A4DE6&label=release"/></a> <a href="https://github.com/xuckless/easi-install/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/xuckless/easi-install/ci.yml?branch=main&style=flat-square&label=CI"/></a> <a href="#license"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-4A4DE6?style=flat-square"/></a>
+<a href="https://github.com/xuckless/easi-install/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/xuckless/easi-install?style=flat-square&color=4A4DE6&label=release"/></a> <a href="https://github.com/xuckless/easi-install/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/xuckless/easi-install/actions/workflows/ci.yml/badge.svg?branch=main"/></a> <a href="#license"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-4A4DE6?style=flat-square"/></a>
 
 [Install](#install) · [Compare](#compare) · [CLI](#cli) · [Releases](https://github.com/xuckless/easi-install/releases/latest)
 
