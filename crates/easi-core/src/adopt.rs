@@ -470,11 +470,12 @@ pub fn repair_app(roots: &InstallRoots, query: &str) -> Result<Vec<String>, Easi
             fs::create_dir_all(&dir)?;
             let icon_dest = safe_join(&dir, Path::new(&format!("{}.{ext}", manifest.app_id)))?;
             fs::write(&icon_dest, bytes)?;
+            let icon_abs = icon_dest.to_string_lossy().into_owned();
             if !manifest.created_files.contains(&icon_dest) {
                 manifest.created_files.push(icon_dest);
             }
             if let Some(text) = desktop_text.take() {
-                desktop_text = Some(upsert_desktop_key(&text, "Icon", &manifest.app_id));
+                desktop_text = Some(upsert_desktop_key(&text, "Icon", &icon_abs));
             }
             fixes.push(format!(
                 "Installed hicolor icon ({}.{ext})",
@@ -1263,7 +1264,7 @@ mod tests {
                 .exists()
         );
         let fixed_desktop = fs::read_to_string(&zen_desktop).expect("read fixed desktop");
-        assert!(fixed_desktop.contains("Icon=zen-browser"));
+        assert!(fixed_desktop.contains("zen-browser.png"));
         assert!(fixed_desktop.contains("StartupWMClass="));
 
         // Second scan returns empty because Zen Browser is now managed!

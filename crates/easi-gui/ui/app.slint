@@ -90,17 +90,17 @@ component EField inherits Rectangle {
     }
 }
 
-// Small kind glyph (window for GUI, prompt for CLI) — replaces bordered kind pills.
+// Small kind glyph (window for GUI, prompt for CLI) — matches 32px app icon width for crisp alignment.
 component KindGlyph inherits Rectangle {
     in property <bool> is-cli: false;
-    width: 28px;
-    height: 28px;
+    width: 32px;
+    height: 32px;
     border-radius: Theme.radius-control;
     background: Theme.surface-2;
 
     if !root.is-cli: Path {
-        x: 6px;
-        y: 6px;
+        x: 8px;
+        y: 8px;
         width: 16px;
         height: 16px;
         viewbox-width: 16;
@@ -111,8 +111,8 @@ component KindGlyph inherits Rectangle {
         fill: transparent;
     }
     if root.is-cli: Path {
-        x: 6px;
-        y: 6px;
+        x: 8px;
+        y: 8px;
         width: 16px;
         height: 16px;
         viewbox-width: 16;
@@ -557,9 +557,10 @@ export component AppWindow inherits Window {
                                                             overflow: elide;
                                                         }
                                                         HorizontalLayout {
+                                                            alignment: start;
                                                             spacing: 6px;
                                                             Text {
-                                                                text: app.kind + "  ·";
+                                                                text: app.kind + " ·";
                                                                 font-size: Theme.font-caption;
                                                                 color: Theme.ink-2;
                                                             }
@@ -571,7 +572,7 @@ export component AppWindow inherits Window {
                                                                 overflow: elide;
                                                             }
                                                             if app.size-text != "": Text {
-                                                                text: "·  " + app.size-text;
+                                                                text: "· " + app.size-text;
                                                                 font-size: Theme.font-caption;
                                                                 color: Theme.ink-2;
                                                             }
@@ -688,9 +689,10 @@ export component AppWindow inherits Window {
                                                                 overflow: elide;
                                                             }
                                                             HorizontalLayout {
+                                                                alignment: start;
                                                                 spacing: 6px;
                                                                 Text {
-                                                                    text: d.kind + "  ·";
+                                                                    text: d.kind + " ·";
                                                                     font-size: Theme.font-caption;
                                                                     color: Theme.ink-2;
                                                                 }
@@ -702,7 +704,7 @@ export component AppWindow inherits Window {
                                                                     overflow: elide;
                                                                 }
                                                                 if d.size-text != "": Text {
-                                                                    text: "·  " + d.size-text;
+                                                                    text: "· " + d.size-text;
                                                                     font-size: Theme.font-caption;
                                                                     color: Theme.ink-2;
                                                                 }

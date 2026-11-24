@@ -97,8 +97,9 @@ pub fn ensure_easi_desktop_and_icon(roots: &InstallRoots, easi_bin: &Path) {
     }
 
     let desktop_path = roots.desktop_dir.join(EASI_DESKTOP_ID);
+    let expected_icon_line = format!("Icon={}", icon_path.display());
     let needs_desktop = match fs::read_to_string(&desktop_path) {
-        Ok(text) => !text.contains("Icon=easi") || !text.contains("StartupWMClass=easi"),
+        Ok(text) => !text.contains(&expected_icon_line) || !text.contains("StartupWMClass=easi"),
         Err(_) => true,
     };
     if needs_desktop && fs::create_dir_all(&roots.desktop_dir).is_ok() {
@@ -120,7 +121,7 @@ pub fn ensure_easi_desktop_and_icon(roots: &InstallRoots, easi_bin: &Path) {
              Name=easi\n\
              GenericName=App Installer\n\
              Comment=Install downloaded Linux apps\n\
-             Icon=easi\n\
+             {expected_icon_line}\n\
              Exec={exec_quoted} %f\n\
              Terminal=false\n\
              StartupNotify=true\n\
@@ -143,8 +144,9 @@ pub fn ensure_easi_desktop_and_icon(roots: &InstallRoots, easi_bin: &Path) {
 pub fn run_setup(roots: &InstallRoots, easi_bin: &Path) -> Result<SavedHandlers, EasiError> {
     fs::create_dir_all(&roots.desktop_dir)?;
     let icon_dir = roots.icons_dir.join("scalable/apps");
+    let icon_path = icon_dir.join("easi.svg");
     if fs::create_dir_all(&icon_dir).is_ok() {
-        let _ = fs::write(icon_dir.join("easi.svg"), EASI_ICON_SVG);
+        let _ = fs::write(&icon_path, EASI_ICON_SVG);
         let _ = fs::write(icon_dir.join("easi-symbolic.svg"), EASI_SYMBOLIC_SVG);
     }
     let desktop_path = roots.desktop_dir.join(EASI_DESKTOP_ID);
@@ -168,13 +170,14 @@ pub fn run_setup(roots: &InstallRoots, easi_bin: &Path) -> Result<SavedHandlers,
          Name=easi\n\
          GenericName=App Installer\n\
          Comment=Install downloaded Linux apps\n\
-         Icon=easi\n\
+         Icon={}\n\
          Exec={exec_quoted} %f\n\
          Terminal=false\n\
          StartupNotify=true\n\
          StartupWMClass=easi\n\
          Categories=System;Utility;\n\
-         MimeType={mimes};\n"
+         MimeType={mimes};\n",
+        icon_path.display()
     );
     fs::write(&desktop_path, content)?;
 

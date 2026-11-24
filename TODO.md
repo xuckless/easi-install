@@ -131,6 +131,7 @@ Every arrow is a row in the reducer match. Every unlisted `(state, action)` pair
 - [x] Switch Slint GUI from FemtoVG to Skia renderer (`renderer-skia` + FreeType hinting) to fix wiggly/uneven Linux text antialiasing, plus single-instance Unix socket handoff (prevents duplicate windows when opened twice)
 - [x] Real-world discovery & polish: scan `~/.local/bin/` user binaries/AppImages without dir-collision (`helium`, `agy`, `claude`, `uv`, `zig`), auto-heal `easi.svg` + `easi.desktop`, render real app icons in the Apps list, constant compact row heights, per-app Update progress bar, Firefox/Zen `pingsender` penalty, and "Move to ~/Applications" organizer
 - [x] Explicit UI busy-state locks on all async buttons (`Check Updates`, `Refresh`, `Manage`/`Manage All`, `Install Package…`/`Add Existing…`) plus human-friendly `InstallStep` progress labels
+- [x] Left-align app row metadata (`Kind · id · size`) with uniform 32px icon column, and write absolute hicolor `Icon=` paths in `.desktop` files for instant GNOME/KDE/Wayland Alt-Tab & Dock icon rendering
 - [ ] Portable app-list backup (`easi export` / `easi import`) to reinstall upstream-tracked apps on a new Linux machine or fresh SteamOS/CachyOS install
 
 ## Open questions

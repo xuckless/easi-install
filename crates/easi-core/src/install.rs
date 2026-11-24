@@ -341,19 +341,20 @@ where
                 on_progress(InstallStep::Wiring, pct);
                 let icon_name = plan.app_id.clone();
                 if let Some((rel, bytes)) = extracted_icon_bytes.take() {
-                    let icon_dest = write_hicolor_icon(roots, &icon_name, &rel, &bytes, tx)?;
-                    if icon_dest.is_some() {
-                        installed_icon_name = Some(icon_name);
+                    if let Some(icon_dest) =
+                        write_hicolor_icon(roots, &icon_name, &rel, &bytes, tx)?
+                    {
+                        installed_icon_name = Some(icon_dest.to_string_lossy().into_owned());
                     }
                 } else if let Some(icon_rel) = &plan.icon_path {
                     let rel_icon = strip_top_prefix(icon_rel, stripped_prefix.as_deref());
                     let src = safe_join(&app_dir, Path::new(&rel_icon))?;
                     if src.exists() {
                         let bytes = fs::read(&src)?;
-                        let icon_dest =
-                            write_hicolor_icon(roots, &icon_name, icon_rel, &bytes, tx)?;
-                        if icon_dest.is_some() {
-                            installed_icon_name = Some(icon_name);
+                        if let Some(icon_dest) =
+                            write_hicolor_icon(roots, &icon_name, icon_rel, &bytes, tx)?
+                        {
+                            installed_icon_name = Some(icon_dest.to_string_lossy().into_owned());
                         }
                     }
                 }
