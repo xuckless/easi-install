@@ -52,14 +52,14 @@ Every arrow is a row in the reducer match. Every unlisted `(state, action)` pair
 - [x] Reducer transition test table (one row per `(state, action) → next`)
 
 ## M1 — Detect & inspect (pure + read-only effects)
-- [ ] Magic-byte format table: AppImage t1/t2, gzip, xz, zstd, bzip2, zip
-- [ ] Archive listing without full extraction (tar/zip streaming)
-- [ ] AppImage: read embedded `.desktop` + icon from squashfs (no executing it)
-- [ ] Candidate scoring table: main executable, icon, app name, version
-- [ ] App id resolver: source-priority table + version/arch token-strip table (table-driven tests with real-world filenames)
-- [ ] `StartupWMClass` guess from ELF name; post-v1: learn the real one on first launch
-- [ ] Classification: `App(Gui) | App(Terminal) | NotAnApp | Ambiguous`
-- [ ] Trust summary: origin xattr, size, sha256, signature check, perms/escape scan
+- [x] Magic-byte format table: AppImage t1/t2, gzip, xz, zstd, bzip2, zip
+- [x] Archive listing without full extraction (tar/zip streaming)
+- [x] AppImage: read embedded `.desktop` + icon from squashfs (no executing it)
+- [x] Candidate scoring table: main executable, icon, app name, version
+- [x] App id resolver: source-priority table + version/arch token-strip table (table-driven tests with real-world filenames)
+- [x] `StartupWMClass` guess from ELF name; post-v1: learn the real one on first launch
+- [x] Classification: `App(Gui) | App(Terminal) | NotAnApp | Ambiguous`
+- [x] Trust summary: origin xattr, size, sha256, signature check, perms/escape scan
 
 ## M2 — Install engine + CLI
 - [ ] Install plan as data: `Format × AppKind → [Step]`
