@@ -9,6 +9,7 @@ pub mod install;
 pub mod manifest;
 pub mod model;
 pub mod plan;
+pub mod reconcile;
 pub mod reduce;
 pub mod roots;
 pub mod runner;

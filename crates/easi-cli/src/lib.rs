@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use easi_core::desktop::run_setup;
 use easi_core::install::{add_bin_to_shell_rc, uninstall_app};
-use easi_core::manifest::list_manifests;
+use easi_core::reconcile::reconcile_all;
 use easi_core::roots::InstallRoots;
 use easi_core::runner::EffectRunner;
 use easi_core::{
@@ -125,7 +125,7 @@ fn run_config_cmd(roots: &InstallRoots, auto_update: Option<bool>) -> ExitCode {
 }
 
 fn run_check_updates_cmd(roots: &InstallRoots) -> ExitCode {
-    let manifests = match list_manifests(roots) {
+    let manifests = match reconcile_all(roots) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("easi: {}", format_user_error(&e));
@@ -218,7 +218,7 @@ fn run_setup_cmd(roots: &InstallRoots) -> ExitCode {
 }
 
 fn run_list_cmd(roots: &InstallRoots) -> ExitCode {
-    match list_manifests(roots) {
+    match reconcile_all(roots) {
         Ok(list) if list.is_empty() => {
             println!("No apps installed by easi.");
             ExitCode::SUCCESS

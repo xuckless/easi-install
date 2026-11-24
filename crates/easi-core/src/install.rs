@@ -676,8 +676,11 @@ pub fn refresh_desktop_caches(roots: &InstallRoots) {
 }
 
 /// Replay manifest in reverse and remove the manifest file.
+/// Reconciles first so any files added by an app's own self-updater inside `install_dir`
+/// are also cleaned up.
 pub fn uninstall_app(roots: &InstallRoots, query: &str) -> Result<Manifest, EasiError> {
-    let manifest = resolve_installed(roots, query)?;
+    let mut manifest = resolve_installed(roots, query)?;
+    let _ = crate::reconcile::reconcile_manifest(roots, &mut manifest);
     rollback_paths(&manifest.created_files, &manifest.created_dirs);
     delete_manifest(roots, &manifest.app_id)?;
     refresh_desktop_caches(roots);
