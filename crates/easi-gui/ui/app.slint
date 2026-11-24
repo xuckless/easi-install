@@ -161,6 +161,10 @@ export component AppWindow inherits Window {
     in property <bool> bg-update-timer: false;
     in property <bool> purge-data-on-uninstall: false;
     in property <bool> confirm-self-uninstall: false;
+    in property <bool> onboard-setup-handlers: true;
+    in property <bool> onboard-auto-update: true;
+    in property <bool> onboard-bg-timer: false;
+    in property <string> privacy-policy-text: "";
     in property <string> settings-feedback: "";
 
     // Selected App Info (Android-style per-app view)
@@ -238,6 +242,12 @@ export component AppWindow inherits Window {
     callback set-confirm(string);
     callback set-trash-checked(bool);
     callback set-script-consent(bool);
+    callback set-onboard-setup-handlers(bool);
+    callback set-onboard-auto-update(bool);
+    callback set-onboard-bg-timer(bool);
+    callback complete-onboarding();
+    callback open-privacy(bool);
+    callback close-privacy();
     callback browse-package();
     callback open-path(string);
     callback open-app-info(string);
@@ -308,7 +318,7 @@ export component AppWindow inherits Window {
                         color: Theme.ink-2;
                     }
                 }
-                ESegmented {
+                if root.manager-page != "onboarding" && root.manager-page != "privacy": ESegmented {
                     labels: ["Apps", "Settings"];
                     current: root.manager-page == "settings" ? 1 : 0;
                     changed(i) => { root.set-manager-page(i == 1 ? "settings" : "apps"); }
@@ -318,6 +328,134 @@ export component AppWindow inherits Window {
             // Overlapping manager pages container
             Rectangle {
                 vertical-stretch: 1;
+
+                // --- PAGE 0: First-Time Setup / Onboarding Wizard ---
+                Scene {
+                    width: 100%;
+                    height: 100%;
+                    active: root.manager-page == "onboarding";
+                    dir: root.page-dir;
+
+                    ScrollView {
+                        width: 100%;
+                        height: 100%;
+                        VerticalLayout {
+                            alignment: start;
+                            spacing: Theme.s3;
+
+                            Panel {
+                                HorizontalLayout {
+                                    padding: Theme.s4;
+                                    spacing: Theme.s3;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Image {
+                                            source: @image-url("logo-drop.svg");
+                                            width: 44px;
+                                            height: 44px;
+                                            image-fit: contain;
+                                        }
+                                    }
+                                    VerticalLayout {
+                                        spacing: Theme.s1;
+                                        horizontal-stretch: 1;
+                                        Text {
+                                            text: "Welcome to Easi Install";
+                                            font-size: Theme.font-title;
+                                            font-weight: 600;
+                                            color: Theme.ink;
+                                        }
+                                        Text {
+                                            text: "Before we start, review what easi accesses and choose your defaults — in plain English.";
+                                            font-size: Theme.font-caption;
+                                            color: Theme.ink-2;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+                                }
+                            }
+
+                            Panel {
+                                VerticalLayout {
+                                    padding: Theme.s4;
+                                    spacing: Theme.s2;
+                                    Text {
+                                        text: "User-Space Access Only (Never Root)";
+                                        font-size: Theme.font-heading;
+                                        font-weight: 600;
+                                        color: Theme.ink;
+                                    }
+                                    Text {
+                                        text: "• Installs apps inside your personal ~/Applications folder — never touches /usr, /etc, or system packages.\n• Creates menu launchers, app icons, and ~/.local/bin links inside your home directory.\n• Stores a plain-text record of installed files in ~/.local/share/easi so every app can be uninstalled cleanly.\n• Scans your home folder for existing unmanaged apps so you can repair broken icons or launchers.";
+                                        font-size: Theme.font-caption;
+                                        color: Theme.ink-2;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                            }
+
+                            Panel {
+                                VerticalLayout {
+                                    padding: Theme.s4;
+                                    spacing: Theme.s2;
+                                    Text {
+                                        text: "Choose Your Defaults";
+                                        font-size: Theme.font-heading;
+                                        font-weight: 600;
+                                        color: Theme.ink;
+                                    }
+                                    ECheck {
+                                        text: "Check for easi updates automatically (GitHub Releases, zero telemetry)";
+                                        checked: root.onboard-auto-update;
+                                        toggled(v) => { root.set-onboard-auto-update(v); }
+                                    }
+                                    ECheck {
+                                        text: "Set easi as default for .AppImage files and add Right-Click → Open With for archives (never hijacks your archive manager)";
+                                        checked: root.onboard-setup-handlers;
+                                        toggled(v) => { root.set-onboard-setup-handlers(v); }
+                                    }
+                                    ECheck {
+                                        text: "Check for app updates daily in the background (systemd user timer, 0 MB RAM idle)";
+                                        checked: root.onboard-bg-timer;
+                                        toggled(v) => { root.set-onboard-bg-timer(v); }
+                                    }
+                                }
+                            }
+
+                            Panel {
+                                VerticalLayout {
+                                    padding: Theme.s4;
+                                    spacing: Theme.s2;
+                                    Text {
+                                        text: "Privacy & Terms of Use";
+                                        font-size: Theme.font-heading;
+                                        font-weight: 600;
+                                        color: Theme.ink;
+                                    }
+                                    Text {
+                                        text: "easi collects zero telemetry and is 100% open source under the Apache-2.0 License. Provided “as is” with no warranties; you review each package's trust summary before installing.";
+                                        font-size: Theme.font-caption;
+                                        color: Theme.ink-2;
+                                        wrap: word-wrap;
+                                    }
+                                    HorizontalLayout {
+                                        spacing: Theme.s2;
+                                        alignment: end;
+                                        EButton {
+                                            text: "Privacy & Security Policy";
+                                            clicked => { root.open-privacy(true); }
+                                        }
+                                        EButton {
+                                            text: "Accept & Get Started";
+                                            kind: "primary";
+                                            clicked => { root.complete-onboarding(); }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
 
                 // --- PAGE 1: Apps (Installed + Detected Apps) ---
                 Scene {
@@ -1287,6 +1425,7 @@ export component AppWindow inherits Window {
                                     }
                                     VerticalLayout {
                                         alignment: center;
+                                        spacing: Theme.s1;
                                         EButton {
                                             text: root.self-update-state == "updated"
                                                 ? "Restart Now"
@@ -1302,6 +1441,49 @@ export component AppWindow inherits Window {
                                                 }
                                             }
                                         }
+                                        EButton {
+                                            text: "Privacy & Security";
+                                            small: true;
+                                            clicked => { root.open-privacy(false); }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // --- PAGE 4: In-App Privacy & Security Policy ---
+                Scene {
+                    width: 100%;
+                    height: 100%;
+                    active: root.manager-page == "privacy";
+                    dir: root.page-dir;
+
+                    ScrollView {
+                        width: 100%;
+                        height: 100%;
+                        VerticalLayout {
+                            alignment: start;
+                            spacing: Theme.s3;
+                            HorizontalLayout {
+                                alignment: start;
+                                EButton {
+                                    text: "← Back";
+                                    kind: "ghost";
+                                    small: true;
+                                    clicked => { root.close-privacy(); }
+                                }
+                            }
+                            Panel {
+                                VerticalLayout {
+                                    padding: Theme.s4;
+                                    spacing: Theme.s2;
+                                    Text {
+                                        text: root.privacy-policy-text;
+                                        font-size: Theme.font-caption;
+                                        color: Theme.ink;
+                                        wrap: word-wrap;
                                     }
                                 }
                             }

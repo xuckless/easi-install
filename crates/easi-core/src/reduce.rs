@@ -24,6 +24,9 @@ pub fn reduce_ui(mut ui: ManagerUi, action: UiAction) -> ManagerUi {
         UiAction::SetTrashChecked(v) => ui.trash_checked = v,
         UiAction::SetScriptConsent(v) => ui.script_consent_checked = v,
         UiAction::SetCommandCopied(v) => ui.command_copied = v,
+        UiAction::SetOnboardSetupHandlers(v) => ui.onboard_setup_handlers = v,
+        UiAction::SetOnboardAutoUpdate(v) => ui.onboard_auto_update = v,
+        UiAction::SetOnboardBgTimer(v) => ui.onboard_bg_timer = v,
     }
     ui
 }

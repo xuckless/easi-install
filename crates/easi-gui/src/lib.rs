@@ -58,8 +58,10 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         InstallRoots::from_home(&std::env::temp_dir().join("easi-fallback-home"))
     });
     let runner = Arc::new(EffectRunner::new(roots));
-    // Always ensure easi's own Drop icon and easi.desktop (Icon=easi, StartupWMClass=easi) are healthy.
-    if let Ok(exe) = std::env::current_exe() {
+    let needs_onboard =
+        initial_path.is_none() && easi_core::self_update::needs_onboarding(&runner.roots);
+    // Only auto-heal easi.desktop/icon after onboarding has been completed.
+    if !needs_onboard && let Ok(exe) = std::env::current_exe() {
         easi_core::desktop::ensure_easi_desktop_and_icon(&runner.roots, &exe);
     }
     let store = Arc::new(Mutex::new(Store::new()));
@@ -69,10 +71,16 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
     let cfg = easi_core::self_update::load_config(&runner.roots);
     let bg_timer = easi_core::desktop::is_background_update_timer_enabled(&runner.roots);
     window.set_easi_version(env!("CARGO_PKG_VERSION").into());
+    window.set_privacy_policy_text(easi_core::self_update::PRIVACY_POLICY_TEXT.into());
 
     if let Ok(mut st) = store.lock() {
         st.dispatch_ui(UiAction::SetAutoCheckUpdates(cfg.auto_check_updates));
         st.dispatch_ui(UiAction::SetBgUpdateTimer(bg_timer));
+        st.dispatch_ui(UiAction::SetOnboardAutoUpdate(cfg.auto_check_updates));
+        st.dispatch_ui(UiAction::SetOnboardBgTimer(bg_timer));
+        if needs_onboard {
+            st.dispatch_ui(UiAction::Navigate(ManagerPage::Onboarding));
+        }
         project_ui(&window, st.ui());
         project_state(&window, st.state(), st.ui());
     }
@@ -171,6 +179,92 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         let s = Arc::clone(&store);
         window.on_set_script_consent(move |v| {
             dispatch_ui(&w, &s, UiAction::SetScriptConsent(v));
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        window.on_set_onboard_setup_handlers(move |v| {
+            dispatch_ui(&w, &s, UiAction::SetOnboardSetupHandlers(v));
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        window.on_set_onboard_auto_update(move |v| {
+            dispatch_ui(&w, &s, UiAction::SetOnboardAutoUpdate(v));
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        window.on_set_onboard_bg_timer(move |v| {
+            dispatch_ui(&w, &s, UiAction::SetOnboardBgTimer(v));
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        window.on_open_privacy(move |from_onboarding| {
+            dispatch_ui(
+                &w,
+                &s,
+                UiAction::Navigate(ManagerPage::Privacy {
+                    return_to_onboarding: from_onboarding,
+                }),
+            );
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        window.on_close_privacy(move || {
+            let target = s
+                .lock()
+                .ok()
+                .map(|st| match st.ui().page {
+                    ManagerPage::Privacy {
+                        return_to_onboarding: true,
+                    } => ManagerPage::Onboarding,
+                    _ => ManagerPage::Settings,
+                })
+                .unwrap_or(ManagerPage::Settings);
+            dispatch_ui(&w, &s, UiAction::Navigate(target));
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        let r = Arc::clone(&runner);
+        window.on_complete_onboarding(move || {
+            let (auto_upd, setup_handlers, bg_timer) = s
+                .lock()
+                .ok()
+                .map(|st| {
+                    (
+                        st.ui().onboard_auto_update,
+                        st.ui().onboard_setup_handlers,
+                        st.ui().onboard_bg_timer,
+                    )
+                })
+                .unwrap_or((true, true, false));
+            let _ = easi_core::self_update::set_auto_check_updates(&r.roots, auto_upd);
+            let _ = easi_core::self_update::complete_onboarding(&r.roots);
+            if let Ok(exe) = std::env::current_exe() {
+                if setup_handlers {
+                    let _ = easi_core::desktop::run_setup(&r.roots, &exe);
+                } else {
+                    easi_core::desktop::ensure_easi_desktop_and_icon(&r.roots, &exe);
+                }
+                if bg_timer {
+                    let _ = easi_core::desktop::set_background_update_timer(&r.roots, &exe, true);
+                }
+            }
+            dispatch_ui(&w, &s, UiAction::SetAutoCheckUpdates(auto_upd));
+            dispatch_ui(&w, &s, UiAction::SetBgUpdateTimer(bg_timer));
+            dispatch_ui(&w, &s, UiAction::Navigate(ManagerPage::Apps));
+            dispatch_action(&w, &s, &r, Action::LoadInstalled);
+            refresh_detected_async(&w, &r.roots);
         });
     }
     {
@@ -940,7 +1034,7 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
 
     if let Some(path) = initial_path {
         dispatch_action(&window.as_weak(), &store, &runner, Action::OpenPath(path));
-    } else {
+    } else if !needs_onboard {
         dispatch_action(&window.as_weak(), &store, &runner, Action::LoadInstalled);
         refresh_detected_async(&window.as_weak(), &runner.roots);
     }
@@ -1015,17 +1109,21 @@ fn dispatch_ui(weak: &Weak<ui::AppWindow>, store: &Arc<Mutex<Store>>, action: Ui
 
 fn page_rank(page: &str) -> i32 {
     match page {
+        "onboarding" => -1,
         "apps" => 0,
         "app_info" => 1,
-        _ => 2,
+        "settings" => 2,
+        _ => 3,
     }
 }
 
 fn project_ui(win: &ui::AppWindow, ui: &ManagerUi) {
     let next_page = match &ui.page {
+        ManagerPage::Onboarding => "onboarding",
         ManagerPage::Apps => "apps",
         ManagerPage::AppInfo { .. } => "app_info",
         ManagerPage::Settings => "settings",
+        ManagerPage::Privacy { .. } => "privacy",
     };
     let cur_page = win.get_manager_page().to_string();
     if cur_page != next_page {
@@ -1057,6 +1155,9 @@ fn project_ui(win: &ui::AppWindow, ui: &ManagerUi) {
     win.set_trash_checked(ui.trash_checked);
     win.set_script_consent_checked(ui.script_consent_checked);
     win.set_command_copied(ui.command_copied);
+    win.set_onboard_setup_handlers(ui.onboard_setup_handlers);
+    win.set_onboard_auto_update(ui.onboard_auto_update);
+    win.set_onboard_bg_timer(ui.onboard_bg_timer);
 }
 
 fn dispatch_action(

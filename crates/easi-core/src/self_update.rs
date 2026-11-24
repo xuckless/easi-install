@@ -21,6 +21,10 @@ use crate::roots::InstallRoots;
 pub const DEFAULT_REPO: &str = "xuckless/easi-install";
 pub const DEFAULT_MINISIGN_PUBKEY: &str =
     "RWQnPmfJNaxDO2ecscxiezHEPZmmtizudyau8OENs5gw21DZWlmc2IRQ";
+/// Bump this ONLY when onboarding permissions/capabilities change meaningfully so existing users
+/// are not re-prompted on normal updates.
+pub const CURRENT_ONBOARDING_VERSION: u32 = 1;
+pub const PRIVACY_POLICY_TEXT: &str = include_str!("../../../PRIVACY.md");
 const CHECK_INTERVAL_SECS: u64 = 6 * 60 * 60;
 
 fn default_true() -> bool {
@@ -36,6 +40,8 @@ pub struct EasiConfig {
     pub last_update_check_epoch: u64,
     #[serde(default)]
     pub latest_known_version: Option<String>,
+    #[serde(default)]
+    pub onboarding_version: u32,
 }
 
 impl Default for EasiConfig {
@@ -44,8 +50,20 @@ impl Default for EasiConfig {
             auto_check_updates: true,
             last_update_check_epoch: 0,
             latest_known_version: None,
+            onboarding_version: 0,
         }
     }
+}
+
+pub fn needs_onboarding(roots: &InstallRoots) -> bool {
+    load_config(roots).onboarding_version < CURRENT_ONBOARDING_VERSION
+}
+
+pub fn complete_onboarding(roots: &InstallRoots) -> Result<EasiConfig, EasiError> {
+    let mut cfg = load_config(roots);
+    cfg.onboarding_version = CURRENT_ONBOARDING_VERSION;
+    save_config(roots, &cfg)?;
+    Ok(cfg)
 }
 
 pub fn load_config(roots: &InstallRoots) -> EasiConfig {
@@ -366,8 +384,12 @@ mod tests {
             auto_check_updates: true,
             last_update_check_epoch: now,
             latest_known_version: Some("0.2.0".into()),
+            onboarding_version: 0,
         };
         save_config(&roots, &cfg).expect("save");
+        assert!(needs_onboarding(&roots));
+        complete_onboarding(&roots).expect("complete onboarding");
+        assert!(!needs_onboarding(&roots));
         assert_eq!(
             check_for_easi_update(&roots, "0.1.0").as_deref(),
             Some("0.2.0")

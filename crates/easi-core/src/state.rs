@@ -66,12 +66,16 @@ pub enum State {
 /// Active page in the standalone App Manager (replaces string/boolean UI state in Slint).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ManagerPage {
+    Onboarding,
     #[default]
     Apps,
     AppInfo {
         app_id: String,
     },
     Settings,
+    Privacy {
+        return_to_onboarding: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -107,6 +111,9 @@ pub struct ManagerUi {
     pub trash_checked: bool,
     pub script_consent_checked: bool,
     pub command_copied: bool,
+    pub onboard_setup_handlers: bool,
+    pub onboard_auto_update: bool,
+    pub onboard_bg_timer: bool,
 }
 
 impl Default for ManagerUi {
@@ -124,6 +131,9 @@ impl Default for ManagerUi {
             trash_checked: true,
             script_consent_checked: false,
             command_copied: false,
+            onboard_setup_handlers: true,
+            onboard_auto_update: true,
+            onboard_bg_timer: false,
         }
     }
 }
@@ -143,6 +153,9 @@ pub enum UiAction {
     SetTrashChecked(bool),
     SetScriptConsent(bool),
     SetCommandCopied(bool),
+    SetOnboardSetupHandlers(bool),
+    SetOnboardAutoUpdate(bool),
+    SetOnboardBgTimer(bool),
 }
 
 impl Default for State {
