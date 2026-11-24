@@ -40,11 +40,9 @@ const EXCLUDED_EXEC_NEEDLES: &[&str] = &[
     "/usr/bin/",
     "/usr/sbin/",
     "/usr/libexec/",
-    "/bin/",
-    "/sbin/",
 ];
 
-/// `$HOME` subpaths owned by container/game/package managers that must never be adopted.
+/// `$HOME` subpaths owned by container/game/package/language-env managers that must never be adopted.
 const EXCLUDED_HOME_SEGMENTS: &[&str] = &[
     "/.local/share/flatpak/",
     "/.var/app/",
@@ -56,6 +54,12 @@ const EXCLUDED_HOME_SEGMENTS: &[&str] = &[
     "/.local/share/lutris/",
     "/.local/share/Trash/",
     "/.cache/",
+    "/.venv/",
+    "/uv/tools/",
+    "/uv/python/",
+    "/node_modules/",
+    "/.cargo/",
+    "/.rustup/",
 ];
 
 const EXCLUDED_DESKTOP_PREFIXES: &[&str] = &["wine-extension-", "easi.desktop"];
@@ -167,9 +171,12 @@ pub fn scan_unmanaged_apps(roots: &InstallRoots) -> Vec<DiscoveredApp> {
             }
 
             let install_dir = infer_install_dir(roots, &canon_exec);
-            if let Ok(canon_dir) = fs::canonicalize(&install_dir)
-                && (managed_dirs.contains(&canon_dir) || !seen_dirs.insert(canon_dir))
-            {
+            let canon_dir = fs::canonicalize(&install_dir).unwrap_or_else(|_| install_dir.clone());
+            if managed_dirs.contains(&canon_dir) || seen_execs.contains(&canon_exec) {
+                continue;
+            }
+            // Only deduplicate by install_dir when it is a dedicated app directory (not a single file).
+            if canon_dir.is_dir() && !seen_dirs.insert(canon_dir) {
                 continue;
             }
             seen_execs.insert(canon_exec.clone());
@@ -250,8 +257,97 @@ pub fn scan_unmanaged_apps(roots: &InstallRoots) -> Vec<DiscoveredApp> {
                 && let Some(app) = discover_from_dir(roots, &canon_path)
                 && !managed_ids.contains(&app.app_id)
             {
+                seen_dirs.insert(canon_path);
                 discovered.push(app);
             }
+        }
+    }
+
+    // 3. Scan ~/.local/bin/ for standalone user binaries, AppImages, and symlinks to $HOME apps
+    // (e.g. agy, claude, uv, skink, zig, helium.AppImage) that don't already have a .desktop entry.
+    if let Ok(entries) = fs::read_dir(&roots.bin_dir) {
+        let managed_bin_files: HashSet<PathBuf> = managed
+            .iter()
+            .flat_map(|m| m.created_files.iter())
+            .filter(|p| p.starts_with(&roots.bin_dir))
+            .cloned()
+            .collect();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let fname = entry.file_name().to_string_lossy().into_owned();
+            if fname.starts_with('.')
+                || fname == "easi"
+                || fname.ends_with(".old")
+                || fname.contains("(deleted)")
+                || managed_bin_files.contains(&path)
+            {
+                continue;
+            }
+            let Ok(canon_exec) = fs::canonicalize(&path) else {
+                continue;
+            };
+            if !canon_exec.is_file()
+                || !canon_exec.starts_with(&canon_home)
+                || is_excluded_home_path(&canon_exec)
+                || seen_execs.contains(&canon_exec)
+                || managed_dirs.contains(&canon_exec)
+            {
+                continue;
+            }
+            let install_dir = infer_install_dir(roots, &canon_exec);
+            if install_dir.is_dir()
+                && let Ok(canon_dir) = fs::canonicalize(&install_dir)
+                && (managed_dirs.contains(&canon_dir) || seen_dirs.contains(&canon_dir))
+            {
+                continue;
+            }
+            let Ok(fmt) = detect_file_format(&canon_exec) else {
+                continue;
+            };
+            if !matches!(
+                fmt,
+                Format::AppImageType1 | Format::AppImageType2 | Format::BareElf
+            ) {
+                continue;
+            }
+            let (slug, mut ver) = slug_and_version(&fname);
+            if ver.is_none() {
+                ver = detect_dir_version(&install_dir, &canon_exec);
+            }
+            let slug_clean = if slug.is_empty() { "app" } else { &slug };
+            let app_id = format!("easi.{slug_clean}");
+            if managed_ids.contains(&app_id) {
+                continue;
+            }
+            seen_execs.insert(canon_exec.clone());
+            let name = display_name_from_slug(slug_clean);
+            let kind = if matches!(fmt, Format::AppImageType1 | Format::AppImageType2) {
+                AppKind::Gui
+            } else {
+                AppKind::Terminal
+            };
+            let mut issues = Vec::new();
+            if kind == AppKind::Gui {
+                issues.push(AppIssue::MissingDesktopEntry);
+                issues.push(AppIssue::MissingIcon);
+            }
+            let size_bytes = if install_dir.is_dir() {
+                dir_size_bytes(&install_dir)
+            } else {
+                fs::metadata(&canon_exec).map(|m| m.len()).unwrap_or(0)
+            };
+            discovered.push(DiscoveredApp {
+                app_id,
+                name,
+                version: ver,
+                kind,
+                install_dir,
+                exec_path: canon_exec,
+                desktop_path: None,
+                icon_value: None,
+                size_bytes,
+                issues,
+            });
         }
     }
 
@@ -468,6 +564,121 @@ pub fn repair_app(roots: &InstallRoots, query: &str) -> Result<Vec<String>, Easi
 pub fn forget_app(roots: &InstallRoots, query: &str) -> Result<Manifest, EasiError> {
     let manifest = resolve_installed(roots, query)?;
     delete_manifest(roots, &manifest.app_id)?;
+    Ok(manifest)
+}
+
+/// Move a managed app whose files live outside `~/Applications/` neatly into `~/Applications/<Name>/`,
+/// rewriting its `.desktop` `Exec=` and `~/.local/bin/<slug>` symlink.
+pub fn organize_app_into_applications(
+    roots: &InstallRoots,
+    query: &str,
+) -> Result<Manifest, EasiError> {
+    let mut manifest = resolve_installed(roots, query)?;
+    let canon_apps = fs::canonicalize(&roots.applications_dir).unwrap_or_else(|_| {
+        let _ = fs::create_dir_all(&roots.applications_dir);
+        roots.applications_dir.clone()
+    });
+    let canon_old = fs::canonicalize(&manifest.install_dir)?;
+    if canon_old.starts_with(&canon_apps) {
+        return Ok(manifest);
+    }
+
+    fs::create_dir_all(&roots.applications_dir)?;
+    let folder_name: String = manifest
+        .name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == ' ' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim()
+        .to_string();
+    let dest_dir = safe_join(
+        &roots.applications_dir,
+        Path::new(if folder_name.is_empty() {
+            &manifest.app_id
+        } else {
+            &folder_name
+        }),
+    )?;
+    if dest_dir.exists() {
+        return Err(EasiError::UnmanagedOverwrite(dest_dir));
+    }
+
+    let old_str = canon_old.to_string_lossy().into_owned();
+    let new_install_dir: PathBuf;
+    let new_exec: PathBuf;
+
+    if canon_old.is_file() {
+        fs::create_dir_all(&dest_dir)?;
+        let fname = canon_old
+            .file_name()
+            .ok_or_else(|| EasiError::Desktop("invalid source filename".into()))?;
+        let dest_file = dest_dir.join(fname);
+        fs::rename(&canon_old, &dest_file)?;
+        new_install_dir = dest_dir.clone();
+        new_exec = dest_file;
+    } else if canon_old.is_dir() {
+        fs::rename(&canon_old, &dest_dir)?;
+        new_install_dir = dest_dir.clone();
+        new_exec = find_best_exec_in_dir(&dest_dir, &bin_slug_for_id(&manifest.app_id))
+            .unwrap_or_else(|| dest_dir.join(&manifest.source_filename));
+    } else {
+        return Err(EasiError::NotFound(canon_old));
+    }
+
+    let new_str = if canon_old.is_file() {
+        new_exec.to_string_lossy().into_owned()
+    } else {
+        new_install_dir.to_string_lossy().into_owned()
+    };
+
+    // Rewrite tracked .desktop Exec= and Icon= paths that pointed to the old location.
+    for path in &manifest.created_files {
+        if path.starts_with(&roots.desktop_dir)
+            && path.extension().and_then(|s| s.to_str()) == Some("desktop")
+            && let Ok(text) = fs::read_to_string(path)
+        {
+            let updated = text.replace(&old_str, &new_str);
+            if updated != text {
+                let _ = fs::write(path, updated);
+            }
+        }
+    }
+
+    // Update ~/.local/bin/<slug> symlink to point to the organized executable.
+    let bin_slug = bin_slug_for_id(&manifest.app_id);
+    let link_path = roots.bin_dir.join(&bin_slug);
+    let _ = fs::create_dir_all(&roots.bin_dir);
+    if link_path.symlink_metadata().is_ok() {
+        let _ = fs::remove_file(&link_path);
+    }
+    let _ = symlink(&new_exec, &link_path);
+
+    // Refresh manifest paths.
+    manifest.install_dir = new_install_dir.clone();
+    manifest
+        .created_files
+        .retain(|p| !p.starts_with(&canon_old) && p != &canon_old);
+    manifest
+        .created_dirs
+        .retain(|p| !p.starts_with(&canon_old) && p != &canon_old);
+    manifest.created_dirs.push(new_install_dir.clone());
+    collect_tree(
+        &new_install_dir,
+        &mut manifest.created_files,
+        &mut manifest.created_dirs,
+    );
+    if !manifest.created_files.contains(&link_path) {
+        manifest.created_files.push(link_path);
+    }
+
+    save_manifest(roots, &manifest)?;
+    refresh_desktop_caches(roots);
     Ok(manifest)
 }
 
@@ -891,18 +1102,32 @@ fn split_exec_tokens(s: &str) -> Vec<String> {
 }
 
 fn infer_install_dir(roots: &InstallRoots, canon_exec: &Path) -> PathBuf {
-    // If inside ~/Applications/<AppDir>/..., return ~/Applications/<AppDir>.
+    // 1. If inside ~/Applications/<AppDir>/..., return ~/Applications/<AppDir>.
     if let Ok(canon_apps) = fs::canonicalize(&roots.applications_dir)
         && let Ok(rel) = canon_exec.strip_prefix(&canon_apps)
         && let Some(first) = rel.components().next()
     {
         return canon_apps.join(first);
     }
-    // Otherwise return parent directory (or the file itself if directly in ~/.local/bin).
-    canon_exec
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| canon_exec.to_path_buf())
+    // 2. If directly inside ~/.local/bin/ (e.g. helium.AppImage, agy, uv), the file itself is the install target!
+    if let Ok(canon_bin) = fs::canonicalize(&roots.bin_dir)
+        && canon_exec.parent() == Some(canon_bin.as_path())
+    {
+        return canon_exec.to_path_buf();
+    }
+    // 3. If inside <app>/bin/<exe> (e.g. ~/.local/zed.app/bin/zed, ~/.local/share/flutter/bin/flutter),
+    // return the app root <app>, not <app>/bin.
+    if let Some(parent) = canon_exec.parent() {
+        if parent.file_name().and_then(|s| s.to_str()) == Some("bin")
+            && let Some(grandparent) = parent.parent()
+            && grandparent != roots.home_dir
+            && grandparent != roots.home_dir.join(".local")
+        {
+            return grandparent.to_path_buf();
+        }
+        return parent.to_path_buf();
+    }
+    canon_exec.to_path_buf()
 }
 
 fn detect_dir_version(install_dir: &Path, exec_path: &Path) -> Option<String> {

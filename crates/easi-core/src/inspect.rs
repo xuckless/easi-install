@@ -34,6 +34,38 @@ const EXEC_PATH_RULES: &[ScoreRule] = &[
         delta: -80,
     },
     ScoreRule {
+        needle: "pingsender",
+        delta: -80,
+    },
+    ScoreRule {
+        needle: "crashreporter",
+        delta: -80,
+    },
+    ScoreRule {
+        needle: "crashhelper",
+        delta: -80,
+    },
+    ScoreRule {
+        needle: "minidump-analyzer",
+        delta: -80,
+    },
+    ScoreRule {
+        needle: "plugin-container",
+        delta: -80,
+    },
+    ScoreRule {
+        needle: "vaapitest",
+        delta: -80,
+    },
+    ScoreRule {
+        needle: "glxtest",
+        delta: -80,
+    },
+    ScoreRule {
+        needle: "updater",
+        delta: -60,
+    },
+    ScoreRule {
         needle: "crashpad",
         delta: -60,
     },

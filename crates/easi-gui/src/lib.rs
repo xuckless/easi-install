@@ -57,6 +57,10 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         InstallRoots::from_home(&std::env::temp_dir().join("easi-fallback-home"))
     });
     let runner = Arc::new(EffectRunner::new(roots));
+    // Always ensure easi's own Drop icon and easi.desktop (Icon=easi, StartupWMClass=easi) are healthy.
+    if let Ok(exe) = std::env::current_exe() {
+        easi_core::desktop::ensure_easi_desktop_and_icon(&runner.roots, &exe);
+    }
     let store = Arc::new(Mutex::new(Store::new()));
     let window = ui::AppWindow::new()?;
     // Match `easi.desktop` so Wayland/X11 Alt-Tab and taskbars show "easi" instead of "Unknown".
@@ -241,6 +245,22 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         let w = window.as_weak();
         let s = Arc::clone(&store);
         let r = Arc::clone(&runner);
+        window.on_organize_app(move |app_id| {
+            let id: String = app_id.into();
+            let msg = match easi_core::adopt::organize_app_into_applications(&r.roots, &id) {
+                Ok(m) => format!("Moved {} to {}.", m.name, m.install_dir.display()),
+                Err(e) => format!("Could not move app: {}", easi_core::format_user_error(&e)),
+            };
+            if let Some(win) = w.upgrade() {
+                win.set_detail_feedback(msg.into());
+            }
+            dispatch_action(&w, &s, &r, Action::LoadInstalled);
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        let r = Arc::clone(&runner);
         window.on_forget_app(move |app_id| {
             let _ = easi_core::adopt::forget_app(&r.roots, app_id.as_str());
             dispatch_action(&w, &s, &r, Action::LoadInstalled);
@@ -394,15 +414,33 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         let s = Arc::clone(&store);
         let r = Arc::clone(&runner);
         window.on_update_app(move |app_id| {
+            let id: String = app_id.into();
+            if let Some(win) = w.upgrade() {
+                if !win.get_updating_app_id().is_empty() {
+                    return;
+                }
+                win.set_updating_app_id(id.clone().into());
+                win.set_detail_feedback("".into());
+            }
             let w = w.clone();
             let s = Arc::clone(&s);
             let r = Arc::clone(&r);
-            let id: String = app_id.into();
             std::thread::spawn(move || {
-                if let Ok(m) = easi_core::manifest::resolve_installed(&r.roots, &id) {
-                    let _ = easi_core::upstream::download_and_update_app(&r.roots, &m);
-                }
+                let result_msg = match easi_core::manifest::resolve_installed(&r.roots, &id)
+                    .and_then(|m| easi_core::upstream::download_and_update_app(&r.roots, &m))
+                {
+                    Ok(summary) => format!(
+                        "Updated {} to {}.",
+                        summary.name,
+                        summary.version.as_deref().unwrap_or("latest")
+                    ),
+                    Err(e) => format!("Update failed: {}", easi_core::format_user_error(&e)),
+                };
                 let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(win) = w.upgrade() {
+                        win.set_updating_app_id("".into());
+                        win.set_detail_feedback(result_msg.into());
+                    }
                     dispatch_action(&w, &s, &r, Action::LoadInstalled);
                 });
             });
@@ -519,7 +557,7 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
             std::thread::spawn(move || {
                 let manifests = easi_core::manifest::list_manifests(&roots_bg).unwrap_or_default();
                 let mut available_count = 0usize;
-                let rows: Vec<ui::InstalledRow> = manifests
+                let rows_data: Vec<(easi_core::InstalledApp, String, bool)> = manifests
                     .iter()
                     .map(|m| {
                         let (note, has_update) = match easi_core::upstream::check_app_update(m) {
@@ -541,18 +579,7 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                             } => (format!("Check failed: {reason}"), false),
                         };
                         let app = m.to_installed_app_with_sizes(&roots_bg);
-                        ui::InstalledRow {
-                            app_id: app.app_id.into(),
-                            name: app.name.into(),
-                            version: app.version.unwrap_or_default().into(),
-                            kind: match app.kind {
-                                AppKind::Gui => "GUI".into(),
-                                AppKind::Terminal => "CLI".into(),
-                            },
-                            size_text: format_app_size(app.size_bytes, app.data_size_bytes).into(),
-                            update_note: note.into(),
-                            has_update,
-                        }
+                        (app, note, has_update)
                     })
                     .collect();
                 if available_count > 0 {
@@ -563,6 +590,28 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                 }
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(win) = w.upgrade() {
+                        let rows: Vec<ui::InstalledRow> = rows_data
+                            .into_iter()
+                            .map(|(app, note, has_update)| {
+                                let (icon, has_icon) =
+                                    load_installed_row_icon(&roots_bg, &app.app_id);
+                                ui::InstalledRow {
+                                    app_id: app.app_id.into(),
+                                    name: app.name.into(),
+                                    version: app.version.unwrap_or_default().into(),
+                                    kind: match app.kind {
+                                        AppKind::Gui => "GUI".into(),
+                                        AppKind::Terminal => "CLI".into(),
+                                    },
+                                    size_text: format_app_size(app.size_bytes, app.data_size_bytes)
+                                        .into(),
+                                    update_note: note.into(),
+                                    has_update,
+                                    icon,
+                                    has_icon,
+                                }
+                            })
+                            .collect();
                         win.set_installed_apps(ModelRc::new(VecModel::from(rows)));
                     }
                 });
@@ -867,19 +916,28 @@ fn project_state(win: &ui::AppWindow, state: &State) {
                 });
             }
 
+            let roots_opt = InstallRoots::default_user().ok();
             let rows: Vec<ui::InstalledRow> = filtered
                 .into_iter()
-                .map(|app| ui::InstalledRow {
-                    app_id: app.app_id.clone().into(),
-                    name: app.name.clone().into(),
-                    version: app.version.clone().unwrap_or_default().into(),
-                    kind: match app.kind {
-                        AppKind::Gui => "GUI".into(),
-                        AppKind::Terminal => "CLI".into(),
-                    },
-                    size_text: format_app_size(app.size_bytes, app.data_size_bytes).into(),
-                    update_note: "".into(),
-                    has_update: false,
+                .map(|app| {
+                    let (icon, has_icon) = roots_opt
+                        .as_ref()
+                        .map(|r| load_installed_row_icon(r, &app.app_id))
+                        .unwrap_or_else(|| (slint::Image::default(), false));
+                    ui::InstalledRow {
+                        app_id: app.app_id.clone().into(),
+                        name: app.name.clone().into(),
+                        version: app.version.clone().unwrap_or_default().into(),
+                        kind: match app.kind {
+                            AppKind::Gui => "GUI".into(),
+                            AppKind::Terminal => "CLI".into(),
+                        },
+                        size_text: format_app_size(app.size_bytes, app.data_size_bytes).into(),
+                        update_note: "".into(),
+                        has_update: false,
+                        icon,
+                        has_icon,
+                    }
                 })
                 .collect();
             win.set_installed_apps(ModelRc::new(VecModel::from(rows)));
@@ -1054,6 +1112,15 @@ fn project_state(win: &ui::AppWindow, state: &State) {
     }
 }
 
+fn load_installed_row_icon(roots: &InstallRoots, app_id: &str) -> (slint::Image, bool) {
+    if let Some(icon_path) = easi_core::manifest::find_installed_icon(roots, app_id)
+        && let Ok(img) = slint::Image::load_from_path(&icon_path)
+    {
+        return (img, true);
+    }
+    (slint::Image::default(), false)
+}
+
 fn load_preview_icon(app_id: &str, bytes: Option<&[u8]>) -> Option<slint::Image> {
     let data = bytes?;
     let ext = if data.starts_with(b"<svg") || data.starts_with(b"<?xml") {
@@ -1113,6 +1180,10 @@ fn project_app_detail(win: &ui::AppWindow, roots: &InstallRoots, app: &easi_core
     win.set_detail_has_cache(app.cache_size_bytes > 0);
     win.set_detail_has_data(app.data_size_bytes > 0);
     win.set_detail_adopted(app.adopted);
+    let can_organize = app.adopted
+        && !app.install_dir.starts_with(&roots.applications_dir)
+        && app.install_dir.exists();
+    win.set_detail_can_organize(can_organize);
     let src_label = easi_core::manifest::resolve_installed(roots, &app.app_id)
         .ok()
         .and_then(|m| m.update_source)

@@ -20,6 +20,7 @@ const CLI_SUBCOMMANDS: &[&str] = &[
     "scan",
     "adopt",
     "repair",
+    "organize",
     "forget",
     "set-source",
     "config",

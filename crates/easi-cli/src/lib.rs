@@ -81,6 +81,8 @@ pub enum Command {
     },
     /// Repair missing icon, .desktop launcher, StartupWMClass, or CLI symlink for a managed app.
     Repair { app: String },
+    /// Move an adopted app neatly into ~/Applications/<App>/ and update its launcher and symlink.
+    Organize { app: String },
     /// Stop managing an app in easi without deleting any of its files on disk.
     Forget { app: String },
     /// Set or auto-detect the upstream update source (GitHub, GitLab, Codeberg, CDN YAML, JetBrains, or direct URL).
@@ -149,6 +151,7 @@ pub fn run(cli: Cli) -> ExitCode {
             run_adopt_cmd(&roots, app.as_deref(), all, !no_fix)
         }
         Some(Command::Repair { app }) => run_repair_cmd(&roots, &app),
+        Some(Command::Organize { app }) => run_organize_cmd(&roots, &app),
         Some(Command::Forget { app }) => run_forget_cmd(&roots, &app),
         Some(Command::SetSource { app, url, clear }) => {
             run_set_source_cmd(&roots, &app, url.as_deref(), clear)
@@ -587,6 +590,19 @@ fn run_repair_cmd(roots: &InstallRoots, app: &str) -> ExitCode {
             for f in fixes {
                 println!("  - {f}");
             }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("easi: {}", format_user_error(&e));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_organize_cmd(roots: &InstallRoots, app: &str) -> ExitCode {
+    match easi_core::adopt::organize_app_into_applications(roots, app) {
+        Ok(m) => {
+            println!("Organized {} into {}.", m.name, m.install_dir.display());
             ExitCode::SUCCESS
         }
         Err(e) => {

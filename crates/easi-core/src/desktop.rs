@@ -75,6 +75,69 @@ pub fn save_handlers(roots: &InstallRoots, handlers: &SavedHandlers) -> Result<P
 const EASI_ICON_SVG: &str = include_str!("../../../assets/easi.svg");
 const EASI_SYMBOLIC_SVG: &str = include_str!("../../../assets/easi-symbolic.svg");
 
+/// Ensure `easi`'s own Drop SVG icon is installed and any existing `easi.desktop` has
+/// `Icon=easi` and `StartupWMClass=easi` (called on GUI startup and after `self-update`).
+pub fn ensure_easi_desktop_and_icon(roots: &InstallRoots, easi_bin: &Path) {
+    let icon_dir = roots.icons_dir.join("scalable/apps");
+    let icon_path = icon_dir.join("easi.svg");
+    let sym_path = icon_dir.join("easi-symbolic.svg");
+    let mut changed = false;
+
+    if fs::create_dir_all(&icon_dir).is_ok() {
+        if fs::read_to_string(&icon_path).ok().as_deref() != Some(EASI_ICON_SVG)
+            && fs::write(&icon_path, EASI_ICON_SVG).is_ok()
+        {
+            changed = true;
+        }
+        if fs::read_to_string(&sym_path).ok().as_deref() != Some(EASI_SYMBOLIC_SVG)
+            && fs::write(&sym_path, EASI_SYMBOLIC_SVG).is_ok()
+        {
+            changed = true;
+        }
+    }
+
+    let desktop_path = roots.desktop_dir.join(EASI_DESKTOP_ID);
+    let needs_desktop = match fs::read_to_string(&desktop_path) {
+        Ok(text) => !text.contains("Icon=easi") || !text.contains("StartupWMClass=easi"),
+        Err(_) => true,
+    };
+    if needs_desktop && fs::create_dir_all(&roots.desktop_dir).is_ok() {
+        let mimes = SUPPORTED_MIMES
+            .iter()
+            .chain(OPEN_WITH_ONLY_MIMES.iter())
+            .copied()
+            .collect::<Vec<_>>()
+            .join(";");
+        let exec_str = easi_bin.to_string_lossy();
+        let exec_quoted = if exec_str.contains(' ') {
+            format!("\"{exec_str}\"")
+        } else {
+            exec_str.into_owned()
+        };
+        let content = format!(
+            "[Desktop Entry]\n\
+             Type=Application\n\
+             Name=easi\n\
+             GenericName=App Installer\n\
+             Comment=Install downloaded Linux apps\n\
+             Icon=easi\n\
+             Exec={exec_quoted} %f\n\
+             Terminal=false\n\
+             StartupNotify=true\n\
+             StartupWMClass=easi\n\
+             Categories=System;Utility;\n\
+             MimeType={mimes};\n"
+        );
+        if fs::write(&desktop_path, content).is_ok() {
+            changed = true;
+        }
+    }
+
+    if changed {
+        refresh_desktop_caches(roots);
+    }
+}
+
 /// Register `easi.desktop`, install the Drop brand SVG icon, ensure AppImage MIME definition
 /// exists, remember previous default handlers, and set `easi.desktop` as the default handler.
 pub fn run_setup(roots: &InstallRoots, easi_bin: &Path) -> Result<SavedHandlers, EasiError> {

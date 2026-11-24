@@ -24,6 +24,8 @@ export struct InstalledRow {
     size-text: string,
     update-note: string,
     has-update: bool,
+    icon: image,
+    has-icon: bool,
 }
 
 export struct DetectedRow {
@@ -147,6 +149,7 @@ export component AppWindow inherits Window {
     in-out property <string> filter-kind: "all";
     in-out property <bool> sort-by-size: false;
     in property <string> easi-update-version: "";
+    in property <string> updating-app-id: "";
     in property <string> self-update-state: "idle"; // "idle" | "updating" | "updated" | "up_to_date" | "failed"
     in property <string> self-update-message: "";
     in-out property <bool> auto-check-updates: true;
@@ -175,6 +178,7 @@ export component AppWindow inherits Window {
     in property <image> detail-icon;
     in property <bool> detail-has-icon: false;
     in property <bool> detail-adopted: false;
+    in property <bool> detail-can-organize: false;
     in property <string> detail-update-source: "";
     in-out property <string> detail-source-input: "";
     in property <string> detail-feedback: "";
@@ -227,6 +231,7 @@ export component AppWindow inherits Window {
     callback adopt-app(string);
     callback adopt-all-apps();
     callback repair-app(string);
+    callback organize-app(string);
     callback forget-app(string);
     callback set-update-source(string, string);
     callback autodetect-update-source(string);
@@ -490,25 +495,34 @@ export component AppWindow inherits Window {
                             if root.installed-apps.length > 0 || root.detected-apps.length > 0: ScrollView {
                                 vertical-stretch: 1;
                                 VerticalLayout {
+                                    alignment: start;
                                     spacing: Theme.s3;
 
                                     if root.installed-apps.length > 0: Panel {
                                         VerticalLayout {
+                                            alignment: start;
                                             padding: Theme.s2;
                                             spacing: 2px;
                                             for app[i] in root.installed-apps: StaggerRow {
                                                 index: i;
+                                                height: (app.update-note != "" || root.updating-app-id == app.app-id) ? 68px : 52px;
                                                 HorizontalLayout {
                                                     padding-left: Theme.s2;
                                                     padding-right: Theme.s2;
-                                                    padding-top: Theme.s2;
-                                                    padding-bottom: Theme.s2;
+                                                    padding-top: 6px;
+                                                    padding-bottom: 6px;
                                                     spacing: Theme.s3;
                                                     alignment: stretch;
 
                                                     VerticalLayout {
                                                         alignment: center;
-                                                        KindGlyph { is-cli: app.kind == "CLI"; }
+                                                        if app.has-icon: Image {
+                                                            source: app.icon;
+                                                            width: 32px;
+                                                            height: 32px;
+                                                            image-fit: contain;
+                                                        }
+                                                        if !app.has-icon: KindGlyph { is-cli: app.kind == "CLI"; }
                                                     }
                                                     VerticalLayout {
                                                         spacing: 2px;
@@ -541,7 +555,10 @@ export component AppWindow inherits Window {
                                                                 color: Theme.ink-2;
                                                             }
                                                         }
-                                                        if app.update-note != "": Text {
+                                                        if root.updating-app-id == app.app-id: EProgress {
+                                                            indeterminate: true;
+                                                        }
+                                                        if root.updating-app-id != app.app-id && app.update-note != "": Text {
                                                             text: app.update-note;
                                                             font-size: Theme.font-caption;
                                                             font-weight: 600;
@@ -551,12 +568,13 @@ export component AppWindow inherits Window {
                                                     HorizontalLayout {
                                                         spacing: Theme.s1;
                                                         alignment: end;
-                                                        if app.has-update: VerticalLayout {
+                                                        if app.has-update || root.updating-app-id == app.app-id: VerticalLayout {
                                                             alignment: center;
                                                             EButton {
-                                                                text: "Update";
+                                                                text: root.updating-app-id == app.app-id ? "Updating…" : "Update";
                                                                 kind: "primary";
                                                                 small: true;
+                                                                enabled: root.updating-app-id == "";
                                                                 clicked => { root.update-app(app.app-id); }
                                                             }
                                                         }
@@ -587,6 +605,7 @@ export component AppWindow inherits Window {
 
                                     // Dedicated Detected Apps section (unmanaged user apps in $HOME)
                                     if root.detected-apps.length > 0: VerticalLayout {
+                                        alignment: start;
                                         spacing: Theme.s2;
                                         HorizontalLayout {
                                             spacing: Theme.s2;
@@ -619,15 +638,17 @@ export component AppWindow inherits Window {
 
                                         Panel {
                                             VerticalLayout {
+                                                alignment: start;
                                                 padding: Theme.s2;
                                                 spacing: 2px;
                                                 for d[i] in root.detected-apps: StaggerRow {
                                                     index: i;
+                                                    height: d.issues-text != "" ? 66px : 52px;
                                                     HorizontalLayout {
                                                         padding-left: Theme.s2;
                                                         padding-right: Theme.s2;
-                                                        padding-top: Theme.s2;
-                                                        padding-bottom: Theme.s2;
+                                                        padding-top: 6px;
+                                                        padding-bottom: 6px;
                                                         spacing: Theme.s3;
                                                         VerticalLayout {
                                                             alignment: center;
@@ -794,12 +815,33 @@ export component AppWindow inherits Window {
                                     clicked => { root.open-app-folder(root.detail-app-id); }
                                 }
                                 EButton {
-                                    text: "Update";
+                                    text: root.updating-app-id == root.detail-app-id ? "Updating…" : "Update";
+                                    enabled: root.updating-app-id == "";
                                     clicked => { root.update-app(root.detail-app-id); }
                                 }
                                 EButton {
                                     text: "Repair Icon & Launcher";
                                     clicked => { root.repair-app(root.detail-app-id); }
+                                }
+                                if root.detail-can-organize: EButton {
+                                    text: "Move to ~/Applications";
+                                    clicked => { root.organize-app(root.detail-app-id); }
+                                }
+                            }
+
+                            if root.updating-app-id == root.detail-app-id: Panel {
+                                VerticalLayout {
+                                    padding: Theme.s3;
+                                    spacing: Theme.s2;
+                                    Text {
+                                        text: "Downloading and installing update for " + root.detail-name + "…";
+                                        font-size: Theme.font-caption;
+                                        font-weight: 600;
+                                        color: Theme.ink;
+                                    }
+                                    EProgress {
+                                        indeterminate: true;
+                                    }
                                 }
                             }
 

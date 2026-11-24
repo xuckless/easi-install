@@ -67,13 +67,39 @@ impl Manifest {
     }
 }
 
-/// Locate the hicolor icon file installed for `app_id`, if any.
+/// Locate the icon file for `app_id` (checks hicolor theme sizes, then falls back to `.desktop` `Icon=`).
 pub fn find_installed_icon(roots: &InstallRoots, app_id: &str) -> Option<PathBuf> {
-    let candidates = [
-        roots.icons_dir.join(format!("scalable/apps/{app_id}.svg")),
-        roots.icons_dir.join(format!("256x256/apps/{app_id}.png")),
+    let sizes = [
+        "scalable", "512x512", "256x256", "128x128", "64x64", "48x48",
     ];
-    candidates.into_iter().find(|p| p.exists())
+    for sz in sizes {
+        for ext in ["svg", "png"] {
+            let p = roots.icons_dir.join(format!("{sz}/apps/{app_id}.{ext}"));
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+    let dp = roots.desktop_dir.join(format!("{app_id}.desktop"));
+    if let Ok(text) = fs::read_to_string(&dp)
+        && let Some(icon_val) = crate::inspect::desktop_field(&text, "Icon")
+    {
+        let p = PathBuf::from(icon_val.trim());
+        if p.is_absolute() && p.exists() {
+            return Some(p);
+        }
+        for sz in sizes {
+            for ext in ["svg", "png"] {
+                let c = roots
+                    .icons_dir
+                    .join(format!("{sz}/apps/{}.{ext}", icon_val.trim()));
+                if c.exists() {
+                    return Some(c);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Sum regular file bytes under `path` without following symlinks.

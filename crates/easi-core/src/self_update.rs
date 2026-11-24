@@ -203,6 +203,9 @@ pub fn run_self_update(
         let _ = fs::remove_file(&staged);
         return Err(EasiError::Io(err));
     }
+    if let Ok(roots) = InstallRoots::default_user() {
+        crate::desktop::ensure_easi_desktop_and_icon(&roots, target_bin);
+    }
 
     Ok(UpdateOutcome::Updated {
         from: current_version.to_string(),
