@@ -143,6 +143,7 @@ pub fn manifest_path(roots: &InstallRoots, app_id: &str) -> PathBuf {
 }
 
 pub fn save_manifest(roots: &InstallRoots, manifest: &Manifest) -> Result<PathBuf, EasiError> {
+    crate::roots::validate_app_id(&manifest.app_id)?;
     let dir = roots.manifests_dir();
     fs::create_dir_all(&dir)?;
     let path = manifest_path(roots, &manifest.app_id);
@@ -157,6 +158,9 @@ pub fn load_manifest(path: &Path) -> Result<Manifest, EasiError> {
 }
 
 pub fn find_manifest_by_id(roots: &InstallRoots, app_id: &str) -> Option<Manifest> {
+    if crate::roots::validate_app_id(app_id).is_err() {
+        return None;
+    }
     let path = manifest_path(roots, app_id);
     if !path.exists() {
         return None;
@@ -202,6 +206,7 @@ pub fn resolve_installed(roots: &InstallRoots, query: &str) -> Result<Manifest, 
 }
 
 pub fn delete_manifest(roots: &InstallRoots, app_id: &str) -> Result<(), EasiError> {
+    crate::roots::validate_app_id(app_id)?;
     let path = manifest_path(roots, app_id);
     if path.exists() {
         fs::remove_file(path)?;

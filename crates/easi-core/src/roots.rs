@@ -48,10 +48,51 @@ impl InstallRoots {
     pub fn config_path(&self) -> PathBuf {
         self.easi_dir.join("config.toml")
     }
+
+    /// Check whether `path` is strictly inside one of easi's allowed per-user write roots
+    /// without following symlinks on the leaf.
+    pub fn is_within_allowed_write_roots(&self, path: &Path) -> bool {
+        let allowed = [
+            &self.applications_dir,
+            &self.desktop_dir,
+            &self.icons_dir,
+            &self.bin_dir,
+            &self.easi_dir,
+        ];
+        allowed.iter().any(|root| {
+            if path.starts_with(root) && path != root.as_path() {
+                return true;
+            }
+            if let (Ok(cr), Ok(cp)) = (
+                std::fs::canonicalize(root),
+                path.parent()
+                    .ok_or(())
+                    .and_then(|p| std::fs::canonicalize(p).map_err(|_| ())),
+            ) {
+                return cp.starts_with(&cr);
+            }
+            false
+        })
+    }
+}
+
+/// Validate that an `app_id` cannot traverse directories or inject special characters.
+pub fn validate_app_id(app_id: &str) -> Result<(), EasiError> {
+    if app_id.is_empty()
+        || app_id.len() > 128
+        || app_id.starts_with('.')
+        || app_id.contains("..")
+        || !app_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    {
+        return Err(EasiError::PathEscape(format!("invalid app_id: {app_id}")));
+    }
+    Ok(())
 }
 
 /// Normalize a relative path and verify it cannot escape `root` (blocks `..`, root prefixes,
-/// and symlink traversal on existing ancestors).
+/// and symlink traversal — including dangling symlinks — on `target` and all existing ancestors).
 pub fn safe_join(root: &Path, rel: &Path) -> Result<PathBuf, EasiError> {
     let mut normalized = PathBuf::new();
     for comp in rel.components() {
@@ -70,17 +111,22 @@ pub fn safe_join(root: &Path, rel: &Path) -> Result<PathBuf, EasiError> {
     let canon_root = std::fs::canonicalize(root)?;
     let target = canon_root.join(&normalized);
 
-    // Check every existing ancestor inside root is not a symlink escaping root.
-    let mut cur = target.as_path();
-    while let Some(parent) = cur.parent() {
-        if parent.exists() {
-            let canon_parent = std::fs::canonicalize(parent)?;
-            if !canon_parent.starts_with(&canon_root) {
-                return Err(EasiError::PathEscape(rel.to_string_lossy().into_owned()));
+    // Check every existing path component from `canon_root` down to `target` without skipping
+    // dangling symlinks (`symlink_metadata` succeeds on broken symlinks where `exists()` is false).
+    let mut cur = canon_root.clone();
+    for comp in normalized.components() {
+        cur.push(comp);
+        if let Ok(meta) = std::fs::symlink_metadata(&cur) {
+            if meta.file_type().is_symlink() {
+                let canon = std::fs::canonicalize(&cur)
+                    .map_err(|_| EasiError::PathEscape(rel.to_string_lossy().into_owned()))?;
+                if !canon.starts_with(&canon_root) {
+                    return Err(EasiError::PathEscape(rel.to_string_lossy().into_owned()));
+                }
             }
+        } else {
             break;
         }
-        cur = parent;
     }
 
     Ok(target)
@@ -102,5 +148,18 @@ mod tests {
         assert!(safe_join(tmp.path(), Path::new("../outside")).is_err());
         assert!(safe_join(tmp.path(), Path::new("/etc/passwd")).is_err());
         assert!(safe_join(tmp.path(), Path::new("a/../../b")).is_err());
+
+        // Block leaf symlink and dangling symlink escapes.
+        std::os::unix::fs::symlink("/etc/passwd", tmp.path().join("leaf_escape")).unwrap();
+        assert!(safe_join(tmp.path(), Path::new("leaf_escape")).is_err());
+        std::os::unix::fs::symlink("/nonexistent/outside", tmp.path().join("dangling_dir"))
+            .unwrap();
+        assert!(safe_join(tmp.path(), Path::new("dangling_dir/payload")).is_err());
+
+        // validate_app_id blocks traversal and control chars.
+        assert!(validate_app_id("easi.my-app_1").is_ok());
+        assert!(validate_app_id("../../.bashrc").is_err());
+        assert!(validate_app_id(".hidden").is_err());
+        assert!(validate_app_id("foo/bar").is_err());
     }
 }

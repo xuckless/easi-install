@@ -272,6 +272,10 @@ fn fetch_latest_tag_with_timeout(repo: &str, timeout_secs: u32) -> Result<String
             "--proto-redir",
             "=https",
             "-fsSL",
+            "--connect-timeout",
+            "10",
+            "--max-filesize",
+            "4194304",
             "--max-time",
             &timeout,
             "--",
@@ -307,6 +311,12 @@ fn download_file(url: &str, dest: &Path) -> Result<(), EasiError> {
             "--proto-redir",
             "=https",
             "-fsSL",
+            "--connect-timeout",
+            "15",
+            "--max-time",
+            "180",
+            "--max-filesize",
+            "268435456",
             "-o",
         ])
         .arg(dest)

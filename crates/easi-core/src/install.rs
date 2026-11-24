@@ -279,13 +279,40 @@ where
                 ];
                 let before = snapshot_files(&watched);
                 let staging = TempDir::new()?;
-                let status = Command::new("sh")
+                // Cap process count (`ulimit -u 256`) to neutralize fork bombs, pass `--` before
+                // script path, and poll with a 5-minute timeout + cancel_flag kill guard.
+                let mut child = Command::new("sh")
+                    .args([
+                        "-c",
+                        "ulimit -u 256 2>/dev/null || true; exec sh -- \"$1\"",
+                        "_",
+                    ])
                     .arg(&plan.source_path)
                     .current_dir(staging.path())
                     .env("HOME", &roots.home_dir)
                     .env("PREFIX", &app_dir)
                     .env("EASI_INSTALL_DIR", &app_dir)
-                    .status()?;
+                    .spawn()?;
+                let started = std::time::Instant::now();
+                let max_duration = std::time::Duration::from_secs(300);
+                let status = loop {
+                    if let Some(st) = child.try_wait()? {
+                        break st;
+                    }
+                    if cancel_flag.load(Ordering::Relaxed) {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(EasiError::Desktop("installation cancelled".into()));
+                    }
+                    if started.elapsed() > max_duration {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(EasiError::Desktop(
+                            "installer script exceeded 5-minute timeout and was terminated".into(),
+                        ));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                };
                 if !status.success() {
                     return Err(EasiError::Desktop(format!(
                         "installer script exited with status {status}"
@@ -879,8 +906,16 @@ fn extract_sevenz_safe(path: &Path, dest_root: &Path) -> Result<(), EasiError> {
     let mut reader = sevenz_rust::SevenZReader::open(path, sevenz_rust::Password::empty())
         .map_err(|e| EasiError::Archive(e.to_string()))?;
     let mut total = 0u64;
+    let mut count = 0usize;
     reader
         .for_each_entries(|entry, data| {
+            count += 1;
+            if count > crate::detect::MAX_ARCHIVE_ENTRIES {
+                return Err(sevenz_rust::Error::other(format!(
+                    "archive exceeds maximum entry limit ({})",
+                    crate::detect::MAX_ARCHIVE_ENTRIES
+                )));
+            }
             let rel = PathBuf::from(entry.name());
             if rel.as_os_str().is_empty() || rel == Path::new(".") || rel == Path::new("./") {
                 return Ok(true);
@@ -933,7 +968,15 @@ fn extract_tar_safe<R: Read>(reader: R, dest_root: &Path) -> Result<(), EasiErro
         .map_err(|e| EasiError::Archive(e.to_string()))?;
 
     let mut total = 0u64;
+    let mut count = 0usize;
     for item in entries {
+        count += 1;
+        if count > crate::detect::MAX_ARCHIVE_ENTRIES {
+            return Err(EasiError::Archive(format!(
+                "archive exceeds maximum entry limit ({})",
+                crate::detect::MAX_ARCHIVE_ENTRIES
+            )));
+        }
         let mut entry = item.map_err(|e| EasiError::Archive(e.to_string()))?;
         let rel = entry
             .path()
@@ -978,6 +1021,12 @@ fn extract_zip_safe(path: &Path, dest_root: &Path) -> Result<(), EasiError> {
     let file = File::open(path)?;
     let mut zip =
         ZipArchive::new(BufReader::new(file)).map_err(|e| EasiError::Archive(e.to_string()))?;
+    if zip.len() > crate::detect::MAX_ARCHIVE_ENTRIES {
+        return Err(EasiError::Archive(format!(
+            "archive exceeds maximum entry limit ({})",
+            crate::detect::MAX_ARCHIVE_ENTRIES
+        )));
+    }
 
     let mut total = 0u64;
     for i in 0..zip.len() {
@@ -1184,7 +1233,19 @@ pub fn uninstall_app_with_options(
     } else {
         vec![]
     };
-    rollback_paths(&manifest.created_files, &manifest.created_dirs);
+    let safe_files: Vec<PathBuf> = manifest
+        .created_files
+        .iter()
+        .filter(|p| roots.is_within_allowed_write_roots(p))
+        .cloned()
+        .collect();
+    let safe_dirs: Vec<PathBuf> = manifest
+        .created_dirs
+        .iter()
+        .filter(|p| roots.is_within_allowed_write_roots(p))
+        .cloned()
+        .collect();
+    rollback_paths(&safe_files, &safe_dirs);
     for dir in data_dirs {
         let _ = fs::remove_dir_all(dir);
     }

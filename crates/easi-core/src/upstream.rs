@@ -299,13 +299,33 @@ pub fn import_apps_from_toml(
             outcomes.push(ImportOutcome::SkippedNoSource { name: entry.name });
             continue;
         };
+        if crate::roots::validate_app_id(&entry.app_id).is_err() {
+            outcomes.push(ImportOutcome::Failed {
+                name: entry.name,
+                error: format!("refusing invalid app_id in import file: {}", entry.app_id),
+            });
+            continue;
+        }
+        let safe_dir: String = entry
+            .name
+            .chars()
+            .filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.'))
+            .collect::<String>()
+            .trim()
+            .trim_matches('.')
+            .to_string();
+        let install_dir = roots.applications_dir.join(if safe_dir.is_empty() {
+            &entry.app_id
+        } else {
+            &safe_dir
+        });
         let synthetic = Manifest {
             app_id: entry.app_id,
             name: entry.name.clone(),
             version: None,
             source_filename: String::new(),
             kind: entry.kind,
-            install_dir: roots.applications_dir.join(&entry.name),
+            install_dir,
             developer: None,
             origin_url: None,
             signature_summary: None,
@@ -503,12 +523,33 @@ pub fn parse_user_update_url(input: &str) -> Option<UpdateSource> {
 }
 
 fn require_https_url(url: &str) -> Result<(), String> {
-    if !url.starts_with("https://") {
+    if !url.starts_with("https://") || url.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err(format!(
-            "refusing non-HTTPS update URL (MITM protection): {url}"
+            "refusing non-HTTPS or malformed update URL (MITM protection): {url}"
         ));
     }
     Ok(())
+}
+
+fn is_safe_repo_segment(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 100
+        && !s.contains("..")
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+fn is_safe_host(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= 253
+        && !host.contains("..")
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.'))
+}
+
+fn is_safe_product_code(code: &str) -> bool {
+    !code.is_empty() && code.len() <= 16 && code.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 fn parse_forge_or_known_url(raw: &str) -> Option<UpdateSource> {
@@ -702,6 +743,9 @@ pub fn check_app_update(manifest: &Manifest) -> AppUpdateStatus {
 
     match source {
         UpdateSource::GitHubRelease { owner, repo, .. } => {
+            if !is_safe_repo_segment(owner) || !is_safe_repo_segment(repo) {
+                return fail(format!("invalid GitHub repository: {owner}/{repo}"));
+            }
             let api = format!("https://api.github.com/repos/{owner}/{repo}/releases/latest");
             let release_url = format!("https://github.com/{owner}/{repo}/releases/latest");
             match curl_text(&api, &["-fsSL", "--max-time", "5"]) {
@@ -720,6 +764,9 @@ pub fn check_app_update(manifest: &Manifest) -> AppUpdateStatus {
             project,
             forge,
         } => {
+            if !is_safe_host(host) || !project.split('/').all(is_safe_repo_segment) {
+                return fail(format!("invalid forge update source: {host}/{project}"));
+            }
             let (api, release_url) = if forge == "gitlab" {
                 let encoded = project.replace('/', "%2F");
                 (
@@ -763,6 +810,9 @@ pub fn check_app_update(manifest: &Manifest) -> AppUpdateStatus {
             }
         }
         UpdateSource::JetBrains { product_code } => {
+            if !is_safe_product_code(product_code) {
+                return fail(format!("invalid JetBrains product code: {product_code}"));
+            }
             let api = format!(
                 "https://data.services.jetbrains.com/products/releases?code={product_code}&latest=true&type=release"
             );
@@ -795,7 +845,16 @@ pub fn check_app_update(manifest: &Manifest) -> AppUpdateStatus {
 fn curl_text(url: &str, args: &[&str]) -> Result<String, String> {
     require_https_url(url)?;
     let out = Command::new("curl")
-        .args(["--proto", "=https", "--proto-redir", "=https"])
+        .args([
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--connect-timeout",
+            "10",
+            "--max-filesize",
+            "4194304",
+        ])
         .args(args)
         .arg("--")
         .arg(url)
@@ -931,6 +990,11 @@ pub fn download_and_update_app(
 
     let download_url = match source {
         UpdateSource::GitHubRelease { owner, repo, .. } => {
+            if !is_safe_repo_segment(owner) || !is_safe_repo_segment(repo) {
+                return Err(EasiError::Desktop(format!(
+                    "invalid GitHub repository: {owner}/{repo}"
+                )));
+            }
             let api = format!("https://api.github.com/repos/{owner}/{repo}/releases/latest");
             let body =
                 curl_text(&api, &["-fsSL", "--max-time", "15"]).map_err(EasiError::Desktop)?;
@@ -949,6 +1013,11 @@ pub fn download_and_update_app(
             project,
             forge,
         } => {
+            if !is_safe_host(host) || !project.split('/').all(is_safe_repo_segment) {
+                return Err(EasiError::Desktop(format!(
+                    "invalid forge update source: {host}/{project}"
+                )));
+            }
             let api = if forge == "gitlab" {
                 let encoded = project.replace('/', "%2F");
                 format!("https://{host}/api/v4/projects/{encoded}/releases?per_page=1")
@@ -995,6 +1064,11 @@ pub fn download_and_update_app(
             }
         }
         UpdateSource::JetBrains { product_code } => {
+            if !is_safe_product_code(product_code) {
+                return Err(EasiError::Desktop(format!(
+                    "invalid JetBrains product code: {product_code}"
+                )));
+            }
             let api = format!(
                 "https://data.services.jetbrains.com/products/releases?code={product_code}&latest=true&type=release"
             );
@@ -1090,6 +1164,12 @@ fn download_to_file(url: &str, dest: &Path) -> Result<(), EasiError> {
             "=https",
             "--proto-redir",
             "=https",
+            "--connect-timeout",
+            "15",
+            "--max-time",
+            "600",
+            "--max-filesize",
+            "2147483648",
             "-fsSL",
             "-o",
         ])

