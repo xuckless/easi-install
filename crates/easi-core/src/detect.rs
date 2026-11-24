@@ -65,6 +65,13 @@ const FORMAT_RULES: &[MagicRule] = &[
         extra_offset: None,
         format: Format::TarBz2,
     },
+    // lz4 frame (.tar.lz4)
+    MagicRule {
+        offset: 0,
+        bytes: &[0x04, 0x22, 0x4d, 0x18],
+        extra_offset: None,
+        format: Format::TarLz4,
+    },
     // zip (local header / empty / spanned)
     MagicRule {
         offset: 0,
@@ -120,6 +127,15 @@ pub fn detect_file_format(path: &Path) -> Result<Format, EasiError> {
     let mut header = [0u8; 512];
     let n = file.read(&mut header)?;
     if let Some(fmt) = detect_format(&header[..n]) {
+        // Distinguish executable `.jar` (Java archive) from plain `.zip`.
+        if fmt == Format::Zip
+            && path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("jar"))
+        {
+            return Ok(Format::Jar);
+        }
         return Ok(fmt);
     }
     if n >= 4 && &header[..4] == b"\x7fELF" {
@@ -144,7 +160,7 @@ pub fn detect_file_format(path: &Path) -> Result<Format, EasiError> {
             .file_name()
             .map(|s| s.to_string_lossy().to_ascii_lowercase())
             .unwrap_or_default();
-        if lower.ends_with(".run") || lower.ends_with(".sh") {
+        if lower.ends_with(".run") || lower.ends_with(".sh") || lower.ends_with(".bin") {
             return Ok(Format::ShellInstaller);
         }
     }
@@ -173,6 +189,9 @@ pub struct PackageContents {
     pub embedded_icons: Vec<(String, Vec<u8>)>,
     pub has_appimage_sig_section: bool,
     pub appimage_upd_info: Option<String>,
+    pub meta_name: Option<String>,
+    pub meta_version: Option<String>,
+    pub jar_main_class: Option<String>,
     pub script_report: Option<ScriptReport>,
 }
 
@@ -196,7 +215,67 @@ fn is_icon_path(path: &str) -> bool {
         || lower.ends_with("/.diricon")
 }
 
-/// Inspect archive, AppImage, bare ELF, or shell installer without extracting or executing.
+fn is_meta_hint_path(path: &str) -> bool {
+    let base = Path::new(path)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let depth = path.trim_start_matches("./").matches('/').count();
+    (base == "version" && depth <= 1)
+        || (base == "application.ini" && depth <= 2)
+        || (base == "package.json" && depth <= 3 && !path.contains("node_modules"))
+        || path.eq_ignore_ascii_case("META-INF/MANIFEST.MF")
+}
+
+fn absorb_meta_hint(contents: &mut PackageContents, path: &str, text: &str) {
+    let base = Path::new(path)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    if path.eq_ignore_ascii_case("META-INF/MANIFEST.MF") {
+        for line in text.lines() {
+            if let Some(mc) = line.strip_prefix("Main-Class:") {
+                let val = mc.trim();
+                if !val.is_empty() {
+                    contents.jar_main_class = Some(val.to_string());
+                }
+            }
+        }
+    } else if base == "version" {
+        if contents.meta_version.is_none()
+            && let Some(line) = text.lines().map(str::trim).find(|l| !l.is_empty())
+            && line
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit() || c == 'v')
+        {
+            contents.meta_version = Some(line.trim_start_matches('v').to_string());
+        }
+    } else if base == "package.json" {
+        if contents.meta_name.is_none() {
+            contents.meta_name = crate::self_update::extract_json_string_field(text, "productName")
+                .or_else(|| crate::self_update::extract_json_string_field(text, "name"));
+        }
+        if contents.meta_version.is_none() {
+            contents.meta_version = crate::self_update::extract_json_string_field(text, "version");
+        }
+    } else if base == "application.ini" {
+        for line in text.lines() {
+            if contents.meta_name.is_none()
+                && let Some(v) = line.trim().strip_prefix("Name=")
+            {
+                contents.meta_name = Some(v.trim().to_string());
+            }
+            if contents.meta_version.is_none()
+                && let Some(v) = line.trim().strip_prefix("Version=")
+            {
+                contents.meta_version = Some(v.trim().to_string());
+            }
+        }
+    }
+}
+
+/// Inspect archive, AppImage, bare ELF, JAR, or shell installer without extracting or executing.
 pub fn inspect_contents(path: &Path, format: Format) -> Result<PackageContents, EasiError> {
     match format {
         Format::Tar => list_tar(BufReader::new(File::open(path)?)),
@@ -218,7 +297,11 @@ pub fn inspect_contents(path: &Path, format: Format) -> Result<PackageContents, 
             let file = File::open(path)?;
             list_tar(BzDecoder::new(BufReader::new(file)))
         }
-        Format::Zip => list_zip(path),
+        Format::TarLz4 => {
+            let file = File::open(path)?;
+            list_tar(lz4_flex::frame::FrameDecoder::new(BufReader::new(file)))
+        }
+        Format::Zip | Format::Jar => list_zip(path),
         Format::SevenZ => list_sevenz(path),
         Format::AppImageType2 => list_appimage_type2(path),
         Format::AppImageType1 | Format::BareElf => list_single_executable(path),
@@ -266,6 +349,11 @@ fn list_tar<R: Read>(reader: R) -> Result<PackageContents, EasiError> {
                     } else {
                         contents.metainfo_files.push((raw_path.clone(), text));
                     }
+                }
+            } else if is_meta_hint_path(&raw_path) && size <= MAX_METADATA_BYTES {
+                let mut text = String::new();
+                if entry.read_to_string(&mut text).is_ok() {
+                    absorb_meta_hint(&mut contents, &raw_path, &text);
                 }
             } else if is_icon_path(&raw_path) && size <= MAX_ICON_BYTES {
                 let mut buf = Vec::new();
@@ -329,6 +417,11 @@ fn list_zip(path: &Path) -> Result<PackageContents, EasiError> {
                     } else {
                         contents.metainfo_files.push((raw_path.clone(), text));
                     }
+                }
+            } else if is_meta_hint_path(&raw_path) && size <= MAX_METADATA_BYTES {
+                let mut text = String::new();
+                if entry.read_to_string(&mut text).is_ok() {
+                    absorb_meta_hint(&mut contents, &raw_path, &text);
                 }
             } else if is_icon_path(&raw_path) && size <= MAX_ICON_BYTES {
                 let mut buf = Vec::new();
@@ -600,6 +693,11 @@ fn list_sevenz(path: &Path) -> Result<PackageContents, EasiError> {
                             contents.metainfo_files.push((raw_path.clone(), text));
                         }
                     }
+                } else if is_meta_hint_path(&raw_path) && size <= MAX_METADATA_BYTES {
+                    let mut text = String::new();
+                    if data.read_to_string(&mut text).is_ok() {
+                        absorb_meta_hint(&mut contents, &raw_path, &text);
+                    }
                 } else if is_icon_path(&raw_path) && size <= MAX_ICON_BYTES {
                     let mut buf = Vec::new();
                     if data.read_to_end(&mut buf).is_ok() {
@@ -629,8 +727,33 @@ fn list_sevenz(path: &Path) -> Result<PackageContents, EasiError> {
     Ok(contents)
 }
 
+fn parse_elf_package_note(file: &mut File) -> (Option<String>, Option<String>) {
+    let mut hdr = [0u8; 64];
+    if file.seek(SeekFrom::Start(0)).is_err() || file.read_exact(&mut hdr).is_err() {
+        return (None, None);
+    }
+    let Some(bytes) = read_elf_section_bytes(file, &hdr, b".note.package") else {
+        return (None, None);
+    };
+    // FreeDesktop/systemd ELF package note embeds a JSON object `{...}` inside the note descriptor.
+    let text = String::from_utf8_lossy(&bytes);
+    let Some(start) = text.find('{') else {
+        return (None, None);
+    };
+    let Some(end) = text.rfind('}') else {
+        return (None, None);
+    };
+    let json = &text[start..=end];
+    let name = crate::self_update::extract_json_string_field(json, "name");
+    let version = crate::self_update::extract_json_string_field(json, "version");
+    (name, version)
+}
+
 fn list_single_executable(path: &Path) -> Result<PackageContents, EasiError> {
     let meta = std::fs::metadata(path)?;
+    let (meta_name, meta_version) = File::open(path)
+        .map(|mut f| parse_elf_package_note(&mut f))
+        .unwrap_or((None, None));
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -646,6 +769,8 @@ fn list_single_executable(path: &Path) -> Result<PackageContents, EasiError> {
             is_elf: true,
             is_script: false,
         }],
+        meta_name,
+        meta_version,
         ..Default::default()
     })
 }

@@ -318,3 +318,69 @@ fn detects_and_installs_tar_bare_elf_and_shell_installer_with_script_report() {
         "uninstall must remove files created by script"
     );
 }
+
+#[test]
+fn detects_jar_tar_lz4_metadata_and_blocks_distro_pkginfo() {
+    let tmp = TempDir::new().expect("tempdir");
+    let roots = InstallRoots::from_home(tmp.path());
+    let dl = tmp.path().join("Downloads");
+    fs::create_dir_all(&dl).expect("mkdir downloads");
+
+    // 1. Executable .jar with Main-Class -> installed with java -jar wrapper
+    let jar_pkg = make_zip(
+        &dl,
+        "MyLauncher-3.2.0.jar",
+        &[(
+            "META-INF/MANIFEST.MF",
+            b"Manifest-Version: 1.0\nMain-Class: com.example.Main\n",
+            0o644,
+        )],
+    );
+    assert_eq!(detect_file_format(&jar_pkg).expect("fmt"), Format::Jar);
+    let (jar_id, jar_dir) = run_full_store_install(&roots, &jar_pkg);
+    assert!(jar_dir.join("MyLauncher-3.2.0.jar").exists());
+    uninstall_app(&roots, &jar_id).expect("uninstall jar");
+
+    // 2. .tar.lz4 with package.json metadata (productName + version)
+    let tlz4 = dl.join("electronapp.tar.lz4");
+    write_tar_entries(
+        lz4_flex::frame::FrameEncoder::new(File::create(&tlz4).expect("lz4")),
+        &[
+            ("app/electronapp", FAKE_ELF, 0o755),
+            ("app/chrome-sandbox", FAKE_ELF, 0o755),
+            (
+                "app/package.json",
+                br#"{"productName":"Super Editor","version":"4.5.6"}"#,
+                0o644,
+            ),
+        ],
+    )
+    .finish()
+    .expect("finish lz4");
+    assert_eq!(detect_file_format(&tlz4).expect("fmt"), Format::TarLz4);
+    let runner = EffectRunner::new(roots.clone());
+    let mut store = Store::new();
+    store.dispatch_and_run(Action::OpenPath(tlz4), |e| runner.run(e), |_| {});
+    match store.state() {
+        State::Ready { plan, .. } => {
+            assert_eq!(plan.name, "Super Editor");
+            assert_eq!(plan.version.as_deref(), Some("4.5.6"));
+            assert_eq!(plan.kind, AppKind::Gui);
+        }
+        other => panic!("expected Ready for tar.lz4, got {other:?}"),
+    }
+
+    // 3. Arch pacman .pkg.tar.zst (.PKGINFO) -> classified as NotAnApp
+    let arch_pkg = dl.join("foo-1.0-1-x86_64.pkg.tar.zst");
+    write_tar_entries(
+        zstd::stream::write::Encoder::new(File::create(&arch_pkg).expect("zst"), 1).expect("enc"),
+        &[
+            (".PKGINFO", b"pkgname = foo\npkgver = 1.0-1\n", 0o644),
+            ("usr/bin/foo", FAKE_ELF, 0o755),
+        ],
+    )
+    .finish()
+    .expect("finish arch pkg");
+    let res = easi_core::inspect::classify_package(&arch_pkg, |_| None).expect("classify");
+    assert!(matches!(res, easi_core::Classified::NotAnApp { .. }));
+}

@@ -100,7 +100,9 @@ Every arrow is a row in the reducer match. Every unlisted `(state, action)` pair
 - [x] Standalone GUI App Manager (list & uninstall installed apps + install picker when opened directly)
 - [x] Pre-install permissions summary screen (planned writes + script capability warnings)
 - [ ] Optional system-wide installs (`/opt` via pkexec)
-- [ ] More app id / metadata sources as formats grow (snap-style `meta/`, AppImage update info, ELF `.note` / embedded version strings, icon-from-ELF resources)
+- [x] Additional formats: `.tar.lz4`, executable `.jar` (Java wrapper), `.bin` shell self-extractors, plus Arch `.PKGINFO` distro-package safety guard
+- [x] Additional metadata sources: `package.json` / `version` / `application.ini`, `.desktop` `X-AppImage-Version`, AppImage `.upd_info` repo fallback, and ELF `.note.package`
+- [~] Icon-from-ELF resources — skipped (Linux ELFs do not have Windows PE `.rsrc` icon tables)
 - [x] Automatic brew-style update check for `easi` itself (default on, 6h cache, opt-out via `easi config --auto-update false`, GUI toggle, or `EASI_NO_AUTO_UPDATE=1`)
 - [x] Upstream update checks for installed apps (AppImage `.upd_info` zsync & GitHub Releases via `easi check-updates` and GUI App Manager)
 - [x] Self-updated app manifest reconciliation (re-index `~/Applications/<App>/`, strip stray setuid, refresh version, repair renamed binary/AppImage wiring, clean uninstall)

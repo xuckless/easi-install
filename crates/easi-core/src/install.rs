@@ -157,6 +157,34 @@ where
                 tx.record_file(dest.clone());
                 resolved_exec = Some(dest);
             }
+            PlanOp::CopyJarWithWrapper => {
+                on_progress(InstallStep::Extracting, pct);
+                fs::create_dir_all(&app_dir)?;
+                tx.record_dir(app_dir.clone());
+                let fname = plan
+                    .source_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| format!("{}.jar", plan.app_id));
+                let jar_dest = safe_join(&app_dir, Path::new(&fname))?;
+                fs::copy(&plan.source_path, &jar_dest)?;
+                tx.record_file(jar_dest.clone());
+
+                let bin_name = plan
+                    .app_id
+                    .strip_prefix("easi.")
+                    .unwrap_or(&plan.app_id)
+                    .to_ascii_lowercase();
+                let wrapper = safe_join(&app_dir, Path::new(&bin_name))?;
+                let script = format!(
+                    "#!/bin/sh\nexec java -jar \"{}\" \"$@\"\n",
+                    jar_dest.to_string_lossy()
+                );
+                fs::write(&wrapper, script)?;
+                fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755))?;
+                tx.record_file(wrapper.clone());
+                resolved_exec = Some(wrapper);
+            }
             PlanOp::RunShellInstaller => {
                 on_progress(InstallStep::Extracting, pct);
                 fs::create_dir_all(&app_dir)?;
@@ -476,11 +504,16 @@ pub fn extract_archive_safe(
         Format::TarBz2 => {
             extract_tar_safe(BzDecoder::new(BufReader::new(File::open(path)?)), dest_root)
         }
+        Format::TarLz4 => extract_tar_safe(
+            lz4_flex::frame::FrameDecoder::new(BufReader::new(File::open(path)?)),
+            dest_root,
+        ),
         Format::Zip => extract_zip_safe(path, dest_root),
         Format::SevenZ => extract_sevenz_safe(path, dest_root),
         Format::AppImageType1
         | Format::AppImageType2
         | Format::BareElf
+        | Format::Jar
         | Format::ShellInstaller => Ok(()),
     }
 }

@@ -13,8 +13,10 @@ pub enum Format {
     TarXz,
     TarZst,
     TarBz2,
+    TarLz4,
     Zip,
     SevenZ,
+    Jar,
     BareElf,
     ShellInstaller,
 }

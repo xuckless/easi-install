@@ -7,6 +7,7 @@ pub enum PlanOp {
     CopyAppImage,
     ExtractAppImageAssets,
     CopyBareElf,
+    CopyJarWithWrapper,
     RunShellInstaller,
     ExtractArchive,
     WireIcons,
@@ -57,6 +58,21 @@ const BARE_ELF_GUI_OPS: &[PlanOp] = &[
 
 const BARE_ELF_TERM_OPS: &[PlanOp] = &[
     PlanOp::CopyBareElf,
+    PlanOp::WireBinSymlink,
+    PlanOp::WriteManifest,
+];
+
+const JAR_GUI_OPS: &[PlanOp] = &[
+    PlanOp::CopyJarWithWrapper,
+    PlanOp::WireIcons,
+    PlanOp::WireDesktop,
+    PlanOp::WireBinSymlink,
+    PlanOp::RefreshDesktop,
+    PlanOp::WriteManifest,
+];
+
+const JAR_TERM_OPS: &[PlanOp] = &[
+    PlanOp::CopyJarWithWrapper,
     PlanOp::WireBinSymlink,
     PlanOp::WriteManifest,
 ];
@@ -145,6 +161,16 @@ const PLAN_TABLE: &[PlanRow] = &[
         ops: ARCHIVE_TERM_OPS,
     },
     PlanRow {
+        format: Format::TarLz4,
+        kind: AppKind::Gui,
+        ops: ARCHIVE_GUI_OPS,
+    },
+    PlanRow {
+        format: Format::TarLz4,
+        kind: AppKind::Terminal,
+        ops: ARCHIVE_TERM_OPS,
+    },
+    PlanRow {
         format: Format::Zip,
         kind: AppKind::Gui,
         ops: ARCHIVE_GUI_OPS,
@@ -163,6 +189,16 @@ const PLAN_TABLE: &[PlanRow] = &[
         format: Format::SevenZ,
         kind: AppKind::Terminal,
         ops: ARCHIVE_TERM_OPS,
+    },
+    PlanRow {
+        format: Format::Jar,
+        kind: AppKind::Gui,
+        ops: JAR_GUI_OPS,
+    },
+    PlanRow {
+        format: Format::Jar,
+        kind: AppKind::Terminal,
+        ops: JAR_TERM_OPS,
     },
     PlanRow {
         format: Format::BareElf,
@@ -303,8 +339,10 @@ mod tests {
             Format::TarXz,
             Format::TarZst,
             Format::TarBz2,
+            Format::TarLz4,
             Format::Zip,
             Format::SevenZ,
+            Format::Jar,
             Format::BareElf,
             Format::ShellInstaller,
         ];

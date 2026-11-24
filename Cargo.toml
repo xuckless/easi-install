@@ -31,6 +31,7 @@ flate2 = "1"
 xz2 = "0.1"
 zstd = "0.13"
 bzip2 = "0.5"
+lz4_flex = "0.11"
 # zip: pure-Rust zip inspection & safe extraction.
 zip = { version = "2", default-features = false, features = ["deflate", "bzip2", "zstd"] }
 # sevenz-rust: pure-Rust .7z inspection & safe extraction.

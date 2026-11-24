@@ -24,8 +24,10 @@ pub const SUPPORTED_MIMES: &[&str] = &[
     "application/x-zstd-compressed-tar",
     "application/x-bzip-compressed-tar",
     "application/x-bzip2-compressed-tar",
+    "application/x-lz4-compressed-tar",
     "application/zip",
     "application/x-7z-compressed",
+    "application/java-archive",
     "application/x-shellscript",
 ];
 

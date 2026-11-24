@@ -17,6 +17,7 @@ flate2.workspace = true
 xz2.workspace = true
 zstd.workspace = true
 bzip2.workspace = true
+lz4_flex.workspace = true
 zip.workspace = true
 sevenz-rust.workspace = true
 backhand.workspace = true

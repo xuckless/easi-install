@@ -368,6 +368,25 @@ where
     let contents = inspect_contents(path, format)?;
     let trust = build_trust_summary(path, &contents)?;
 
+    // Guard against Arch Linux pacman packages (`.pkg.tar.zst` / `.PKGINFO`).
+    let is_distro_pkg = contents.entries.iter().any(|e| {
+        let trimmed = e.path.trim_start_matches("./");
+        trimmed == ".PKGINFO" || trimmed == "debian-binary"
+    });
+    if is_distro_pkg {
+        return Ok(Classified::NotAnApp {
+            path: path.to_path_buf(),
+            reason: "distro package archive (use your system package manager)".into(),
+        });
+    }
+
+    if format == Format::Jar && contents.jar_main_class.is_none() {
+        return Ok(Classified::NotAnApp {
+            path: path.to_path_buf(),
+            reason: "Java library JAR (no Main-Class entry in MANIFEST.MF)".into(),
+        });
+    }
+
     let source_name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -381,7 +400,11 @@ where
     let desktop_exec_hint = desktop.and_then(|(_, text)| desktop_field(text, "Exec"));
     let is_single_file_app = matches!(
         format,
-        Format::AppImageType1 | Format::AppImageType2 | Format::BareElf | Format::ShellInstaller
+        Format::AppImageType1
+            | Format::AppImageType2
+            | Format::BareElf
+            | Format::Jar
+            | Format::ShellInstaller
     );
     let exec_candidates = if is_single_file_app {
         vec![Candidate {
@@ -422,6 +445,7 @@ where
     });
 
     let desktop_name = desktop.and_then(|(_, text)| desktop_field(text, "Name"));
+    let desktop_version = desktop.and_then(|(_, text)| desktop_field(text, "X-AppImage-Version"));
     let desktop_terminal = desktop
         .and_then(|(_, text)| desktop_field(text, "Terminal"))
         .map(|v| v.eq_ignore_ascii_case("true"))
@@ -434,6 +458,7 @@ where
 
     let is_appimage = matches!(format, Format::AppImageType1 | Format::AppImageType2);
     let kind = if is_appimage
+        || format == Format::Jar
         || (desktop.is_some() && !desktop_terminal)
         || !icon_candidates.is_empty()
         || has_gui_marker
@@ -443,10 +468,27 @@ where
         AppKind::Terminal
     };
 
-    let name = desktop_name.unwrap_or_else(|| {
-        let slug = app_id.strip_prefix("easi.").unwrap_or(&app_id);
-        display_name_from_slug(slug)
-    });
+    let upd_repo_name = contents
+        .appimage_upd_info
+        .as_deref()
+        .and_then(crate::upstream::parse_appimage_upd_info)
+        .and_then(|src| match src {
+            crate::model::UpdateSource::GitHubRelease { repo, .. } => {
+                Some(display_name_from_slug(&repo))
+            }
+            crate::model::UpdateSource::ZsyncUrl { .. } => None,
+        });
+
+    let name = desktop_name
+        .or_else(|| contents.meta_name.clone())
+        .or(upd_repo_name)
+        .unwrap_or_else(|| {
+            let slug = app_id.strip_prefix("easi.").unwrap_or(&app_id);
+            display_name_from_slug(slug)
+        });
+    let resolved_version = desktop_version
+        .or_else(|| contents.meta_version.clone())
+        .or(file_version);
 
     // Ambiguous if top two executable candidates are within 15 points of each other.
     let exec_ambiguous =
@@ -463,7 +505,7 @@ where
             selected_exec: None,
             selected_icon: None,
             name,
-            version: file_version,
+            version: resolved_version,
             kind,
             desktop_entry: desktop.map(|(_, text)| text.clone()),
             startup_wm_class: None,
@@ -530,7 +572,7 @@ where
         app_id: app_id.clone(),
         synthesized_id,
         name,
-        version: file_version,
+        version: resolved_version,
         kind,
         main_exec,
         icon_path,
