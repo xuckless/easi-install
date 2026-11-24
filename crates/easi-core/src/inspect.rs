@@ -110,6 +110,21 @@ const SOURCE_MARKERS: &[&str] = &[
     "pyproject.toml",
 ];
 
+/// Bundled GUI framework/runtime markers for tarballs/zips that ship without `.desktop` or loose icons
+/// (e.g. Electron/Chromium/Qt/GTK/SDL apps).
+const GUI_MARKERS: &[&str] = &[
+    "chrome-sandbox",
+    "chrome_100_percent.pak",
+    "app.asar",
+    "libgtk",
+    "libqt",
+    "libegl",
+    "libgles",
+    "libvulkan",
+    "libwayland",
+    "libsdl",
+];
+
 pub fn score_executables(
     entries: &[ArchiveEntry],
     app_slug: &str,
@@ -408,12 +423,20 @@ where
         .map(|v| v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
-    let kind =
-        if is_appimage || (desktop.is_some() && !desktop_terminal) || !icon_candidates.is_empty() {
-            AppKind::Gui
-        } else {
-            AppKind::Terminal
-        };
+    let has_gui_marker = contents.entries.iter().any(|e| {
+        let lower = e.path.to_ascii_lowercase();
+        GUI_MARKERS.iter().any(|m| lower.contains(m))
+    });
+
+    let kind = if is_appimage
+        || (desktop.is_some() && !desktop_terminal)
+        || !icon_candidates.is_empty()
+        || has_gui_marker
+    {
+        AppKind::Gui
+    } else {
+        AppKind::Terminal
+    };
 
     let name = desktop_name.unwrap_or_else(|| {
         let slug = app_id.strip_prefix("easi.").unwrap_or(&app_id);
