@@ -302,6 +302,7 @@ where
                     source_filename,
                     kind: plan.kind,
                     install_dir: app_dir.clone(),
+                    update_source: plan.update_source.clone(),
                     created_files: tx.created_files.clone(),
                     created_dirs: tx.created_dirs.clone(),
                 };

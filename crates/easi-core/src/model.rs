@@ -55,6 +55,19 @@ pub struct Candidate {
     pub score: i32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UpdateSource {
+    GitHubRelease {
+        owner: String,
+        repo: String,
+        asset_pattern: Option<String>,
+    },
+    ZsyncUrl {
+        url: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallPlan {
     pub source_path: PathBuf,
@@ -69,6 +82,7 @@ pub struct InstallPlan {
     pub icon_bytes: Option<Vec<u8>>,
     pub desktop_entry: Option<String>,
     pub startup_wm_class: Option<String>,
+    pub update_source: Option<UpdateSource>,
     pub planned_writes: Vec<String>,
 }
 
@@ -108,6 +122,7 @@ impl ChoiceDraft {
             icon_bytes: None,
             desktop_entry: self.desktop_entry,
             startup_wm_class: self.startup_wm_class,
+            update_source: None,
             planned_writes: vec![],
         }
     }

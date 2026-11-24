@@ -42,6 +42,8 @@ pub enum Command {
     Uninstall { app: String },
     /// List apps installed by easi.
     List,
+    /// Check upstream releases (AppImage zsync / GitHub Releases) for installed apps.
+    CheckUpdates,
     /// Update easi itself.
     SelfUpdate,
     /// View or change easi settings (e.g. --auto-update true|false).
@@ -77,6 +79,10 @@ pub fn run(cli: Cli) -> ExitCode {
         Some(Command::List) => {
             maybe_notify_update(&roots);
             run_list_cmd(&roots)
+        }
+        Some(Command::CheckUpdates) => {
+            maybe_notify_update(&roots);
+            run_check_updates_cmd(&roots)
         }
         Some(Command::SelfUpdate) => run_self_update_cmd(),
         Some(Command::Config { auto_update }) => run_config_cmd(&roots, auto_update),
@@ -116,6 +122,49 @@ fn run_config_cmd(roots: &InstallRoots, auto_update: Option<bool>) -> ExitCode {
             ExitCode::SUCCESS
         }
     }
+}
+
+fn run_check_updates_cmd(roots: &InstallRoots) -> ExitCode {
+    let manifests = match list_manifests(roots) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("easi: {}", format_user_error(&e));
+            return ExitCode::FAILURE;
+        }
+    };
+    if manifests.is_empty() {
+        println!("No apps installed by easi.");
+        return ExitCode::SUCCESS;
+    }
+    for m in &manifests {
+        match easi_core::upstream::check_app_update(m) {
+            easi_core::upstream::AppUpdateStatus::UpdateAvailable {
+                name,
+                current_version,
+                latest_version,
+                release_url,
+                ..
+            } => {
+                println!(
+                    "{name:<24} UPDATE AVAILABLE: {current_version} -> {latest_version}  ({release_url})"
+                );
+            }
+            easi_core::upstream::AppUpdateStatus::UpToDate {
+                name,
+                current_version,
+                ..
+            } => {
+                println!("{name:<24} up to date ({current_version})");
+            }
+            easi_core::upstream::AppUpdateStatus::Unsupported { name, .. } => {
+                println!("{name:<24} no upstream update source");
+            }
+            easi_core::upstream::AppUpdateStatus::CheckFailed { name, reason, .. } => {
+                println!("{name:<24} check failed ({reason})");
+            }
+        }
+    }
+    ExitCode::SUCCESS
 }
 
 fn run_self_update_cmd() -> ExitCode {

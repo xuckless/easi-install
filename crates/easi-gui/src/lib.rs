@@ -174,6 +174,54 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         });
     }
     {
+        let w = window.as_weak();
+        let r = Arc::clone(&runner);
+        window.on_check_app_updates(move || {
+            let w = w.clone();
+            let roots_bg = r.roots.clone();
+            std::thread::spawn(move || {
+                let manifests = easi_core::manifest::list_manifests(&roots_bg).unwrap_or_default();
+                let rows: Vec<ui::InstalledRow> = manifests
+                    .iter()
+                    .map(|m| {
+                        let note = match easi_core::upstream::check_app_update(m) {
+                            easi_core::upstream::AppUpdateStatus::UpdateAvailable {
+                                latest_version,
+                                ..
+                            } => format!("Update available: {latest_version}"),
+                            easi_core::upstream::AppUpdateStatus::UpToDate { .. } => {
+                                "Up to date".into()
+                            }
+                            easi_core::upstream::AppUpdateStatus::Unsupported { .. } => {
+                                "No upstream update source".into()
+                            }
+                            easi_core::upstream::AppUpdateStatus::CheckFailed {
+                                reason, ..
+                            } => {
+                                format!("Check failed: {reason}")
+                            }
+                        };
+                        ui::InstalledRow {
+                            app_id: m.app_id.clone().into(),
+                            name: m.name.clone().into(),
+                            version: m.version.clone().unwrap_or_default().into(),
+                            kind: match m.kind {
+                                AppKind::Gui => "GUI".into(),
+                                AppKind::Terminal => "CLI".into(),
+                            },
+                            update_note: note.into(),
+                        }
+                    })
+                    .collect();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(win) = w.upgrade() {
+                        win.set_installed_apps(ModelRc::new(VecModel::from(rows)));
+                    }
+                });
+            });
+        });
+    }
+    {
         let r = Arc::clone(&runner);
         window.on_toggle_auto_update(move |enabled| {
             let _ = easi_core::self_update::set_auto_check_updates(&r.roots, enabled);
@@ -290,6 +338,7 @@ fn project_state(win: &ui::AppWindow, state: &State) {
                         AppKind::Gui => "GUI".into(),
                         AppKind::Terminal => "CLI".into(),
                     },
+                    update_note: "".into(),
                 })
                 .collect();
             win.set_installed_apps(ModelRc::new(VecModel::from(rows)));

@@ -518,6 +518,12 @@ where
         "Record manifest ~/.local/share/easi/installed/{app_id}.toml (for clean uninstall)"
     ));
 
+    let update_source = crate::upstream::detect_update_source(
+        contents.appimage_upd_info.as_deref(),
+        trust.origin_url.as_deref(),
+        metainfo.map(|(_, xml)| xml.as_str()),
+    );
+
     let plan = InstallPlan {
         source_path: path.to_path_buf(),
         format,
@@ -531,6 +537,7 @@ where
         icon_bytes,
         desktop_entry: desktop.map(|(_, text)| text.clone()),
         startup_wm_class,
+        update_source,
         planned_writes,
     };
 

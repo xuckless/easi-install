@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::EasiError;
-use crate::model::{AppKind, InstalledApp};
+use crate::model::{AppKind, InstalledApp, UpdateSource};
 use crate::roots::InstallRoots;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,6 +17,8 @@ pub struct Manifest {
     pub source_filename: String,
     pub kind: AppKind,
     pub install_dir: PathBuf,
+    #[serde(default)]
+    pub update_source: Option<UpdateSource>,
     pub created_files: Vec<PathBuf>,
     pub created_dirs: Vec<PathBuf>,
 }

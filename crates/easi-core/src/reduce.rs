@@ -414,6 +414,7 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
                 icon_bytes: None,
                 desktop_entry: None,
                 startup_wm_class: None,
+                update_source: None,
                 planned_writes: vec![],
             };
             (
@@ -642,6 +643,7 @@ mod tests {
             icon_bytes: None,
             desktop_entry: None,
             startup_wm_class: Some("foo".into()),
+            update_source: None,
             planned_writes: vec![],
         }
     }

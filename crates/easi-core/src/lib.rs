@@ -15,12 +15,13 @@ pub mod runner;
 pub mod self_update;
 pub mod state;
 pub mod store;
+pub mod upstream;
 
 pub use error::{EasiError, format_user_error};
 pub use model::{
     AppKind, Candidate, ChoiceDraft, Classified, DoneOutcome, Format, InstallPlan, InstallStep,
     InstallSummary, InstalledApp, RollbackReason, ScriptReport, SignatureStatus, TrustSummary,
-    WizardStep,
+    UpdateSource, WizardStep,
 };
 pub use reduce::reduce;
 pub use state::{Action, Effect, State};

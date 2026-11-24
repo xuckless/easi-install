@@ -7,6 +7,7 @@ export struct InstalledRow {
     name: string,
     version: string,
     kind: string,
+    update-note: string,
 }
 
 export component AppWindow inherits Window {
@@ -59,6 +60,7 @@ export component AppWindow inherits Window {
     callback browse-package();
     callback open-path(string);
     callback uninstall-app(string);
+    callback check-app-updates();
     callback run-self-update();
     callback toggle-auto-update(bool);
     callback confirm-install();
@@ -120,10 +122,18 @@ export component AppWindow inherits Window {
                 }
             }
 
-            Text {
-                text: "Installed Apps (" + root.installed-apps.length + ")";
-                font-size: 14px;
-                font-weight: 700;
+            HorizontalBox {
+                Text {
+                    text: "Installed Apps (" + root.installed-apps.length + ")";
+                    font-size: 14px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+                Button {
+                    text: "Check Updates";
+                    enabled: root.installed-apps.length > 0;
+                    clicked => { root.check-app-updates(); }
+                }
             }
             if root.installed-apps.length == 0: Text {
                 text: "No apps installed by easi yet.";
@@ -143,6 +153,7 @@ export component AppWindow inherits Window {
                                 spacing: 2px;
                                 Text { text: app.name + (app.version != "" ? " " + app.version : ""); font-weight: 700; }
                                 Text { text: app.kind + "  •  " + app.app-id; font-size: 11px; }
+                                if app.update-note != "": Text { text: app.update-note; font-size: 11px; color: #3584e4; }
                             }
                             Button {
                                 text: "Uninstall";

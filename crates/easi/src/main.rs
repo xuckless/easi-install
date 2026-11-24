@@ -8,7 +8,15 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-const CLI_SUBCOMMANDS: &[&str] = &["install", "uninstall", "list", "self-update", "help"];
+const CLI_SUBCOMMANDS: &[&str] = &[
+    "install",
+    "uninstall",
+    "list",
+    "self-update",
+    "check-updates",
+    "config",
+    "help",
+];
 
 fn has_gui_session() -> bool {
     std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some()

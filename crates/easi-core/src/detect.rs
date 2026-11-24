@@ -172,6 +172,7 @@ pub struct PackageContents {
     pub metainfo_files: Vec<(String, String)>,
     pub embedded_icons: Vec<(String, Vec<u8>)>,
     pub has_appimage_sig_section: bool,
+    pub appimage_upd_info: Option<String>,
     pub script_report: Option<ScriptReport>,
 }
 
@@ -422,15 +423,83 @@ fn check_elf_section_name(file: &mut File, hdr: &[u8; 64], target: &[u8]) -> Opt
     Some(strtab.windows(target.len()).any(|w| w == target))
 }
 
+/// Read a small ELF64 section's raw bytes by section name (e.g. `.upd_info`).
+fn read_elf_section_bytes(file: &mut File, hdr: &[u8; 64], target: &[u8]) -> Option<Vec<u8>> {
+    if &hdr[0..4] != b"\x7fELF" || hdr[4] != 2 || hdr[5] != 1 {
+        return None;
+    }
+    let shoff = u64::from_le_bytes(hdr[40..48].try_into().ok()?);
+    let shentsize = u16::from_le_bytes(hdr[58..60].try_into().ok()?) as u64;
+    let shnum = u16::from_le_bytes(hdr[60..62].try_into().ok()?) as u64;
+    let shstrndx = u16::from_le_bytes(hdr[62..64].try_into().ok()?) as u64;
+    if shstrndx >= shnum || shentsize < 64 {
+        return None;
+    }
+    let shstr_hdr_off = shoff.checked_add(shstrndx.checked_mul(shentsize)?)?;
+    file.seek(SeekFrom::Start(shstr_hdr_off)).ok()?;
+    let mut sh = [0u8; 64];
+    file.read_exact(&mut sh).ok()?;
+    let strtab_off = u64::from_le_bytes(sh[24..32].try_into().ok()?);
+    let strtab_size = u64::from_le_bytes(sh[32..40].try_into().ok()?);
+    if strtab_size > 256 * 1024 {
+        return None;
+    }
+    file.seek(SeekFrom::Start(strtab_off)).ok()?;
+    let mut strtab = vec![0u8; strtab_size as usize];
+    file.read_exact(&mut strtab).ok()?;
+
+    for i in 0..shnum {
+        let off = shoff.checked_add(i.checked_mul(shentsize)?)?;
+        file.seek(SeekFrom::Start(off)).ok()?;
+        let mut sec = [0u8; 64];
+        file.read_exact(&mut sec).ok()?;
+        let name_off = u32::from_le_bytes(sec[0..4].try_into().ok()?) as usize;
+        if name_off >= strtab.len() {
+            continue;
+        }
+        let end = strtab[name_off..]
+            .iter()
+            .position(|&b| b == 0)
+            .map(|p| name_off + p)
+            .unwrap_or(strtab.len());
+        if &strtab[name_off..end] == target {
+            let sec_off = u64::from_le_bytes(sec[24..32].try_into().ok()?);
+            let sec_size = u64::from_le_bytes(sec[32..40].try_into().ok()?);
+            if sec_size > 64 * 1024 {
+                return None;
+            }
+            file.seek(SeekFrom::Start(sec_off)).ok()?;
+            let mut data = vec![0u8; sec_size as usize];
+            file.read_exact(&mut data).ok()?;
+            return Some(data);
+        }
+    }
+    None
+}
+
 fn list_appimage_type2(path: &Path) -> Result<PackageContents, EasiError> {
     let mut file = File::open(path)?;
     let (offset, has_sig_section) = find_appimage_squashfs_offset(&mut file)?;
+    let appimage_upd_info = {
+        let mut hdr = [0u8; 64];
+        if file.seek(SeekFrom::Start(0)).is_ok() && file.read_exact(&mut hdr).is_ok() {
+            read_elf_section_bytes(&mut file, &hdr, b".upd_info").and_then(|bytes| {
+                let text = String::from_utf8_lossy(&bytes)
+                    .trim_matches(|c: char| c == '\0' || c.is_whitespace())
+                    .to_string();
+                if text.is_empty() { None } else { Some(text) }
+            })
+        } else {
+            None
+        }
+    };
     let reader = BufReader::new(file);
     let fs = FilesystemReader::from_reader_with_offset(reader, offset)
         .map_err(|e| EasiError::AppImage(e.to_string()))?;
 
     let mut contents = PackageContents {
         has_appimage_sig_section: has_sig_section,
+        appimage_upd_info,
         ..Default::default()
     };
 
