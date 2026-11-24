@@ -1,18 +1,298 @@
-// Layout only. No logic here: callbacks dispatch actions to the Rust store (AGENTS.md).
+// Layout and state bindings only. No business logic: callbacks dispatch Actions to Rust store.
 // Default Slint style on purpose; visual design pass comes after M3 layout.
-import { Button, VerticalBox } from "std-widgets.slint";
+import { Button, CheckBox, HorizontalBox, LineEdit, ProgressIndicator, VerticalBox } from "std-widgets.slint";
 
 export component AppWindow inherits Window {
     title: "easi";
-    preferred-width: 480px;
-    preferred-height: 320px;
+    preferred-width: 560px;
+    preferred-height: 400px;
+
+    // Projected state from easi-core::State
+    in property <string> screen: "idle";
+    in property <string> app-name: "";
+    in property <string> app-version: "";
+    in property <string> app-id: "";
+    in property <string> app-kind: "";
+    in property <string> status-text: "";
+    in property <string> error-text: "";
+    in property <string> conflict-text: "";
+
+    // Trust summary projection
+    in property <string> trust-size: "";
+    in property <string> trust-sha256: "";
+    in property <string> trust-origin: "";
+    in property <string> trust-signature: "";
+    in property <string> trust-warnings: "";
+
+    // Progress & post-install
+    in property <float> progress: 0.0;
+    in property <string> install-dir: "";
+    in-out property <bool> trash-checked: true;
+
+    // Wizard state
+    in property <[string]> wizard-choices: [];
+    in-out property <string> wizard-name-input: "";
+    in-out property <string> idle-path-input: "";
+
+    // Internal drag-visual state (DMG-style icon -> Applications folder)
+    property <length> drag-offset-x: 0px;
+    property <length> drag-offset-y: 0px;
+    property <bool> dragging: false;
+
+    // Actions dispatched back to the Redux store
+    callback open-path(string);
+    callback confirm-install();
+    callback cancel();
+    callback choose-candidate(int);
+    callback confirm-name(string);
+    callback finish-trash(bool);
+    callback close-window();
 
     VerticalBox {
-        alignment: center;
-        Text {
-            text: "Drop a package here";
-            horizontal-alignment: center;
+        padding: 16px;
+        spacing: 12px;
+
+        // --- Idle ---
+        if root.screen == "idle": VerticalBox {
+            alignment: center;
+            spacing: 10px;
+            Text {
+                text: "Open a downloaded AppImage, tarball, or zip";
+                font-size: 16px;
+                horizontal-alignment: center;
+            }
+            Text {
+                text: "Double-click a package in your file manager or enter a path below:";
+                horizontal-alignment: center;
+            }
+            HorizontalBox {
+                LineEdit {
+                    text <=> root.idle-path-input;
+                    placeholder-text: "/path/to/package.AppImage";
+                }
+                Button {
+                    text: "Open";
+                    enabled: root.idle-path-input != "";
+                    clicked => { root.open-path(root.idle-path-input); }
+                }
+            }
         }
-        Button { text: "Install"; enabled: false; }
+
+        // --- Inspecting ---
+        if root.screen == "inspecting": VerticalBox {
+            alignment: center;
+            spacing: 10px;
+            Text {
+                text: root.status-text;
+                horizontal-alignment: center;
+            }
+            ProgressIndicator { indeterminate: true; }
+            Button {
+                text: "Cancel";
+                clicked => { root.cancel(); }
+            }
+        }
+
+        // --- Ready (DMG-style drag + Install button + Trust panel) ---
+        if root.screen == "ready": VerticalBox {
+            spacing: 12px;
+            Text {
+                text: root.app-name + (root.app-version != "" ? " " + root.app-version : "");
+                font-size: 18px;
+                horizontal-alignment: center;
+            }
+            Text {
+                text: "Drag the app into Applications — or press Install";
+                horizontal-alignment: center;
+            }
+
+            // DMG-style drag stage
+            Rectangle {
+                height: 130px;
+                border-width: 1px;
+                border-color: #88888844;
+                border-radius: 8px;
+
+                // Right drop zone: Applications folder
+                drop-zone := Rectangle {
+                    x: parent.width - 170px;
+                    y: 20px;
+                    width: 140px;
+                    height: 90px;
+                    border-width: 2px;
+                    border-radius: 8px;
+                    border-color: root.dragging && root.drag-offset-x > 120px ? #3584e4 : #88888866;
+                    VerticalBox {
+                        alignment: center;
+                        Text { text: "Applications"; horizontal-alignment: center; font-weight: 700; }
+                        Text { text: "~/Applications"; horizontal-alignment: center; font-size: 11px; }
+                    }
+                }
+
+                // Arrow hint
+                Text {
+                    x: parent.width / 2 - 16px;
+                    y: 52px;
+                    text: "→";
+                    font-size: 24px;
+                }
+
+                // Left draggable app tile
+                Rectangle {
+                    x: 30px + root.drag-offset-x;
+                    y: 20px + root.drag-offset-y;
+                    width: 140px;
+                    height: 90px;
+                    border-width: 1px;
+                    border-color: #3584e4;
+                    border-radius: 8px;
+                    VerticalBox {
+                        alignment: center;
+                        Text { text: root.app-name; horizontal-alignment: center; font-weight: 700; }
+                        Text { text: root.app-kind; horizontal-alignment: center; font-size: 11px; }
+                    }
+                    ta := TouchArea {
+                        moved => {
+                            if (self.pressed) {
+                                root.dragging = true;
+                                root.drag-offset-x = self.mouse-x - self.pressed-x;
+                                root.drag-offset-y = self.mouse-y - self.pressed-y;
+                            }
+                        }
+                        pointer-event(event) => {
+                            if (event.kind == PointerEventKind.up) {
+                                if (root.dragging && root.drag-offset-x > 120px) {
+                                    root.confirm-install();
+                                }
+                                root.dragging = false;
+                                root.drag-offset-x = 0px;
+                                root.drag-offset-y = 0px;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Trust summary panel
+            Rectangle {
+                border-width: 1px;
+                border-color: #88888844;
+                border-radius: 6px;
+                VerticalBox {
+                    padding: 8px;
+                    spacing: 2px;
+                    Text { text: "Trust Summary"; font-weight: 700; font-size: 12px; }
+                    Text { text: "ID: " + root.app-id + "   |   Size: " + root.trust-size; font-size: 11px; }
+                    Text { text: "SHA-256: " + root.trust-sha256; font-size: 11px; }
+                    if root.trust-origin != "": Text { text: "Origin: " + root.trust-origin; font-size: 11px; }
+                    Text { text: "Signature: " + root.trust-signature; font-size: 11px; }
+                    if root.trust-warnings != "": Text { text: "Warnings: " + root.trust-warnings; font-size: 11px; color: #c01c28; }
+                }
+            }
+
+            HorizontalBox {
+                alignment: end;
+                Button { text: "Cancel"; clicked => { root.cancel(); } }
+                Button { text: "Install"; primary: true; clicked => { root.confirm-install(); } }
+            }
+        }
+
+        // --- Conflict ---
+        if root.screen == "conflict": VerticalBox {
+            spacing: 12px;
+            Text { text: "App Already Installed"; font-size: 18px; horizontal-alignment: center; }
+            Text { text: root.conflict-text; horizontal-alignment: center; wrap: word-wrap; }
+            Text { text: "SHA-256: " + root.trust-sha256; font-size: 11px; horizontal-alignment: center; }
+            HorizontalBox {
+                alignment: end;
+                Button { text: "Cancel"; clicked => { root.cancel(); } }
+                Button { text: "Replace"; primary: true; clicked => { root.confirm-install(); } }
+            }
+        }
+
+        // --- Wizard: pick executable or icon ---
+        if root.screen == "wizard_exec" || root.screen == "wizard_icon": VerticalBox {
+            spacing: 8px;
+            Text {
+                text: root.screen == "wizard_exec" ? "Choose the main program" : "Choose an application icon";
+                font-size: 16px;
+            }
+            for choice[idx] in root.wizard-choices: Button {
+                text: choice;
+                clicked => { root.choose-candidate(idx); }
+            }
+            HorizontalBox {
+                alignment: end;
+                Button { text: "Cancel"; clicked => { root.cancel(); } }
+            }
+        }
+
+        // --- Wizard: confirm name ---
+        if root.screen == "wizard_name": VerticalBox {
+            spacing: 10px;
+            Text { text: "Confirm application name"; font-size: 16px; }
+            LineEdit { text <=> root.wizard-name-input; }
+            HorizontalBox {
+                alignment: end;
+                Button { text: "Cancel"; clicked => { root.cancel(); } }
+                Button {
+                    text: "Continue";
+                    primary: true;
+                    clicked => { root.confirm-name(root.wizard-name-input); }
+                }
+            }
+        }
+
+        // --- Installing / Cancelling / RollingBack ---
+        if root.screen == "installing": VerticalBox {
+            alignment: center;
+            spacing: 12px;
+            Text { text: root.status-text; font-size: 15px; horizontal-alignment: center; }
+            ProgressIndicator { progress: root.progress; }
+            HorizontalBox {
+                alignment: center;
+                Button { text: "Cancel"; clicked => { root.cancel(); } }
+            }
+        }
+
+        // --- OfferTrash (Success screen) ---
+        if root.screen == "offer_trash": VerticalBox {
+            alignment: center;
+            spacing: 12px;
+            Text { text: root.app-name + " installed!"; font-size: 18px; horizontal-alignment: center; }
+            Text { text: "Location: " + root.install-dir; font-size: 12px; horizontal-alignment: center; }
+            CheckBox {
+                text: "Move downloaded file to Trash";
+                checked <=> root.trash-checked;
+            }
+            HorizontalBox {
+                alignment: center;
+                Button {
+                    text: "Done";
+                    primary: true;
+                    clicked => { root.finish-trash(root.trash-checked); }
+                }
+            }
+        }
+
+        // --- Done / Cancelled / Failed ---
+        if root.screen == "done" || root.screen == "cancelled" || root.screen == "failed": VerticalBox {
+            alignment: center;
+            spacing: 12px;
+            Text {
+                text: root.screen == "failed" ? "Installation Failed" : root.status-text;
+                font-size: 16px;
+                horizontal-alignment: center;
+            }
+            if root.error-text != "": Text {
+                text: root.error-text;
+                wrap: word-wrap;
+                horizontal-alignment: center;
+            }
+            HorizontalBox {
+                alignment: center;
+                Button { text: "Close"; primary: true; clicked => { root.close-window(); } }
+            }
+        }
     }
 }

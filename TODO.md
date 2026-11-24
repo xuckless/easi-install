@@ -74,19 +74,19 @@ Every arrow is a row in the reducer match. Every unlisted `(state, action)` pair
 - [x] Offer move-to-trash (XDG trash spec)
 
 ## M3 — GUI (minimal Slint)
-- [ ] Drop window: app icon, name/version, Applications folder, in-window drag + Install button
-- [ ] Trust summary panel
-- [ ] Progress / success (trash checkbox) / failure screens
-- [ ] Wizard fallback: pick program, pick icon, confirm name
-- [ ] Conflict dialog (replace?)
-- [ ] GUI vs CLI selection in `easi` main
+- [x] Drop window: app icon, name/version, Applications folder, in-window drag + Install button
+- [x] Trust summary panel
+- [x] Progress / success (trash checkbox) / failure screens
+- [x] Wizard fallback: pick program, pick icon, confirm name
+- [x] Conflict dialog (replace?)
+- [x] GUI vs CLI selection in `easi` main
 - [ ] → hand to user for visual design pass
 
 ## M4 — Desktop integration
-- [ ] `easi --setup`: register MIME types, set easi as default, remember previous handlers
-- [ ] Hand-off of non-app archives to remembered handler
-- [ ] DE quirk table: GNOME (Wayland + X11) verified
-- [ ] DE quirk table: KDE Plasma (Wayland + X11) verified
+- [x] `easi --setup`: register MIME types, set easi as default, remember previous handlers
+- [x] Hand-off of non-app archives to remembered handler
+- [x] DE quirk table: GNOME (Wayland + X11) verified
+- [x] DE quirk table: KDE Plasma (Wayland + X11) verified
 
 ## M5 — Ship easi
 - [ ] GitHub Releases pipeline: binaries + sha256 + minisign sig

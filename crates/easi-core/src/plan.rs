@@ -208,4 +208,20 @@ mod tests {
             assert!(term.contains(&PlanOp::WireBinSymlink));
         }
     }
+
+    #[test]
+    fn de_quirk_table_matches_gnome_and_kde() {
+        let gnome = detect_de_quirk("ubuntu:GNOME");
+        assert_eq!(gnome.name, "GNOME");
+        assert!(gnome.refresh_desktop_db);
+        assert!(gnome.refresh_gtk_icon_cache);
+        assert!(!gnome.refresh_kde_sycoca);
+
+        let kde = detect_de_quirk("KDE");
+        assert_eq!(kde.name, "KDE Plasma");
+        assert!(kde.refresh_kde_sycoca);
+
+        let generic = detect_de_quirk("sway");
+        assert_eq!(generic.name, "Generic");
+    }
 }
