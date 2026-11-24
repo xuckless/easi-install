@@ -1,24 +1,16 @@
-//! easi-core: the single store. Pure `reduce` + effect descriptions; no I/O here.
-//!
-//! Every transition is an arm in `reduce`. Add behavior as a new `State` variant or a new
-//! `(State, Action)` arm — never as a flag beside the state or a branch in a view.
-//! The match must stay exhaustive: no `_ =>` catch-alls (see AGENTS.md).
+//! easi-core: the single store, pure reducer, declarative tables, and effect runner.
 
-/// The one lifecycle value. Variants carry the data they own.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum State {
-    #[default]
-    Idle,
-}
+pub mod error;
+pub mod model;
+pub mod reduce;
+pub mod state;
+pub mod store;
 
-/// Everything that can happen: user intent and I/O results. Filled in by M0/M1.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Action {}
-
-/// I/O the effect runner must perform, then report back as an `Action`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Effect {}
-
-pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
-    match (state, action) {}
-}
+pub use error::{EasiError, format_user_error};
+pub use model::{
+    AppKind, Candidate, ChoiceDraft, Classified, DoneOutcome, Format, InstallPlan, InstallStep,
+    InstallSummary, InstalledApp, RollbackReason, SignatureStatus, TrustSummary, WizardStep,
+};
+pub use reduce::reduce;
+pub use state::{Action, Effect, State};
+pub use store::Store;

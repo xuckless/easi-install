@@ -47,9 +47,9 @@ Every arrow is a row in the reducer match. Every unlisted `(state, action)` pair
 - [x] CI (GitHub Actions): fmt, clippy `-D warnings`, test
 - [x] `.gitignore`
 - [x] License: Apache-2.0
-- [ ] Fill `State`/`Action`/`Effect` per the state sketch above
-- [ ] Effect runner loop (dispatch → reduce → run effects → dispatch results)
-- [ ] Reducer transition test table (one row per `(state, action) → next`)
+- [x] Fill `State`/`Action`/`Effect` per the state sketch above
+- [x] Effect runner loop (dispatch → reduce → run effects → dispatch results)
+- [x] Reducer transition test table (one row per `(state, action) → next`)
 
 ## M1 — Detect & inspect (pure + read-only effects)
 - [ ] Magic-byte format table: AppImage t1/t2, gzip, xz, zstd, bzip2, zip
@@ -100,6 +100,12 @@ Every arrow is a row in the reducer match. Every unlisted `(state, action)` pair
 - [ ] Optional system-wide installs (`/opt` via pkexec)
 - [ ] More app id / metadata sources as formats grow (snap-style `meta/`, AppImage update info, ELF `.note` / embedded version strings, icon-from-ELF resources)
 - [ ] Upstream update checks (AppImage zsync, GitHub releases)
+
+## Wishlist
+- [ ] `easi inspect <path>` — read-only inspection and trust summary without installing
+- [ ] `--dry-run` flag for `easi install` — print planned writes without touching disk
+- [ ] File picker button in empty GUI window (in addition to drag-and-drop and `easi <path>`)
+- [ ] Desktop notification on install completion
 
 ## Open questions
 - (none)

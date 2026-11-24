@@ -16,6 +16,27 @@ clap = { version = "4.6", features = ["derive"] }
 # slint: GUI toolkit (project requirement).
 slint = "1.19"
 slint-build = "1.19"
+# thiserror: typed error enums (AGENTS.md requirement).
+thiserror = "2"
+# serde + toml: manifest & saved-handler config persistence.
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+# sha2: SHA-256 digest for trust summary.
+sha2 = "0.10"
+# tar + compression crates: streaming archive inspection & safe extraction without shelling out.
+tar = "0.4"
+flate2 = "1"
+xz2 = "0.1"
+zstd = "0.13"
+bzip2 = "0.5"
+# zip: pure-Rust zip inspection & safe extraction.
+zip = { version = "2", default-features = false, features = ["deflate", "bzip2", "zstd"] }
+# backhand: pure-Rust SquashFS reader for AppImage type 2 without executing untrusted files.
+backhand = "0.21"
+# tempfile: fresh temp dirs for untrusted extraction and temp-root tests.
+tempfile = "3"
+# xattr: read user.xdg.origin.url extended attribute for trust summary.
+xattr = "1"
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
