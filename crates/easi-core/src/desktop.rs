@@ -255,6 +255,63 @@ fn query_file_mime(path: &Path) -> Option<String> {
     if mime.is_empty() { None } else { Some(mime) }
 }
 
+/// Launch an installed app (prefers `gtk-launch <app_id>.desktop` for GUI apps,
+/// falls back to the `~/.local/bin/<slug>` symlink).
+pub fn launch_installed_app(roots: &InstallRoots, query: &str) -> Result<(), EasiError> {
+    let m = crate::manifest::resolve_installed(roots, query)?;
+    let desktop_id = format!("{}.desktop", m.app_id);
+    if roots.desktop_dir.join(&desktop_id).exists()
+        && Command::new("gtk-launch").arg(&desktop_id).spawn().is_ok()
+    {
+        return Ok(());
+    }
+    if let Some(bin) = m
+        .created_files
+        .iter()
+        .find(|p| p.starts_with(&roots.bin_dir))
+        && Command::new(bin).spawn().is_ok()
+    {
+        return Ok(());
+    }
+    Err(EasiError::Desktop(format!("could not launch {}", m.name)))
+}
+
+/// Open an installed app's directory (`~/Applications/<App>/`) in the user's file manager.
+pub fn open_app_folder(roots: &InstallRoots, query: &str) -> Result<(), EasiError> {
+    let m = crate::manifest::resolve_installed(roots, query)?;
+    Command::new("xdg-open")
+        .arg(&m.install_dir)
+        .spawn()
+        .map_err(|e| EasiError::Desktop(format!("failed to open folder: {e}")))?;
+    Ok(())
+}
+
+/// Copy `text` to the Linux Wayland/X11 clipboard using `wl-copy`, `xclip`, or `xsel`.
+pub fn copy_to_clipboard(text: &str) -> bool {
+    use std::io::Write;
+    let tools: &[(&str, &[&str])] = &[
+        ("wl-copy", &[]),
+        ("xclip", &["-selection", "clipboard"]),
+        ("xsel", &["--clipboard", "--input"]),
+    ];
+    for (bin, args) in tools {
+        if let Ok(mut child) = Command::new(bin)
+            .args(*args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            && let Some(mut stdin) = child.stdin.take()
+            && stdin.write_all(text.as_bytes()).is_ok()
+        {
+            drop(stdin);
+            let _ = child.wait();
+            return true;
+        }
+    }
+    false
+}
+
 /// Send a best-effort desktop notification (GNOME, KDE/SteamOS, Mint, CachyOS).
 /// Silently skipped in tests, headless sessions, or when `EASI_NO_NOTIFY=1`.
 pub fn notify(title: &str, body: &str) {

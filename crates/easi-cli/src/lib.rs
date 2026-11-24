@@ -276,14 +276,34 @@ fn run_list_cmd(roots: &InstallRoots) -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(list) => {
-            for m in list {
-                let ver = m.version.as_deref().unwrap_or("-");
-                let kind = match m.kind {
+            let mut total_bytes = 0u64;
+            for m in &list {
+                let app = m.to_installed_app_with_sizes(roots);
+                total_bytes = total_bytes.saturating_add(app.size_bytes);
+                let ver = app.version.as_deref().unwrap_or("-");
+                let kind = match app.kind {
                     AppKind::Gui => "GUI",
                     AppKind::Terminal => "CLI",
                 };
-                println!("{:<24} {:<12} [{}]  {}", m.name, ver, kind, m.app_id);
+                let size = easi_core::manifest::format_human_bytes(app.size_bytes);
+                let data_note = if app.data_size_bytes > 0 {
+                    format!(
+                        " (+{} data)",
+                        easi_core::manifest::format_human_bytes(app.data_size_bytes)
+                    )
+                } else {
+                    String::new()
+                };
+                println!(
+                    "{:<24} {:<10} [{}]  {:>10}{}  {}",
+                    app.name, ver, kind, size, data_note, app.app_id
+                );
             }
+            println!(
+                "\nTotal: {} across {} app(s).",
+                easi_core::manifest::format_human_bytes(total_bytes),
+                list.len()
+            );
             ExitCode::SUCCESS
         }
         Err(e) => {

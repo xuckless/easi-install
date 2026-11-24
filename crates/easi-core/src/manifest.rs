@@ -32,7 +32,56 @@ impl Manifest {
             source_filename: self.source_filename.clone(),
             install_dir: self.install_dir.clone(),
             kind: self.kind,
+            size_bytes: dir_size_bytes(&self.install_dir),
+            data_size_bytes: 0,
         }
+    }
+
+    pub fn to_installed_app_with_sizes(&self, roots: &InstallRoots) -> InstalledApp {
+        let data_size_bytes = crate::install::find_app_data_dirs(roots, self)
+            .iter()
+            .map(|d| dir_size_bytes(d))
+            .sum();
+        InstalledApp {
+            data_size_bytes,
+            ..self.to_installed_app()
+        }
+    }
+}
+
+/// Sum regular file bytes under `path` without following symlinks.
+pub fn dir_size_bytes(path: &Path) -> u64 {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if meta.file_type().is_symlink() {
+        return 0;
+    }
+    if meta.is_file() {
+        return meta.len();
+    }
+    let Ok(entries) = fs::read_dir(path) else {
+        return 0;
+    };
+    let mut total = 0u64;
+    for entry in entries.flatten() {
+        total = total.saturating_add(dir_size_bytes(&entry.path()));
+    }
+    total
+}
+
+pub fn format_human_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+    if bytes >= GB {
+        format!("{:.2} GiB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MiB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KiB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
     }
 }
 

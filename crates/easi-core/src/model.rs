@@ -145,6 +145,8 @@ pub struct InstalledApp {
     pub source_filename: String,
     pub install_dir: PathBuf,
     pub kind: AppKind,
+    pub size_bytes: u64,
+    pub data_size_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

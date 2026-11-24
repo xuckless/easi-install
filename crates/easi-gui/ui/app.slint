@@ -7,6 +7,7 @@ export struct InstalledRow {
     name: string,
     version: string,
     kind: string,
+    size-text: string,
     update-note: string,
     has-update: bool,
 }
@@ -53,6 +54,10 @@ export component AppWindow inherits Window {
     // Projected state from easi-core::State
     in property <string> screen: "idle";
     in property <[InstalledRow]> installed-apps: [];
+    in property <string> total-size-text: "";
+    in-out property <string> search-query: "";
+    in-out property <string> filter-kind: "all";
+    in-out property <bool> sort-by-size: false;
     in property <string> easi-update-version: "";
     in-out property <bool> auto-check-updates: true;
     in-out property <bool> purge-data-on-uninstall: false;
@@ -65,6 +70,8 @@ export component AppWindow inherits Window {
     in property <bool> has-app-icon: false;
     in property <string> status-text: "";
     in property <string> error-text: "";
+    in property <string> suggested-command: "";
+    in-out property <bool> command-copied: false;
     in property <string> conflict-text: "";
 
     // Trust summary & permissions projection
@@ -98,6 +105,10 @@ export component AppWindow inherits Window {
     callback open-path(string);
     callback uninstall-app(string, bool);
     callback update-app(string);
+    callback launch-app(string);
+    callback open-app-folder(string);
+    callback filter-changed();
+    callback copy-suggested-command(string);
     callback check-app-updates();
     callback run-self-update();
     callback run-self-uninstall();
@@ -207,17 +218,53 @@ export component AppWindow inherits Window {
 
                 HorizontalBox {
                     padding: 0px;
+                    spacing: Theme.gap-sm;
                     Text {
-                        text: "Installed Apps (" + root.installed-apps.length + ")";
+                        text: "Installed Apps (" + root.installed-apps.length + ")" + (root.total-size-text != "" ? "  •  " + root.total-size-text : "");
                         font-size: Theme.font-section;
                         font-weight: 700;
                         vertical-alignment: center;
                         horizontal-stretch: 1;
                     }
                     Button {
+                        text: root.sort-by-size ? "Sort: Largest" : "Sort: Name";
+                        enabled: root.installed-apps.length > 1;
+                        clicked => {
+                            root.sort-by-size = !root.sort-by-size;
+                            root.filter-changed();
+                        }
+                    }
+                    Button {
                         text: "Check Updates";
                         enabled: root.installed-apps.length > 0;
                         clicked => { root.check-app-updates(); }
+                    }
+                }
+
+                // Search & kind filter row
+                HorizontalBox {
+                    padding: 0px;
+                    spacing: Theme.gap-sm;
+                    LineEdit {
+                        text <=> root.search-query;
+                        placeholder-text: "Filter installed apps…";
+                        horizontal-stretch: 1;
+                        edited => { root.filter-changed(); }
+                    }
+                    Button {
+                        text: "All";
+                        primary: root.filter-kind == "all";
+                        clicked => { root.filter-kind = "all"; root.filter-changed(); }
+                    }
+                    Button {
+                        text: "GUI";
+                        primary: root.filter-kind == "gui";
+                        clicked => { root.filter-kind = "gui"; root.filter-changed(); }
+                    }
+                    Button {
+                        text: "CLI";
+                        primary: root.filter-kind == "cli";
+                        clicked => { root.filter-kind = "cli"; root.filter-changed(); }
                     }
                 }
 
@@ -286,7 +333,7 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                     Text {
-                                        text: app.app-id;
+                                        text: app.app-id + (app.size-text != "" ? "  •  " + app.size-text : "");
                                         font-size: Theme.font-caption;
                                         color: Theme.muted-text;
                                     }
@@ -297,14 +344,26 @@ export component AppWindow inherits Window {
                                         color: Theme.accent;
                                     }
                                 }
-                                if app.has-update: Button {
-                                    text: "Update";
-                                    primary: true;
-                                    clicked => { root.update-app(app.app-id); }
-                                }
-                                Button {
-                                    text: "Uninstall";
-                                    clicked => { root.uninstall-app(app.app-id, root.purge-data-on-uninstall); }
+                                HorizontalBox {
+                                    padding: 0px;
+                                    spacing: Theme.gap-sm;
+                                    if app.has-update: Button {
+                                        text: "Update";
+                                        primary: true;
+                                        clicked => { root.update-app(app.app-id); }
+                                    }
+                                    Button {
+                                        text: "Launch";
+                                        clicked => { root.launch-app(app.app-id); }
+                                    }
+                                    Button {
+                                        text: "Folder";
+                                        clicked => { root.open-app-folder(app.app-id); }
+                                    }
+                                    Button {
+                                        text: "Uninstall";
+                                        clicked => { root.uninstall-app(app.app-id, root.purge-data-on-uninstall); }
+                                    }
                                 }
                             }
                         }
@@ -776,6 +835,13 @@ export component AppWindow inherits Window {
             HorizontalBox {
                 alignment: center;
                 spacing: Theme.gap-sm;
+                if root.screen == "failed" && root.suggested-command != "": Button {
+                    text: root.command-copied ? "Copied!" : "Copy Command";
+                    clicked => {
+                        root.command-copied = true;
+                        root.copy-suggested-command(root.suggested-command);
+                    }
+                }
                 Button { text: "App Manager"; clicked => { root.back-to-manager(); } }
                 Button { text: "Close"; primary: true; clicked => { root.close-window(); } }
             }

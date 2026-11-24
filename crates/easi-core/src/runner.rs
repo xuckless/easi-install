@@ -35,7 +35,7 @@ impl EffectRunner {
                 let apps = reconcile_all(&self.roots)
                     .unwrap_or_default()
                     .into_iter()
-                    .map(|m| m.to_installed_app())
+                    .map(|m| m.to_installed_app_with_sizes(&self.roots))
                     .collect();
                 vec![Action::InstalledLoaded(apps)]
             }

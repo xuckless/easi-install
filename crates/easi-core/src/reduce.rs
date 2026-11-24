@@ -656,6 +656,8 @@ mod tests {
             source_filename: "foo-0.9.AppImage".into(),
             install_dir: PathBuf::from("/tmp/apps/Foo"),
             kind: AppKind::Gui,
+            size_bytes: 0,
+            data_size_bytes: 0,
         }
     }
 

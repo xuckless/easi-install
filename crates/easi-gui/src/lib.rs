@@ -125,6 +125,32 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         });
     }
     {
+        let r = Arc::clone(&runner);
+        window.on_launch_app(move |app_id| {
+            let _ = easi_core::desktop::launch_installed_app(&r.roots, app_id.as_str());
+        });
+    }
+    {
+        let r = Arc::clone(&runner);
+        window.on_open_app_folder(move |app_id| {
+            let _ = easi_core::desktop::open_app_folder(&r.roots, app_id.as_str());
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        window.on_filter_changed(move || {
+            if let (Some(win), Ok(st)) = (w.upgrade(), s.lock()) {
+                project_state(&win, st.state());
+            }
+        });
+    }
+    {
+        window.on_copy_suggested_command(move |cmd| {
+            let _ = easi_core::desktop::copy_to_clipboard(cmd.as_str());
+        });
+    }
+    {
         let w = window.as_weak();
         let s = Arc::clone(&store);
         let r = Arc::clone(&runner);
@@ -230,14 +256,16 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                                 reason, ..
                             } => (format!("Check failed: {reason}"), false),
                         };
+                        let app = m.to_installed_app_with_sizes(&roots_bg);
                         ui::InstalledRow {
-                            app_id: m.app_id.clone().into(),
-                            name: m.name.clone().into(),
-                            version: m.version.clone().unwrap_or_default().into(),
-                            kind: match m.kind {
+                            app_id: app.app_id.into(),
+                            name: app.name.into(),
+                            version: app.version.unwrap_or_default().into(),
+                            kind: match app.kind {
                                 AppKind::Gui => "GUI".into(),
                                 AppKind::Terminal => "CLI".into(),
                             },
+                            size_text: format_app_size(app.size_bytes, app.data_size_bytes).into(),
                             update_note: note.into(),
                             has_update,
                         }
@@ -378,8 +406,43 @@ fn project_state(win: &ui::AppWindow, state: &State) {
     match state {
         State::Idle { installed } => {
             win.set_screen("idle".into());
-            let rows: Vec<ui::InstalledRow> = installed
+            let total_bytes: u64 = installed.iter().map(|a| a.size_bytes).sum();
+            let total_text = if installed.is_empty() {
+                String::new()
+            } else {
+                easi_core::manifest::format_human_bytes(total_bytes)
+            };
+            win.set_total_size_text(total_text.into());
+
+            let query = win.get_search_query().to_string().to_ascii_lowercase();
+            let kind_filter = win.get_filter_kind().to_string();
+            let sort_by_size = win.get_sort_by_size();
+
+            let mut filtered: Vec<&easi_core::InstalledApp> = installed
                 .iter()
+                .filter(|app| {
+                    let kind_ok = match kind_filter.as_str() {
+                        "gui" => app.kind == AppKind::Gui,
+                        "cli" => app.kind == AppKind::Terminal,
+                        _ => true,
+                    };
+                    let query_ok = query.is_empty()
+                        || app.name.to_ascii_lowercase().contains(&query)
+                        || app.app_id.to_ascii_lowercase().contains(&query);
+                    kind_ok && query_ok
+                })
+                .collect();
+
+            if sort_by_size {
+                filtered.sort_by(|a, b| {
+                    b.size_bytes
+                        .cmp(&a.size_bytes)
+                        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                });
+            }
+
+            let rows: Vec<ui::InstalledRow> = filtered
+                .into_iter()
                 .map(|app| ui::InstalledRow {
                     app_id: app.app_id.clone().into(),
                     name: app.name.clone().into(),
@@ -388,6 +451,7 @@ fn project_state(win: &ui::AppWindow, state: &State) {
                         AppKind::Gui => "GUI".into(),
                         AppKind::Terminal => "CLI".into(),
                     },
+                    size_text: format_app_size(app.size_bytes, app.data_size_bytes).into(),
                     update_note: "".into(),
                     has_update: false,
                 })
@@ -542,6 +606,9 @@ fn project_state(win: &ui::AppWindow, state: &State) {
         }
         State::Failed { error, rolled_back } => {
             win.set_screen("failed".into());
+            win.set_command_copied(false);
+            let cmd = extract_suggested_command(error).unwrap_or_default();
+            win.set_suggested_command(cmd.into());
             let suffix = if *rolled_back {
                 " (rolled back cleanly)"
             } else {
@@ -574,6 +641,25 @@ fn load_preview_icon(app_id: &str, bytes: Option<&[u8]>) -> Option<slint::Image>
     let path = std::env::temp_dir().join(format!("easi-preview-{safe_id}.{ext}"));
     std::fs::write(&path, data).ok()?;
     slint::Image::load_from_path(&path).ok()
+}
+
+fn format_app_size(size_bytes: u64, data_size_bytes: u64) -> String {
+    let app_str = easi_core::manifest::format_human_bytes(size_bytes);
+    if data_size_bytes > 0 {
+        format!(
+            "{app_str} (+{} data)",
+            easi_core::manifest::format_human_bytes(data_size_bytes)
+        )
+    } else {
+        app_str
+    }
+}
+
+fn extract_suggested_command(error: &str) -> Option<String> {
+    error
+        .lines()
+        .find(|line| line.starts_with("  ") && !line.trim().is_empty())
+        .map(|line| line.trim().to_string())
 }
 
 fn format_bytes(bytes: u64) -> String {

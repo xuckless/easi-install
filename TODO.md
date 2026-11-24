@@ -120,7 +120,7 @@ Every arrow is a row in the reducer match. Every unlisted `(state, action)` pair
 - [x] Clean self-uninstall (`easi self-uninstall` + "Uninstall easi" button in GUI App Manager — restores MIME handlers, removes `easi`, keeps installed apps)
 - [x] Opt-in app data cleanup on uninstall (`easi uninstall --purge-data` + default-off checkbox in GUI App Manager)
 - [ ] OS drag-and-drop onto the App Manager window (drop packages straight from Nautilus/Dolphin/Nemo)
-- [ ] Launch button, "Open Folder", and search/filter (`All` / `GUI` / `CLI`) in the GUI App Manager
+- [x] Launch button, "Open Folder", per-app & total disk space usage (including user data size), search/filter (`All` / `GUI` / `CLI`), sort (`Name` / `Largest`), and "Copy Command" button on error screens in the GUI App Manager & CLI `list`
 - [x] `StartupWMClass` learning (`easi learn-wmclass <app> [class]` with active window `xprop` probe to prevent duplicate dock/taskbar icons)
 - [x] Distro/arch awareness: ELF arch-mismatch warning (Asahi/ARM64), loud fail with install command for missing runtime deps (`gcompat` on musl/Alpine, `appimage-run`/`nix-ld` on NixOS, `java` for `.jar`), SELinux `restorecon` (Fedora/RHEL), and Pantheon/Budgie/LXQt/Niri/River/i3/bspwm DE quirks
 - [x] Suggestive failures & warnings: Windows/macOS package detection (`.exe`/`.msi`/`.dmg`), friendly distro-package redirects (`.deb`/`.rpm`/`.flatpak`/`.snap`), safe `ld-linux --list` missing shared library warnings, and `/proc/self/mounts` `noexec` mount detection
