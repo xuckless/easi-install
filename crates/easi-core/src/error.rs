@@ -38,6 +38,22 @@ pub enum EasiError {
     )]
     MissingRuntimeDependency { detail: String, fix_command: String },
 
+    #[error("this is a {platform} package, not a Linux app.\nHint: {hint}")]
+    WrongPlatform {
+        platform: &'static str,
+        hint: &'static str,
+    },
+
+    #[error(
+        "this is a {kind} distro package — use your distro's software center or run:\n  {command}"
+    )]
+    DistroPackage { kind: &'static str, command: String },
+
+    #[error(
+        "install location {0} is on a `noexec` filesystem — apps placed there cannot execute.\nHint: remount without `noexec` or symlink ~/Applications to an executable partition."
+    )]
+    NoExecMount(PathBuf),
+
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
 }

@@ -164,7 +164,76 @@ pub fn detect_file_format(path: &Path) -> Result<Format, EasiError> {
             return Ok(Format::ShellInstaller);
         }
     }
+    if let Some(err) = detect_friendly_unsupported(path, &header[..n]) {
+        return Err(err);
+    }
     Err(EasiError::UnsupportedFormat(path.to_path_buf()))
+}
+
+/// Recognize Windows/macOS downloads and distro package formats to give helpful errors
+/// instead of a generic "unsupported format".
+pub fn detect_friendly_unsupported(path: &Path, header: &[u8]) -> Option<EasiError> {
+    let fname = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let lower = fname.to_ascii_lowercase();
+
+    // Windows PE (.exe / .dll) or MSI
+    if (header.len() >= 2 && &header[..2] == b"MZ")
+        || lower.ends_with(".exe")
+        || lower.ends_with(".msi")
+    {
+        return Some(EasiError::WrongPlatform {
+            platform: "Windows",
+            hint: "Look for a Linux (.AppImage, .tar.gz, .tar.xz, or .zip) download instead.",
+        });
+    }
+
+    // macOS .dmg or Mach-O binary
+    let is_macho = header.len() >= 4
+        && matches!(
+            &header[..4],
+            [0xfe, 0xed, 0xfa, 0xce]
+                | [0xce, 0xfa, 0xed, 0xfe]
+                | [0xfe, 0xed, 0xfa, 0xcf]
+                | [0xcf, 0xfa, 0xed, 0xfe]
+        );
+    if is_macho || lower.ends_with(".dmg") || lower.ends_with(".pkg") {
+        return Some(EasiError::WrongPlatform {
+            platform: "macOS",
+            hint: "Look for a Linux (.AppImage, .tar.gz, .tar.xz, or .zip) download instead.",
+        });
+    }
+
+    // Distro package formats (out of scope — redirect to the distro's own tool)
+    if (header.len() >= 8 && &header[..8] == b"!<arch>\n" && lower.ends_with(".deb"))
+        || lower.ends_with(".deb")
+    {
+        return Some(EasiError::DistroPackage {
+            kind: "Debian/Ubuntu (.deb)",
+            command: format!("sudo apt install ./{fname}"),
+        });
+    }
+    if (header.len() >= 4 && &header[..4] == b"\xed\xab\xee\xdb") || lower.ends_with(".rpm") {
+        return Some(EasiError::DistroPackage {
+            kind: "Fedora/RHEL (.rpm)",
+            command: format!("sudo dnf install ./{fname}"),
+        });
+    }
+    if lower.ends_with(".flatpak") || lower.ends_with(".flatpakref") {
+        return Some(EasiError::DistroPackage {
+            kind: "Flatpak",
+            command: format!("flatpak install {fname}"),
+        });
+    }
+    if lower.ends_with(".snap") {
+        return Some(EasiError::DistroPackage {
+            kind: "Snap",
+            command: format!("sudo snap install --dangerous {fname}"),
+        });
+    }
+    None
 }
 
 /// Metadata collected for one entry during read-only inspection (no disk extraction).
@@ -977,5 +1046,28 @@ mod tests {
         for (name, bytes, expected) in cases {
             assert_eq!(detect_format(bytes), *expected, "case: {name}");
         }
+
+        assert!(matches!(
+            detect_friendly_unsupported(Path::new("setup.exe"), b"MZ\x90\x00"),
+            Some(EasiError::WrongPlatform {
+                platform: "Windows",
+                ..
+            })
+        ));
+        assert!(matches!(
+            detect_friendly_unsupported(Path::new("App.dmg"), b"koly"),
+            Some(EasiError::WrongPlatform {
+                platform: "macOS",
+                ..
+            })
+        ));
+        assert!(matches!(
+            detect_friendly_unsupported(Path::new("foo.deb"), b"!<arch>\n"),
+            Some(EasiError::DistroPackage { .. })
+        ));
+        assert!(matches!(
+            detect_friendly_unsupported(Path::new("foo.rpm"), b"\xed\xab\xee\xdb"),
+            Some(EasiError::DistroPackage { .. })
+        ));
     }
 }

@@ -331,6 +331,16 @@ pub fn build_trust_summary(
         ));
     }
 
+    if format == Format::BareElf {
+        let missing = crate::install::missing_shared_libs(path);
+        if !missing.is_empty() {
+            warnings.push(format!(
+                "Missing shared libraries: {} (app may fail to launch until installed)",
+                missing.join(", ")
+            ));
+        }
+    }
+
     for entry in &contents.entries {
         if has_path_escape(&entry.path) {
             return Err(EasiError::PathEscape(entry.path.clone()));

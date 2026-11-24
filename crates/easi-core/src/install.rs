@@ -121,6 +121,9 @@ where
 
     let safe_dir_name = sanitize_dir_name(&plan.name);
     let app_dir = roots.applications_dir.join(&safe_dir_name);
+    if is_path_on_noexec_mount(&roots.applications_dir) {
+        return Err(EasiError::NoExecMount(roots.applications_dir.clone()));
+    }
     if app_dir.exists() && old_manifest.is_none() {
         return Err(EasiError::UnmanagedOverwrite(app_dir));
     }
@@ -512,6 +515,68 @@ pub fn distro_install_cmd(pkg_kind: &str) -> String {
         "java" => "Install a Java runtime (OpenJDK JRE) using your distro's package manager".into(),
         _ => String::new(),
     }
+}
+
+/// Check whether `path` resides on a `noexec` mount by inspecting `/proc/self/mounts`.
+pub fn is_path_on_noexec_mount(path: &Path) -> bool {
+    let Ok(mounts) = fs::read_to_string("/proc/self/mounts") else {
+        return false;
+    };
+    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    parse_noexec_from_mounts(&mounts, &target)
+}
+
+pub fn parse_noexec_from_mounts(mounts: &str, target: &Path) -> bool {
+    let target_str = target.to_string_lossy();
+    let mut best_len = 0usize;
+    let mut best_noexec = false;
+
+    for line in mounts.lines() {
+        let mut parts = line.split_whitespace();
+        let _dev = parts.next();
+        let Some(mount_point) = parts.next() else {
+            continue;
+        };
+        let _fs = parts.next();
+        let Some(opts) = parts.next() else {
+            continue;
+        };
+        let matches = mount_point == "/"
+            || target_str == mount_point
+            || target_str.starts_with(&format!("{mount_point}/"));
+        if matches && mount_point.len() >= best_len {
+            best_len = mount_point.len();
+            best_noexec = opts.split(',').any(|o| o == "noexec");
+        }
+    }
+    best_noexec
+}
+
+/// Safely list missing shared libraries for an ELF binary using the system dynamic linker
+/// (`--list`), never executing the untrusted binary's own `PT_INTERP`.
+pub fn missing_shared_libs(elf_path: &Path) -> Vec<String> {
+    const LOADERS: &[&str] = &[
+        "/lib64/ld-linux-x86-64.so.2",
+        "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+        "/lib/ld-linux-aarch64.so.1",
+        "/usr/lib/ld-linux-x86-64.so.2",
+    ];
+    let Some(loader) = LOADERS.iter().find(|p| Path::new(p).exists()) else {
+        return vec![];
+    };
+    let Ok(out) = Command::new(loader).args(["--list"]).arg(elf_path).output() else {
+        return vec![];
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut missing = Vec::new();
+    for line in stdout.lines() {
+        if line.contains("=> not found")
+            && let Some(lib) = line.split_whitespace().next()
+        {
+            missing.push(lib.to_string());
+        }
+    }
+    missing
 }
 
 /// Fail loudly with an actionable terminal command if the host lacks required runtime
@@ -1177,5 +1242,22 @@ mod tests {
         assert!(!bin_file.exists());
         assert!(roots.bin_dir.join("coolapp").symlink_metadata().is_err());
         assert!(list_manifests(&roots).expect("list").is_empty());
+    }
+
+    #[test]
+    fn parses_noexec_mount_points_accurately() {
+        let mounts = "\
+/dev/sda1 / ext4 rw,relatime 0 0\n\
+/dev/sda2 /home ext4 rw,nosuid,nodev,noexec 0 0\n\
+/dev/sda3 /home/user/Applications ext4 rw,relatime 0 0\n";
+        assert!(!parse_noexec_from_mounts(mounts, Path::new("/opt/app")));
+        assert!(parse_noexec_from_mounts(
+            mounts,
+            Path::new("/home/other/Applications")
+        ));
+        assert!(!parse_noexec_from_mounts(
+            mounts,
+            Path::new("/home/user/Applications/Foo")
+        ));
     }
 }

@@ -123,6 +123,7 @@ Every arrow is a row in the reducer match. Every unlisted `(state, action)` pair
 - [ ] Launch button, "Open Folder", and search/filter (`All` / `GUI` / `CLI`) in the GUI App Manager
 - [x] `StartupWMClass` learning (`easi learn-wmclass <app> [class]` with active window `xprop` probe to prevent duplicate dock/taskbar icons)
 - [x] Distro/arch awareness: ELF arch-mismatch warning (Asahi/ARM64), loud fail with install command for missing runtime deps (`gcompat` on musl/Alpine, `appimage-run`/`nix-ld` on NixOS, `java` for `.jar`), SELinux `restorecon` (Fedora/RHEL), and Pantheon/Budgie/LXQt/Niri/River/i3/bspwm DE quirks
+- [x] Suggestive failures & warnings: Windows/macOS package detection (`.exe`/`.msi`/`.dmg`), friendly distro-package redirects (`.deb`/`.rpm`/`.flatpak`/`.snap`), safe `ld-linux --list` missing shared library warnings, and `/proc/self/mounts` `noexec` mount detection
 - [ ] Portable app-list backup (`easi export` / `easi import`) to reinstall upstream-tracked apps on a new Linux machine or fresh SteamOS/CachyOS install
 
 ## Open questions
