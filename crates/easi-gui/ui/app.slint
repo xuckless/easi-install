@@ -150,6 +150,10 @@ export component AppWindow inherits Window {
     in-out property <bool> sort-by-size: false;
     in property <string> easi-update-version: "";
     in property <string> updating-app-id: "";
+    in property <bool> checking-updates: false;
+    in property <bool> scanning-apps: false;
+    in property <string> adopting-app-id: ""; // "" | "__all__" | app-id
+    in property <bool> busy-picker: false;
     in property <string> self-update-state: "idle"; // "idle" | "updating" | "updated" | "up_to_date" | "failed"
     in property <string> self-update-message: "";
     in-out property <bool> auto-check-updates: true;
@@ -385,8 +389,9 @@ export component AppWindow inherits Window {
                                 HorizontalLayout {
                                     spacing: Theme.s2;
                                     EButton {
-                                        text: "Install Package…";
+                                        text: root.busy-picker ? "Opening Picker…" : "Install Package…";
                                         kind: "primary";
+                                        enabled: !root.busy-picker;
                                         clicked => { root.browse-package(); }
                                     }
                                     EField {
@@ -423,13 +428,15 @@ export component AppWindow inherits Window {
                                     horizontal-stretch: 1;
                                 }
                                 EButton {
-                                    text: "Refresh";
+                                    text: root.scanning-apps ? "Scanning…" : "Refresh";
                                     small: true;
+                                    enabled: !root.scanning-apps;
                                     clicked => { root.refresh-apps(); }
                                 }
                                 EButton {
-                                    text: "Add Existing…";
+                                    text: root.busy-picker ? "Opening…" : "Add Existing…";
                                     small: true;
+                                    enabled: !root.busy-picker && root.adopting-app-id == "";
                                     clicked => { root.add-existing-app-folder(); }
                                 }
                                 EButton {
@@ -442,10 +449,24 @@ export component AppWindow inherits Window {
                                     }
                                 }
                                 EButton {
-                                    text: "Check Updates";
+                                    text: root.checking-updates ? "Checking…" : "Check Updates";
                                     small: true;
-                                    enabled: root.installed-apps.length > 0;
+                                    enabled: root.installed-apps.length > 0 && !root.checking-updates;
                                     clicked => { root.check-app-updates(); }
+                                }
+                            }
+
+                            if root.checking-updates || root.adopting-app-id == "__all__": VerticalLayout {
+                                spacing: Theme.s1;
+                                Text {
+                                    text: root.adopting-app-id == "__all__"
+                                        ? "Adopting and repairing detected apps…"
+                                        : "Checking upstream releases for installed apps…";
+                                    font-size: Theme.font-caption;
+                                    color: Theme.ink-2;
+                                }
+                                EProgress {
+                                    indeterminate: true;
                                 }
                             }
 
@@ -628,9 +649,10 @@ export component AppWindow inherits Window {
                                             VerticalLayout {
                                                 alignment: center;
                                                 EButton {
-                                                    text: "Manage All";
+                                                    text: root.adopting-app-id == "__all__" ? "Managing All…" : "Manage All";
                                                     kind: "primary";
                                                     small: true;
+                                                    enabled: root.adopting-app-id == "";
                                                     clicked => { root.adopt-all-apps(); }
                                                 }
                                             }
@@ -696,8 +718,9 @@ export component AppWindow inherits Window {
                                                         VerticalLayout {
                                                             alignment: center;
                                                             EButton {
-                                                                text: "Manage";
+                                                                text: root.adopting-app-id == d.app-id ? "Managing…" : "Manage";
                                                                 small: true;
+                                                                enabled: root.adopting-app-id == "";
                                                                 clicked => { root.adopt-app(d.app-id); }
                                                             }
                                                         }

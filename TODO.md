@@ -130,6 +130,7 @@ Every arrow is a row in the reducer match. Every unlisted `(state, action)` pair
 - [x] Universal update source discovery & linking: auto-detect Electron-builder `app-update.yml` (GitHub & generic CDN YAML), JetBrains `product-info.json` CDN API, Firefox/Gecko `application.ini`, `package.json`, GitLab/Codeberg releases, and direct CDN/proxy HTTP redirect URLs (`easi set-source` + App Info Update Source editor)
 - [x] Switch Slint GUI from FemtoVG to Skia renderer (`renderer-skia` + FreeType hinting) to fix wiggly/uneven Linux text antialiasing, plus single-instance Unix socket handoff (prevents duplicate windows when opened twice)
 - [x] Real-world discovery & polish: scan `~/.local/bin/` user binaries/AppImages without dir-collision (`helium`, `agy`, `claude`, `uv`, `zig`), auto-heal `easi.svg` + `easi.desktop`, render real app icons in the Apps list, constant compact row heights, per-app Update progress bar, Firefox/Zen `pingsender` penalty, and "Move to ~/Applications" organizer
+- [x] Explicit UI busy-state locks on all async buttons (`Check Updates`, `Refresh`, `Manage`/`Manage All`, `Install Package…`/`Add Existing…`) plus human-friendly `InstallStep` progress labels
 - [ ] Portable app-list backup (`easi export` / `easi import`) to reinstall upstream-tracked apps on a new Linux machine or fresh SteamOS/CachyOS install
 
 ## Open questions

@@ -96,6 +96,12 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         let s = Arc::clone(&store);
         let r = Arc::clone(&runner);
         window.on_browse_package(move || {
+            if let Some(win) = w.upgrade() {
+                if win.get_busy_picker() {
+                    return;
+                }
+                win.set_busy_picker(true);
+            }
             let w = w.clone();
             let s = Arc::clone(&s);
             let r = Arc::clone(&r);
@@ -116,11 +122,15 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                         dialog = dialog.set_directory(dl);
                     }
                 }
-                if let Some(path) = dialog.pick_file() {
-                    let _ = slint::invoke_from_event_loop(move || {
+                let picked = dialog.pick_file();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(win) = w.upgrade() {
+                        win.set_busy_picker(false);
+                    }
+                    if let Some(path) = picked {
                         dispatch_action(&w, &s, &r, Action::OpenPath(path));
-                    });
-                }
+                    }
+                });
             });
         });
     }
@@ -156,6 +166,11 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         let s = Arc::clone(&store);
         let r = Arc::clone(&runner);
         window.on_refresh_apps(move || {
+            if let Some(win) = w.upgrade()
+                && win.get_scanning_apps()
+            {
+                return;
+            }
             dispatch_action(&w, &s, &r, Action::LoadInstalled);
             refresh_detected_async(&w, &r.roots);
         });
@@ -165,6 +180,12 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         let s = Arc::clone(&store);
         let r = Arc::clone(&runner);
         window.on_add_existing_app_folder(move || {
+            if let Some(win) = w.upgrade() {
+                if win.get_busy_picker() || !win.get_adopting_app_id().is_empty() {
+                    return;
+                }
+                win.set_busy_picker(true);
+            }
             let w = w.clone();
             let s = Arc::clone(&s);
             let r = Arc::clone(&r);
@@ -176,11 +197,21 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                 } else if r.roots.home_dir.is_dir() {
                     dialog = dialog.set_directory(&r.roots.home_dir);
                 }
-                if let Some(folder) = dialog.pick_folder() {
+                let picked = dialog.pick_folder();
+                if let Some(folder) = picked {
                     let _ = easi_core::adopt::adopt_path(&r.roots, &folder, true);
                     let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(win) = w.upgrade() {
+                            win.set_busy_picker(false);
+                        }
                         dispatch_action(&w, &s, &r, Action::LoadInstalled);
                         refresh_detected_async(&w, &r.roots);
+                    });
+                } else {
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(win) = w.upgrade() {
+                            win.set_busy_picker(false);
+                        }
                     });
                 }
             });
@@ -191,16 +222,25 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         let s = Arc::clone(&store);
         let r = Arc::clone(&runner);
         window.on_adopt_app(move |app_id| {
+            let id: String = app_id.into();
+            if let Some(win) = w.upgrade() {
+                if !win.get_adopting_app_id().is_empty() {
+                    return;
+                }
+                win.set_adopting_app_id(id.clone().into());
+            }
             let w = w.clone();
             let s = Arc::clone(&s);
             let r = Arc::clone(&r);
-            let id: String = app_id.into();
             std::thread::spawn(move || {
                 let discovered = easi_core::adopt::scan_unmanaged_apps(&r.roots);
                 if let Some(app) = discovered.iter().find(|a| a.app_id == id) {
                     let _ = easi_core::adopt::adopt_app(&r.roots, app, true);
                 }
                 let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(win) = w.upgrade() {
+                        win.set_adopting_app_id("".into());
+                    }
                     dispatch_action(&w, &s, &r, Action::LoadInstalled);
                     refresh_detected_async(&w, &r.roots);
                 });
@@ -212,12 +252,21 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         let s = Arc::clone(&store);
         let r = Arc::clone(&runner);
         window.on_adopt_all_apps(move || {
+            if let Some(win) = w.upgrade() {
+                if !win.get_adopting_app_id().is_empty() {
+                    return;
+                }
+                win.set_adopting_app_id("__all__".into());
+            }
             let w = w.clone();
             let s = Arc::clone(&s);
             let r = Arc::clone(&r);
             std::thread::spawn(move || {
                 let _ = easi_core::adopt::adopt_all(&r.roots, true);
                 let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(win) = w.upgrade() {
+                        win.set_adopting_app_id("".into());
+                    }
                     dispatch_action(&w, &s, &r, Action::LoadInstalled);
                     refresh_detected_async(&w, &r.roots);
                 });
@@ -552,6 +601,12 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         let w = window.as_weak();
         let r = Arc::clone(&runner);
         window.on_check_app_updates(move || {
+            if let Some(win) = w.upgrade() {
+                if win.get_checking_updates() {
+                    return;
+                }
+                win.set_checking_updates(true);
+            }
             let w = w.clone();
             let roots_bg = r.roots.clone();
             std::thread::spawn(move || {
@@ -613,6 +668,7 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                             })
                             .collect();
                         win.set_installed_apps(ModelRc::new(VecModel::from(rows)));
+                        win.set_checking_updates(false);
                     }
                 });
             });
@@ -748,6 +804,9 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
 }
 
 fn refresh_detected_async(weak: &Weak<ui::AppWindow>, roots: &InstallRoots) {
+    if let Some(win) = weak.upgrade() {
+        win.set_scanning_apps(true);
+    }
     let w = weak.clone();
     let roots_bg = roots.clone();
     std::thread::spawn(move || {
@@ -776,6 +835,7 @@ fn refresh_detected_async(weak: &Weak<ui::AppWindow>, roots: &InstallRoots) {
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(win) = w.upgrade() {
                 win.set_detected_apps(ModelRc::new(VecModel::from(rows)));
+                win.set_scanning_apps(false);
             }
         });
     });
@@ -1048,7 +1108,14 @@ fn project_state(win: &ui::AppWindow, state: &State) {
         },
         State::Installing { step, progress, .. } => {
             set_screen_with_dir(win, "installing");
-            win.set_status_text(format!("{step:?}…").into());
+            let label = match step {
+                easi_core::InstallStep::Preparing => "Preparing installation…",
+                easi_core::InstallStep::Extracting => "Extracting package files…",
+                easi_core::InstallStep::Wiring => "Installing launcher, icon & CLI link…",
+                easi_core::InstallStep::RefreshingDesktop => "Refreshing desktop & icon caches…",
+                easi_core::InstallStep::SavingManifest => "Saving installation manifest…",
+            };
+            win.set_status_text(label.into());
             win.set_progress(f32::from(*progress) / 100.0);
         }
         State::Cancelling { .. } => {
