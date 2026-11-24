@@ -186,7 +186,7 @@ pub fn detect_friendly_unsupported(path: &Path, header: &[u8]) -> Option<EasiErr
     {
         return Some(EasiError::WrongPlatform {
             platform: "Windows",
-            hint: "Look for a Linux (.AppImage, .tar.gz, .tar.xz, or .zip) download instead.",
+            hint: "Look for a Linux (.AppImage, .tar.gz, .tar.xz, or .zip) download instead — or run the Windows version with Wine / Bottles / Proton.",
         });
     }
 

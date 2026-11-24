@@ -14,7 +14,8 @@ use crate::roots::InstallRoots;
 
 pub const EASI_DESKTOP_ID: &str = "easi.desktop";
 
-/// All MIME types easi handles by default after `easi --setup`.
+/// MIME types easi claims as default handler on `easi --setup` (previous defaults are saved
+/// so non-app archives hand off silently).
 pub const SUPPORTED_MIMES: &[&str] = &[
     "application/x-iso9660-appimage",
     "application/vnd.appimage",
@@ -28,8 +29,12 @@ pub const SUPPORTED_MIMES: &[&str] = &[
     "application/zip",
     "application/x-7z-compressed",
     "application/java-archive",
-    "application/x-shellscript",
 ];
+
+/// MIME types advertised in `easi.desktop` for "Right-Click -> Open With -> easi" ONLY,
+/// never hijacked as the default double-click handler (so `.sh` files still open in the user's
+/// text editor by default).
+pub const OPEN_WITH_ONLY_MIMES: &[&str] = &["application/x-shellscript"];
 
 const APPIMAGE_MIME_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
@@ -72,7 +77,12 @@ pub fn save_handlers(roots: &InstallRoots, handlers: &SavedHandlers) -> Result<P
 pub fn run_setup(roots: &InstallRoots, easi_bin: &Path) -> Result<SavedHandlers, EasiError> {
     fs::create_dir_all(&roots.desktop_dir)?;
     let desktop_path = roots.desktop_dir.join(EASI_DESKTOP_ID);
-    let mimes = SUPPORTED_MIMES.join(";");
+    let mimes = SUPPORTED_MIMES
+        .iter()
+        .chain(OPEN_WITH_ONLY_MIMES.iter())
+        .copied()
+        .collect::<Vec<_>>()
+        .join(";");
     let exec_str = easi_bin.to_string_lossy();
     let exec_quoted = if exec_str.contains(' ') {
         format!("\"{exec_str}\"")
