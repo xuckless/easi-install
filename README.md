@@ -1,4 +1,18 @@
-# easi
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/readme-header-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/readme-header-light.svg">
+    <img alt="Easi Install" src="assets/readme-header-light.svg" width="100%">
+  </picture>
+</p>
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/flow-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/flow-light.svg">
+    <img alt="How easi works" src="assets/flow-light.svg" width="100%">
+  </picture>
+</p>
 
 Install *downloaded* Linux apps as easily as macOS drag-to-Applications — with clean uninstall, pre-install permissions, and zero root required.
 
@@ -22,6 +36,10 @@ Installs `easi` into `~/.local/bin/easi` (SHA-256 verified) and runs `easi --set
 easi install <path>                # interactive install (Y/N prompts)
 easi install -y <path>             # non-interactive / scriptable
 easi list                          # list installed apps (reconciles self-updated apps)
+easi scan                          # discover existing unmanaged user apps in $HOME
+easi adopt <app|path> [--all]      # adopt existing app(s) and repair icons/launchers
+easi repair <app>                  # repair missing icon, .desktop, StartupWMClass, or CLI link
+easi forget <app>                  # stop managing an app without deleting its files
 easi uninstall <app>               # clean uninstall (replays manifest in reverse)
 easi check-updates                 # check upstream releases (AppImage zsync / GitHub Releases)
 easi self-update                   # update easi from GitHub Releases (SHA-256 verified)

@@ -1,5 +1,6 @@
 //! easi-core: the single store, pure reducer, declarative tables, and effect runner.
 
+pub mod adopt;
 pub mod appid;
 pub mod desktop;
 pub mod detect;

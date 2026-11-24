@@ -17,6 +17,10 @@ const CLI_SUBCOMMANDS: &[&str] = &[
     "self-update",
     "self-uninstall",
     "learn-wmclass",
+    "scan",
+    "adopt",
+    "repair",
+    "forget",
     "config",
     "help",
 ];

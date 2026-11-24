@@ -67,6 +67,22 @@ pub enum Command {
         /// Explicit WM_CLASS (if omitted, probes the active X11/XWayland window via xprop).
         wm_class: Option<String>,
     },
+    /// Scan $HOME for existing non-package-manager apps that easi can adopt and repair.
+    Scan,
+    /// Adopt an existing unmanaged app (or --all) into easi and repair missing icons/launchers.
+    Adopt {
+        app: Option<String>,
+        /// Adopt every discovered unmanaged app in $HOME.
+        #[arg(long)]
+        all: bool,
+        /// Adopt without modifying icons, .desktop files, or CLI symlinks.
+        #[arg(long)]
+        no_fix: bool,
+    },
+    /// Repair missing icon, .desktop launcher, StartupWMClass, or CLI symlink for a managed app.
+    Repair { app: String },
+    /// Stop managing an app in easi without deleting any of its files on disk.
+    Forget { app: String },
     /// Update easi itself.
     SelfUpdate,
     /// Cleanly uninstall easi itself and restore previous MIME handlers (keeps installed apps).
@@ -119,6 +135,12 @@ pub fn run(cli: Cli) -> ExitCode {
         Some(Command::LearnWmclass { app, wm_class }) => {
             run_learn_wmclass_cmd(&roots, &app, wm_class.as_deref())
         }
+        Some(Command::Scan) => run_scan_cmd(&roots),
+        Some(Command::Adopt { app, all, no_fix }) => {
+            run_adopt_cmd(&roots, app.as_deref(), all, !no_fix)
+        }
+        Some(Command::Repair { app }) => run_repair_cmd(&roots, &app),
+        Some(Command::Forget { app }) => run_forget_cmd(&roots, &app),
         Some(Command::SelfUpdate) => run_self_update_cmd(),
         Some(Command::SelfUninstall) => run_self_uninstall_cmd(&roots, cli.yes),
         Some(Command::Config { auto_update }) => run_config_cmd(&roots, auto_update),
@@ -428,6 +450,147 @@ fn run_learn_wmclass_cmd(roots: &InstallRoots, app: &str, wm_class: Option<&str>
     match set_startup_wm_class(roots, app, &class) {
         Ok(desktop) => {
             println!("Set StartupWMClass={class} in {}", desktop.display());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("easi: {}", format_user_error(&e));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_scan_cmd(roots: &InstallRoots) -> ExitCode {
+    let discovered = easi_core::adopt::scan_unmanaged_apps(roots);
+    if discovered.is_empty() {
+        println!("No unmanaged user apps detected in $HOME.");
+        return ExitCode::SUCCESS;
+    }
+    println!(
+        "Detected {} unmanaged user app(s) (run `easi adopt <name>` or `easi adopt --all`):\n",
+        discovered.len()
+    );
+    for app in &discovered {
+        let ver = app.version.as_deref().unwrap_or("-");
+        let kind = match app.kind {
+            AppKind::Gui => "GUI",
+            AppKind::Terminal => "CLI",
+        };
+        let size = easi_core::manifest::format_human_bytes(app.size_bytes);
+        let issues = if app.issues.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "  [can fix: {}]",
+                app.issues
+                    .iter()
+                    .map(|i| i.label())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        println!(
+            "{:<24} {:<10} [{}]  {:>10}  {}{}",
+            app.name, ver, kind, size, app.app_id, issues
+        );
+    }
+    ExitCode::SUCCESS
+}
+
+fn run_adopt_cmd(roots: &InstallRoots, app: Option<&str>, all: bool, repair: bool) -> ExitCode {
+    if all {
+        return match easi_core::adopt::adopt_all(roots, repair) {
+            Ok(list) if list.is_empty() => {
+                println!("No unmanaged user apps to adopt.");
+                ExitCode::SUCCESS
+            }
+            Ok(list) => {
+                for m in &list {
+                    println!("Adopted {} ({}).", m.name, m.app_id);
+                }
+                println!("\nAdopted {} app(s).", list.len());
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("easi: {}", format_user_error(&e));
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    let Some(query) = app else {
+        eprintln!(
+            "easi: specify an app name/id, folder path, or pass `--all` (run `easi scan` first)"
+        );
+        return ExitCode::FAILURE;
+    };
+    let candidate_path = PathBuf::from(query);
+    if candidate_path.exists() {
+        return match easi_core::adopt::adopt_path(roots, &candidate_path, repair) {
+            Ok(m) => {
+                println!("Adopted {} ({}).", m.name, m.app_id);
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("easi: {}", format_user_error(&e));
+                ExitCode::FAILURE
+            }
+        };
+    }
+    let q = query.to_ascii_lowercase();
+    let discovered = easi_core::adopt::scan_unmanaged_apps(roots);
+    let Some(target) = discovered
+        .iter()
+        .find(|a| a.app_id.eq_ignore_ascii_case(query) || a.name.eq_ignore_ascii_case(query))
+        .or_else(|| {
+            discovered.iter().find(|a| {
+                a.app_id.to_ascii_lowercase().contains(&q)
+                    || a.name.to_ascii_lowercase().contains(&q)
+            })
+        })
+    else {
+        eprintln!("easi: no unmanaged app matching '{query}' (run `easi scan` to see candidates)");
+        return ExitCode::FAILURE;
+    };
+
+    match easi_core::adopt::adopt_app(roots, target, repair) {
+        Ok(m) => {
+            println!("Adopted {} ({}).", m.name, m.app_id);
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("easi: {}", format_user_error(&e));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_repair_cmd(roots: &InstallRoots, app: &str) -> ExitCode {
+    match easi_core::adopt::repair_app(roots, app) {
+        Ok(fixes) if fixes.is_empty() => {
+            println!("No issues found for '{app}' — icon and launcher look good.");
+            ExitCode::SUCCESS
+        }
+        Ok(fixes) => {
+            println!("Repaired '{app}':");
+            for f in fixes {
+                println!("  - {f}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("easi: {}", format_user_error(&e));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_forget_cmd(roots: &InstallRoots, app: &str) -> ExitCode {
+    match easi_core::adopt::forget_app(roots, app) {
+        Ok(m) => {
+            println!(
+                "Stopped managing {} ({}). App files on disk were not modified.",
+                m.name, m.app_id
+            );
             ExitCode::SUCCESS
         }
         Err(e) => {

@@ -1,0 +1,80 @@
+// Easi Install tokens for crates/easi-gui/ui. Mirrors src/easi-install/tokens.ts one-to-one.
+// Colours follow the desktop's light/dark setting through Palette.color-scheme.
+import { Palette } from "std-widgets.slint";
+
+// @spec tokens
+export global Theme {
+    out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+
+    // colour: solid tokens only, opacity is reserved for crossfades
+    out property <color> ground:       dark ? #131417 : #F3F4F6;
+    out property <color> surface:      dark ? #1C1D21 : #FFFFFF;
+    out property <color> surface-2:    dark ? #26282D : #E9EAEE;
+    out property <color> surface-3:    dark ? #31333A : #DDDFE4;
+    out property <color> ink:          dark ? #ECEDF0 : #16171B;
+    out property <color> ink-2:        dark ? #A3A6AF : #5B5E68;
+    out property <color> ink-3:        dark ? #6F727C : #8C8F99;
+    out property <color> accent:       dark ? #5E62F5 : #4A4DE6;
+    out property <color> accent-hover: dark ? #6C70FF : #3F42D6;
+    out property <color> accent-text:  dark ? #9A9CFF : #3D40D4;
+    out property <color> accent-soft:  dark ? #23244A : #E8E8FC;
+    out property <color> on-accent:    #FFFFFF;
+    out property <color> success:      dark ? #4FC383 : #17824A;
+    out property <color> success-soft: dark ? #16301F : #E3F3EA;
+    out property <color> danger:       dark ? #D8433C : #C62F2F;
+    out property <color> danger-text:  dark ? #F0726B : #B42828;
+    out property <color> danger-soft:  dark ? #351C1B : #FBEAEA;
+
+    // type: Geist, Geist Mono for hashes, paths, ids and commands
+    out property <string> font-ui: "Geist";
+    out property <string> font-mono: "Geist Mono";
+    out property <length> font-title: 20px;
+    out property <length> font-heading: 14px;
+    out property <length> font-body: 13px;
+    out property <length> font-caption: 12px;
+    out property <length> font-micro: 11px;
+
+    // space and shape
+    out property <length> s1: 4px;
+    out property <length> s2: 8px;
+    out property <length> s3: 12px;
+    out property <length> s4: 16px;
+    out property <length> s6: 24px;
+    out property <length> pad-window: 24px;
+    out property <length> radius-control: 8px;
+    out property <length> radius-section: 12px;
+    out property <length> radius-tile: 14px;
+    out property <length> control-height: 32px;
+    out property <length> control-height-small: 28px;
+
+    // motion: every animate block in the app uses these
+    out property <easing> ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+    out property <easing> ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+    out property <easing> ease-exit: cubic-bezier(0.55, 0, 1, 0.45);
+    out property <duration> enter: 240ms;
+    out property <duration> exit: 190ms;
+    out property <duration> settle: 40ms;
+    out property <duration> stagger: 30ms;
+    out property <duration> press-in: 120ms;
+    out property <duration> press-out: 160ms;
+    out property <duration> hover: 150ms;
+    out property <duration> segment: 220ms;
+    out property <duration> switch: 200ms;
+    out property <duration> reveal: 200ms;
+    out property <duration> reveal-out: 160ms;
+    out property <duration> check: 160ms;
+    out property <duration> progress: 240ms;
+    out property <duration> indeterminate: 1400ms;
+    out property <duration> lift: 150ms;
+    out property <duration> return: 320ms;
+    out property <duration> drop: 360ms;
+    out property <duration> fade-into-folder: 140ms;
+    out property <duration> pulse-up: 120ms;
+    out property <duration> pulse-down: 200ms;
+    out property <length> shift: 8px;
+    out property <length> hop: 28px;
+    out property <float> press: 0.97;
+    out property <float> lift-scale: 1.04;
+    out property <float> pulse: 1.05;
+}
+// @end

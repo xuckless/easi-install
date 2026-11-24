@@ -1,6 +1,20 @@
 // Layout and state bindings only. No business logic: callbacks dispatch Actions to Rust store.
-// Clean default-style polish (consistent spacing, borders, typography, Switch & CheckBox).
-import { Button, CheckBox, HorizontalBox, LineEdit, Palette, ProgressIndicator, ScrollView, Switch, VerticalBox } from "std-widgets.slint";
+// Easi Install v2.0.0 — Functional Calm design system (tokens.slint + components.slint + Drop brand).
+import { ScrollView } from "std-widgets.slint";
+import {
+    Theme,
+    EButton,
+    ESwitch,
+    ECheck,
+    ESegmented,
+    Scene,
+    Settle,
+    StaggerRow,
+    EProgress,
+    ConfirmButton,
+    SuccessMark,
+    DragStage,
+} from "components.slint";
 
 export struct InstalledRow {
     app-id: string,
@@ -12,50 +26,122 @@ export struct InstalledRow {
     has-update: bool,
 }
 
-global Theme {
-    out property <length> pad-outer: 20px;
-    out property <length> pad-card: 12px;
-    out property <length> gap-lg: 14px;
-    out property <length> gap-md: 10px;
-    out property <length> gap-sm: 6px;
-    out property <length> radius-card: 10px;
-    out property <length> radius-sm: 6px;
-
-    out property <length> font-title: 19px;
-    out property <length> font-section: 14px;
-    out property <length> font-body: 13px;
-    out property <length> font-caption: 11px;
-
-    out property <color> border-subtle: #88888838;
-    out property <color> border-strong: #88888866;
-    out property <color> surface-tint: #88888812;
-    out property <color> accent: #3584e4;
-    out property <color> accent-tint: #3584e418;
-    out property <color> danger: #c01c28;
-    out property <color> danger-tint: #c01c2814;
-    out property <color> success: #26a269;
-    out property <color> muted-text: #888888;
+export struct DetectedRow {
+    app-id: string,
+    name: string,
+    version: string,
+    kind: string,
+    size-text: string,
+    issues-text: string,
 }
 
-component Card inherits Rectangle {
-    border-width: 1px;
-    border-color: Theme.border-subtle;
-    border-radius: Theme.radius-card;
-    background: Theme.surface-tint;
+// Solid surface panel (no borders; elevation comes from surface contrast on ground).
+component Panel inherits Rectangle {
+    border-radius: Theme.radius-section;
+    background: Theme.surface;
+}
+
+// Danger surface panel (solid danger-soft token, no borders).
+component DangerPanel inherits Rectangle {
+    border-radius: Theme.radius-section;
+    background: Theme.danger-soft;
+}
+
+// Text field with solid surface-2 fill and 2px accent focus ring (no idle border).
+component EField inherits Rectangle {
+    in-out property <string> text;
+    in property <string> placeholder;
+    in property <bool> mono: false;
+    callback edited(string);
+    callback accepted(string);
+
+    height: Theme.control-height;
+    border-radius: Theme.radius-control;
+    background: Theme.surface-2;
+    border-width: ti.has-focus ? 2px : 0px;
+    border-color: Theme.accent;
+    animate border-width { duration: Theme.hover; easing: Theme.ease-out; }
+
+    if root.text == "": Text {
+        x: 10px;
+        width: parent.width - 20px;
+        text: root.placeholder;
+        font-family: Theme.font-ui;
+        font-size: Theme.font-body;
+        color: Theme.ink-3;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    ti := TextInput {
+        x: 10px;
+        y: 0px;
+        width: parent.width - 20px;
+        height: parent.height;
+        text <=> root.text;
+        font-family: root.mono ? Theme.font-mono : Theme.font-ui;
+        font-size: root.mono ? Theme.font-caption : Theme.font-body;
+        color: Theme.ink;
+        vertical-alignment: center;
+        single-line: true;
+        edited => { root.edited(self.text); }
+        accepted => { root.accepted(self.text); }
+    }
+}
+
+// Small kind glyph (window for GUI, prompt for CLI) — replaces bordered kind pills.
+component KindGlyph inherits Rectangle {
+    in property <bool> is-cli: false;
+    width: 28px;
+    height: 28px;
+    border-radius: Theme.radius-control;
+    background: Theme.surface-2;
+
+    if !root.is-cli: Path {
+        x: 6px;
+        y: 6px;
+        width: 16px;
+        height: 16px;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: "M 2 3.5 C 2 2.7 2.7 2 3.5 2 L 12.5 2 C 13.3 2 14 2.7 14 3.5 L 14 12.5 C 14 13.3 13.3 14 12.5 14 L 3.5 14 C 2.7 14 2 13.3 2 12.5 Z M 2 5.5 L 14 5.5";
+        stroke: Theme.ink-2;
+        stroke-width: 1.4px;
+        fill: transparent;
+    }
+    if root.is-cli: Path {
+        x: 6px;
+        y: 6px;
+        width: 16px;
+        height: 16px;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: "M 3.5 5 L 7 8 L 3.5 11 M 8.5 11 L 12.5 11";
+        stroke: Theme.ink-2;
+        stroke-width: 1.5px;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+        fill: transparent;
+    }
 }
 
 export component AppWindow inherits Window {
     title: "easi";
+    icon: @image-url("logo-drop.svg");
     preferred-width: 660px;
-    preferred-height: 560px;
+    preferred-height: 580px;
     min-width: 540px;
     min-height: 460px;
+    background: Theme.ground;
+    default-font-family: Theme.font-ui;
 
     // Projected state from easi-core::State
     in property <string> screen: "idle";
+    in property <float> dir: 1;
     in-out property <string> manager-page: "apps"; // "apps" | "settings" | "app_info"
+    property <float> page-dir: 1;
     in property <string> easi-version: "";
     in property <[InstalledRow]> installed-apps: [];
+    in property <[DetectedRow]> detected-apps: [];
     in property <string> total-size-text: "";
     in-out property <string> search-query: "";
     in-out property <string> filter-kind: "all";
@@ -79,10 +165,14 @@ export component AppWindow inherits Window {
     in property <string> detail-data-size: "";
     in property <string> detail-cache-size: "";
     in property <string> detail-total-size: "";
+    in property <float> detail-app-ratio: 1.0;
+    in property <float> detail-data-ratio: 0.0;
+    in property <float> detail-cache-ratio: 0.0;
     in property <bool> detail-has-cache: false;
     in property <bool> detail-has-data: false;
     in property <image> detail-icon;
     in property <bool> detail-has-icon: false;
+    in property <bool> detail-adopted: false;
     in property <string> detail-feedback: "";
     in-out property <bool> detail-purge-checked: false;
     in-out property <bool> detail-confirm-clear-data: false;
@@ -122,15 +212,18 @@ export component AppWindow inherits Window {
     in-out property <string> wizard-name-input: "";
     in-out property <string> idle-path-input: "";
 
-    // Internal drag-visual state (DMG-style icon -> Applications folder)
-    property <length> drag-offset-x: 0px;
-    property <length> drag-offset-y: 0px;
-    property <bool> dragging: false;
+    property <bool> install-allowed: !root.has-script-warning || root.script-consent-checked;
 
     // Actions dispatched back to the Redux store
     callback browse-package();
     callback open-path(string);
     callback open-app-info(string);
+    callback refresh-apps();
+    callback add-existing-app-folder();
+    callback adopt-app(string);
+    callback adopt-all-apps();
+    callback repair-app(string);
+    callback forget-app(string);
     callback clear-app-cache(string);
     callback clear-app-data(string);
     callback uninstall-app(string, bool);
@@ -153,266 +246,649 @@ export component AppWindow inherits Window {
     callback back-to-manager();
     callback close-window();
 
-    VerticalBox {
-        padding: Theme.pad-outer;
-        spacing: Theme.gap-lg;
+    // =========================================================================
+    // SCENE 1: Idle — Standalone App Manager (Apps / App Info / Settings)
+    // =========================================================================
+    Scene {
+        width: 100%;
+        height: 100%;
+        active: root.screen == "idle";
+        dir: root.dir;
 
-        // --- Idle: Standalone App Manager (Apps / App Info / Settings pages) ---
-        if root.screen == "idle": VerticalBox {
-            spacing: Theme.gap-md;
-            padding: 0px;
+        VerticalLayout {
+            padding: Theme.pad-window;
+            spacing: Theme.s4;
 
-            // Top bar with page navigation
-            HorizontalBox {
-                padding: 0px;
-                spacing: Theme.gap-sm;
-                VerticalBox {
-                    padding: 0px;
-                    spacing: 2px;
+            // Top bar with Drop wordmark + segmented navigation
+            HorizontalLayout {
+                spacing: Theme.s3;
+                VerticalLayout {
+                    spacing: Theme.s1;
                     horizontal-stretch: 1;
-                    Text {
-                        text: "easi";
-                        font-size: Theme.font-title;
-                        font-weight: 700;
+                    HorizontalLayout {
+                        alignment: start;
+                        Image {
+                            source: Theme.dark ? @image-url("wordmark-dark.svg") : @image-url("wordmark-light.svg");
+                            height: 22px;
+                            image-fit: contain;
+                        }
                     }
                     Text {
                         text: "Install and manage downloaded Linux apps";
                         font-size: Theme.font-caption;
-                        color: Theme.muted-text;
+                        color: Theme.ink-2;
                     }
                 }
-                Button {
-                    text: "Apps";
-                    primary: root.manager-page == "apps" || root.manager-page == "app_info";
-                    clicked => {
-                        root.manager-page = "apps";
-                        root.confirm-self-uninstall = false;
-                    }
-                }
-                Button {
-                    text: "Settings";
-                    primary: root.manager-page == "settings";
-                    clicked => {
-                        root.manager-page = "settings";
+                ESegmented {
+                    labels: ["Apps", "Settings"];
+                    current: root.manager-page == "settings" ? 1 : 0;
+                    changed(i) => {
+                        root.page-dir = i == 1 ? 1 : -1;
+                        root.manager-page = i == 1 ? "settings" : "apps";
                         root.confirm-self-uninstall = false;
                     }
                 }
             }
 
-            // === PAGE 1: Apps ===
-            if root.manager-page == "apps": VerticalBox {
-                padding: 0px;
-                spacing: Theme.gap-md;
+            // Overlapping manager pages container
+            Rectangle {
                 vertical-stretch: 1;
 
-                if root.easi-update-version != "": Rectangle {
-                    border-width: 1px;
-                    border-color: Theme.accent;
-                    border-radius: Theme.radius-card;
-                    background: Theme.accent-tint;
-                    HorizontalBox {
-                        padding: Theme.pad-card;
-                        spacing: Theme.gap-md;
-                        Text {
-                            text: "easi " + root.easi-update-version + " is available";
-                            font-size: Theme.font-body;
-                            font-weight: 700;
-                            vertical-alignment: center;
-                            horizontal-stretch: 1;
-                        }
-                        Button {
-                            text: "Update Now";
-                            primary: true;
-                            clicked => { root.run-self-update(); }
-                        }
-                    }
-                }
+                // --- PAGE 1: Apps (Installed + Detected Apps) ---
+                Scene {
+                    width: 100%;
+                    height: 100%;
+                    active: root.manager-page == "apps";
+                    dir: root.page-dir;
 
-                // Install a package card
-                Card {
-                    VerticalBox {
-                        padding: Theme.pad-card;
-                        spacing: Theme.gap-sm;
-                        Text {
-                            text: "Install a Package";
-                            font-size: Theme.font-section;
-                            font-weight: 700;
-                        }
-                        Text {
-                            text: "Supports AppImage, .tar.*, .zip, .7z, .jar, bare ELF, and .run/.sh/.bin";
-                            font-size: Theme.font-caption;
-                            color: Theme.muted-text;
-                        }
-                        HorizontalBox {
-                            padding: 0px;
-                            spacing: Theme.gap-sm;
-                            Button {
-                                text: "Install Package…";
-                                primary: true;
-                                clicked => { root.browse-package(); }
-                            }
-                            LineEdit {
-                                text <=> root.idle-path-input;
-                                placeholder-text: "Or paste path to package…";
-                                horizontal-stretch: 1;
-                            }
-                            Button {
-                                text: "Open";
-                                enabled: root.idle-path-input != "";
-                                clicked => { root.open-path(root.idle-path-input); }
+                    VerticalLayout {
+                        spacing: Theme.s3;
+
+                        if root.easi-update-version != "": Rectangle {
+                            border-radius: Theme.radius-section;
+                            background: Theme.accent-soft;
+                            HorizontalLayout {
+                                padding: Theme.s3;
+                                spacing: Theme.s3;
+                                Text {
+                                    text: "easi " + root.easi-update-version + " is available";
+                                    font-size: Theme.font-heading;
+                                    font-weight: 600;
+                                    color: Theme.ink;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                }
+                                EButton {
+                                    text: "Update Now";
+                                    kind: "primary";
+                                    small: true;
+                                    clicked => { root.run-self-update(); }
+                                }
                             }
                         }
-                    }
-                }
 
-                // Installed apps section
-                VerticalBox {
-                    padding: 0px;
-                    spacing: Theme.gap-sm;
-                    vertical-stretch: 1;
-
-                    HorizontalBox {
-                        padding: 0px;
-                        spacing: Theme.gap-sm;
-                        Text {
-                            text: "Installed Apps (" + root.installed-apps.length + ")" + (root.total-size-text != "" ? "  •  " + root.total-size-text : "");
-                            font-size: Theme.font-section;
-                            font-weight: 700;
-                            vertical-alignment: center;
-                            horizontal-stretch: 1;
-                        }
-                        Button {
-                            text: root.sort-by-size ? "Sort: Largest" : "Sort: Name";
-                            enabled: root.installed-apps.length > 1;
-                            clicked => {
-                                root.sort-by-size = !root.sort-by-size;
-                                root.filter-changed();
-                            }
-                        }
-                        Button {
-                            text: "Check Updates";
-                            enabled: root.installed-apps.length > 0;
-                            clicked => { root.check-app-updates(); }
-                        }
-                    }
-
-                    HorizontalBox {
-                        padding: 0px;
-                        spacing: Theme.gap-sm;
-                        LineEdit {
-                            text <=> root.search-query;
-                            placeholder-text: "Filter installed apps…";
-                            horizontal-stretch: 1;
-                            edited => { root.filter-changed(); }
-                        }
-                        Button {
-                            text: "All";
-                            primary: root.filter-kind == "all";
-                            clicked => { root.filter-kind = "all"; root.filter-changed(); }
-                        }
-                        Button {
-                            text: "GUI";
-                            primary: root.filter-kind == "gui";
-                            clicked => { root.filter-kind = "gui"; root.filter-changed(); }
-                        }
-                        Button {
-                            text: "CLI";
-                            primary: root.filter-kind == "cli";
-                            clicked => { root.filter-kind = "cli"; root.filter-changed(); }
-                        }
-                    }
-
-                    if root.installed-apps.length == 0: Card {
-                        vertical-stretch: 1;
-                        VerticalBox {
-                            alignment: center;
-                            padding: Theme.pad-outer;
-                            spacing: Theme.gap-sm;
-                            Text {
-                                text: "No apps installed by easi yet";
-                                font-size: Theme.font-body;
-                                font-weight: 600;
-                                horizontal-alignment: center;
-                            }
-                            Text {
-                                text: "Click “Install Package…” above or double-click any downloaded package in your file manager.";
-                                font-size: Theme.font-caption;
-                                color: Theme.muted-text;
-                                horizontal-alignment: center;
-                                wrap: word-wrap;
-                            }
-                        }
-                    }
-
-                    if root.installed-apps.length > 0: ScrollView {
-                        vertical-stretch: 1;
-                        min-height: 180px;
-                        VerticalBox {
-                            padding: 2px;
-                            spacing: Theme.gap-sm;
-                            for app in root.installed-apps: Card {
-                                HorizontalBox {
-                                    padding: Theme.pad-card;
-                                    spacing: Theme.gap-md;
-                                    VerticalBox {
-                                        padding: 0px;
-                                        spacing: 3px;
+                        // Install a package panel
+                        Panel {
+                            VerticalLayout {
+                                padding: Theme.s4;
+                                spacing: Theme.s2;
+                                Text {
+                                    text: "Install a Package";
+                                    font-size: Theme.font-heading;
+                                    font-weight: 600;
+                                    color: Theme.ink;
+                                }
+                                Text {
+                                    text: "Supports AppImage, .tar.*, .zip, .7z, .jar, bare ELF, and .run/.sh/.bin";
+                                    font-size: Theme.font-caption;
+                                    color: Theme.ink-2;
+                                }
+                                HorizontalLayout {
+                                    spacing: Theme.s2;
+                                    EButton {
+                                        text: "Install Package…";
+                                        kind: "primary";
+                                        clicked => { root.browse-package(); }
+                                    }
+                                    EField {
+                                        text <=> root.idle-path-input;
+                                        placeholder: "Or paste path to package…";
+                                        mono: root.idle-path-input != "";
                                         horizontal-stretch: 1;
-                                        HorizontalBox {
-                                            padding: 0px;
-                                            spacing: Theme.gap-sm;
-                                            Text {
-                                                text: app.name + (app.version != "" ? "  v" + app.version : "");
-                                                font-size: Theme.font-body;
-                                                font-weight: 700;
-                                                vertical-alignment: center;
-                                            }
-                                            Rectangle {
-                                                border-width: 1px;
-                                                border-color: Theme.border-subtle;
-                                                border-radius: 4px;
-                                                background: Theme.surface-tint;
-                                                HorizontalBox {
-                                                    padding-left: 6px;
-                                                    padding-right: 6px;
-                                                    padding-top: 1px;
-                                                    padding-bottom: 1px;
-                                                    Text {
-                                                        text: app.kind;
-                                                        font-size: 10px;
-                                                        font-weight: 600;
-                                                        color: Theme.muted-text;
+                                        accepted(p) => {
+                                            if (p != "") { root.open-path(p); }
+                                        }
+                                    }
+                                    EButton {
+                                        text: "Open";
+                                        enabled: root.idle-path-input != "";
+                                        clicked => { root.open-path(root.idle-path-input); }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Apps list header & toolbar
+                        VerticalLayout {
+                            spacing: Theme.s2;
+                            vertical-stretch: 1;
+
+                            HorizontalLayout {
+                                spacing: Theme.s2;
+                                Text {
+                                    text: "Installed Apps (" + root.installed-apps.length + ")" + (root.total-size-text != "" ? "  ·  " + root.total-size-text : "");
+                                    font-size: Theme.font-heading;
+                                    font-weight: 600;
+                                    color: Theme.ink;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                }
+                                EButton {
+                                    text: "Refresh";
+                                    small: true;
+                                    clicked => { root.refresh-apps(); }
+                                }
+                                EButton {
+                                    text: "Add Existing…";
+                                    small: true;
+                                    clicked => { root.add-existing-app-folder(); }
+                                }
+                                EButton {
+                                    text: root.sort-by-size ? "Sort: Largest" : "Sort: Name";
+                                    small: true;
+                                    enabled: root.installed-apps.length > 1;
+                                    clicked => {
+                                        root.sort-by-size = !root.sort-by-size;
+                                        root.filter-changed();
+                                    }
+                                }
+                                EButton {
+                                    text: "Check Updates";
+                                    small: true;
+                                    enabled: root.installed-apps.length > 0;
+                                    clicked => { root.check-app-updates(); }
+                                }
+                            }
+
+                            HorizontalLayout {
+                                spacing: Theme.s2;
+                                EField {
+                                    text <=> root.search-query;
+                                    placeholder: "Filter installed apps…";
+                                    horizontal-stretch: 1;
+                                    edited => { root.filter-changed(); }
+                                }
+                                ESegmented {
+                                    small: true;
+                                    item-width: 52px;
+                                    labels: ["All", "GUI", "CLI"];
+                                    current: root.filter-kind == "gui" ? 1 : root.filter-kind == "cli" ? 2 : 0;
+                                    changed(i) => {
+                                        root.filter-kind = i == 1 ? "gui" : i == 2 ? "cli" : "all";
+                                        root.filter-changed();
+                                    }
+                                }
+                            }
+
+                            if root.installed-apps.length == 0 && root.detected-apps.length == 0: Panel {
+                                vertical-stretch: 1;
+                                VerticalLayout {
+                                    alignment: center;
+                                    padding: Theme.s6;
+                                    spacing: Theme.s1;
+                                    Text {
+                                        text: "No apps installed by easi yet";
+                                        font-size: Theme.font-heading;
+                                        font-weight: 600;
+                                        color: Theme.ink;
+                                        horizontal-alignment: center;
+                                    }
+                                    Text {
+                                        text: "Click “Install Package…” above, double-click any downloaded package, or click “Add Existing…” to adopt an app folder.";
+                                        font-size: Theme.font-caption;
+                                        color: Theme.ink-2;
+                                        horizontal-alignment: center;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                            }
+
+                            if root.installed-apps.length > 0 || root.detected-apps.length > 0: ScrollView {
+                                vertical-stretch: 1;
+                                VerticalLayout {
+                                    spacing: Theme.s3;
+
+                                    if root.installed-apps.length > 0: Panel {
+                                        VerticalLayout {
+                                            padding: Theme.s2;
+                                            spacing: 2px;
+                                            for app[i] in root.installed-apps: StaggerRow {
+                                                index: i;
+                                                HorizontalLayout {
+                                                    padding-left: Theme.s2;
+                                                    padding-right: Theme.s2;
+                                                    padding-top: Theme.s2;
+                                                    padding-bottom: Theme.s2;
+                                                    spacing: Theme.s3;
+                                                    alignment: stretch;
+
+                                                    VerticalLayout {
+                                                        alignment: center;
+                                                        KindGlyph { is-cli: app.kind == "CLI"; }
+                                                    }
+                                                    VerticalLayout {
+                                                        spacing: 2px;
+                                                        horizontal-stretch: 1;
+                                                        alignment: center;
+                                                        Text {
+                                                            text: app.name + (app.version != "" ? "  v" + app.version : "");
+                                                            font-size: Theme.font-body;
+                                                            font-weight: 600;
+                                                            color: Theme.ink;
+                                                            overflow: elide;
+                                                        }
+                                                        HorizontalLayout {
+                                                            spacing: 6px;
+                                                            Text {
+                                                                text: app.kind + "  ·";
+                                                                font-size: Theme.font-caption;
+                                                                color: Theme.ink-2;
+                                                            }
+                                                            Text {
+                                                                text: app.app-id;
+                                                                font-family: Theme.font-mono;
+                                                                font-size: Theme.font-caption;
+                                                                color: Theme.ink-2;
+                                                                overflow: elide;
+                                                            }
+                                                            if app.size-text != "": Text {
+                                                                text: "·  " + app.size-text;
+                                                                font-size: Theme.font-caption;
+                                                                color: Theme.ink-2;
+                                                            }
+                                                        }
+                                                        if app.update-note != "": Text {
+                                                            text: app.update-note;
+                                                            font-size: Theme.font-caption;
+                                                            font-weight: 600;
+                                                            color: app.has-update ? Theme.accent-text : Theme.ink-2;
+                                                        }
+                                                    }
+                                                    HorizontalLayout {
+                                                        spacing: Theme.s1;
+                                                        alignment: end;
+                                                        if app.has-update: VerticalLayout {
+                                                            alignment: center;
+                                                            EButton {
+                                                                text: "Update";
+                                                                kind: "primary";
+                                                                small: true;
+                                                                clicked => { root.update-app(app.app-id); }
+                                                            }
+                                                        }
+                                                        VerticalLayout {
+                                                            alignment: center;
+                                                            EButton {
+                                                                text: "Launch";
+                                                                small: true;
+                                                                clicked => { root.launch-app(app.app-id); }
+                                                            }
+                                                        }
+                                                        VerticalLayout {
+                                                            alignment: center;
+                                                            EButton {
+                                                                text: "App Info";
+                                                                small: true;
+                                                                clicked => {
+                                                                    root.page-dir = 1;
+                                                                    root.open-app-info(app.app-id);
+                                                                }
+                                                            }
+                                                        }
                                                     }
                                                 }
                                             }
                                         }
+                                    }
+
+                                    // Dedicated Detected Apps section (unmanaged user apps in $HOME)
+                                    if root.detected-apps.length > 0: VerticalLayout {
+                                        spacing: Theme.s2;
+                                        HorizontalLayout {
+                                            spacing: Theme.s2;
+                                            VerticalLayout {
+                                                spacing: 2px;
+                                                horizontal-stretch: 1;
+                                                Text {
+                                                    text: "Detected Apps (" + root.detected-apps.length + ")";
+                                                    font-size: Theme.font-heading;
+                                                    font-weight: 600;
+                                                    color: Theme.ink;
+                                                }
+                                                Text {
+                                                    text: "Existing user apps outside your distro package manager. Click Manage to adopt and repair icons or launchers.";
+                                                    font-size: Theme.font-caption;
+                                                    color: Theme.ink-2;
+                                                    wrap: word-wrap;
+                                                }
+                                            }
+                                            VerticalLayout {
+                                                alignment: center;
+                                                EButton {
+                                                    text: "Manage All";
+                                                    kind: "primary";
+                                                    small: true;
+                                                    clicked => { root.adopt-all-apps(); }
+                                                }
+                                            }
+                                        }
+
+                                        Panel {
+                                            VerticalLayout {
+                                                padding: Theme.s2;
+                                                spacing: 2px;
+                                                for d[i] in root.detected-apps: StaggerRow {
+                                                    index: i;
+                                                    HorizontalLayout {
+                                                        padding-left: Theme.s2;
+                                                        padding-right: Theme.s2;
+                                                        padding-top: Theme.s2;
+                                                        padding-bottom: Theme.s2;
+                                                        spacing: Theme.s3;
+                                                        VerticalLayout {
+                                                            alignment: center;
+                                                            KindGlyph { is-cli: d.kind == "CLI"; }
+                                                        }
+                                                        VerticalLayout {
+                                                            spacing: 2px;
+                                                            horizontal-stretch: 1;
+                                                            alignment: center;
+                                                            Text {
+                                                                text: d.name + (d.version != "" ? "  v" + d.version : "");
+                                                                font-size: Theme.font-body;
+                                                                font-weight: 600;
+                                                                color: Theme.ink;
+                                                                overflow: elide;
+                                                            }
+                                                            HorizontalLayout {
+                                                                spacing: 6px;
+                                                                Text {
+                                                                    text: d.kind + "  ·";
+                                                                    font-size: Theme.font-caption;
+                                                                    color: Theme.ink-2;
+                                                                }
+                                                                Text {
+                                                                    text: d.app-id;
+                                                                    font-family: Theme.font-mono;
+                                                                    font-size: Theme.font-caption;
+                                                                    color: Theme.ink-2;
+                                                                    overflow: elide;
+                                                                }
+                                                                if d.size-text != "": Text {
+                                                                    text: "·  " + d.size-text;
+                                                                    font-size: Theme.font-caption;
+                                                                    color: Theme.ink-2;
+                                                                }
+                                                            }
+                                                            if d.issues-text != "": Text {
+                                                                text: "Can fix: " + d.issues-text;
+                                                                font-size: Theme.font-caption;
+                                                                font-weight: 600;
+                                                                color: Theme.accent-text;
+                                                                wrap: word-wrap;
+                                                            }
+                                                        }
+                                                        VerticalLayout {
+                                                            alignment: center;
+                                                            EButton {
+                                                                text: "Manage";
+                                                                small: true;
+                                                                clicked => { root.adopt-app(d.app-id); }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // --- PAGE 2: Android-style Per-App Info ---
+                Scene {
+                    width: 100%;
+                    height: 100%;
+                    active: root.manager-page == "app_info";
+                    dir: root.page-dir;
+
+                    ScrollView {
+                        width: 100%;
+                        height: 100%;
+                        VerticalLayout {
+                            spacing: Theme.s3;
+
+                            HorizontalLayout {
+                                alignment: start;
+                                EButton {
+                                    text: "← Back to Apps";
+                                    kind: "ghost";
+                                    small: true;
+                                    clicked => {
+                                        root.page-dir = -1;
+                                        root.manager-page = "apps";
+                                        root.detail-confirm-uninstall = false;
+                                        root.detail-confirm-clear-data = false;
+                                    }
+                                }
+                            }
+
+                            // Identity panel
+                            Panel {
+                                HorizontalLayout {
+                                    padding: Theme.s4;
+                                    spacing: Theme.s4;
+                                    if root.detail-has-icon: VerticalLayout {
+                                        alignment: start;
+                                        Image {
+                                            source: root.detail-icon;
+                                            width: 52px;
+                                            height: 52px;
+                                            image-fit: contain;
+                                        }
+                                    }
+                                    VerticalLayout {
+                                        spacing: Theme.s1;
+                                        horizontal-stretch: 1;
                                         Text {
-                                            text: app.app-id + (app.size-text != "" ? "  •  " + app.size-text : "");
-                                            font-size: Theme.font-caption;
-                                            color: Theme.muted-text;
-                                        }
-                                        if app.update-note != "": Text {
-                                            text: app.update-note;
-                                            font-size: Theme.font-caption;
+                                            text: root.detail-name + (root.detail-version != "" ? "  v" + root.detail-version : "");
+                                            font-size: Theme.font-title;
                                             font-weight: 600;
-                                            color: Theme.accent;
+                                            color: Theme.ink;
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 6px;
+                                            Text {
+                                                text: root.detail-kind + "  ·";
+                                                font-size: Theme.font-caption;
+                                                color: Theme.ink-2;
+                                            }
+                                            Text {
+                                                text: root.detail-app-id;
+                                                font-family: Theme.font-mono;
+                                                font-size: Theme.font-caption;
+                                                color: Theme.ink-2;
+                                            }
+                                        }
+                                        if root.detail-developer != "": HorizontalLayout {
+                                            spacing: Theme.s2;
+                                            Text { text: "Developer"; width: 72px; font-size: Theme.font-caption; color: Theme.ink-3; }
+                                            Text { text: root.detail-developer; font-size: Theme.font-caption; color: Theme.ink; horizontal-stretch: 1; }
+                                        }
+                                        if root.detail-signature != "": HorizontalLayout {
+                                            spacing: Theme.s2;
+                                            Text { text: "Signature"; width: 72px; font-size: Theme.font-caption; color: Theme.ink-3; }
+                                            Text { text: root.detail-signature; font-size: Theme.font-caption; color: Theme.ink; horizontal-stretch: 1; }
+                                        }
+                                        if root.detail-origin != "": HorizontalLayout {
+                                            spacing: Theme.s2;
+                                            Text { text: "Origin"; width: 72px; font-size: Theme.font-caption; color: Theme.ink-3; }
+                                            Text { text: root.detail-origin; font-family: Theme.font-mono; font-size: Theme.font-caption; color: Theme.ink; wrap: word-wrap; horizontal-stretch: 1; }
+                                        }
+                                        HorizontalLayout {
+                                            spacing: Theme.s2;
+                                            Text { text: "Location"; width: 72px; font-size: Theme.font-caption; color: Theme.ink-3; }
+                                            Text { text: root.detail-install-dir; font-family: Theme.font-mono; font-size: Theme.font-caption; color: Theme.ink; wrap: word-wrap; horizontal-stretch: 1; }
                                         }
                                     }
-                                    HorizontalBox {
-                                        padding: 0px;
-                                        spacing: Theme.gap-sm;
-                                        if app.has-update: Button {
-                                            text: "Update";
-                                            primary: true;
-                                            clicked => { root.update-app(app.app-id); }
+                                }
+                            }
+
+                            // Quick actions
+                            HorizontalLayout {
+                                spacing: Theme.s2;
+                                alignment: start;
+                                EButton {
+                                    text: "Launch";
+                                    kind: "primary";
+                                    clicked => { root.launch-app(root.detail-app-id); }
+                                }
+                                EButton {
+                                    text: "Open Folder";
+                                    clicked => { root.open-app-folder(root.detail-app-id); }
+                                }
+                                EButton {
+                                    text: "Update";
+                                    clicked => { root.update-app(root.detail-app-id); }
+                                }
+                                EButton {
+                                    text: "Repair Icon & Launcher";
+                                    clicked => { root.repair-app(root.detail-app-id); }
+                                }
+                            }
+
+                            // Storage panel with proportional 3-segment bar
+                            Panel {
+                                VerticalLayout {
+                                    padding: Theme.s4;
+                                    spacing: Theme.s2;
+                                    Text {
+                                        text: "Storage";
+                                        font-size: Theme.font-heading;
+                                        font-weight: 600;
+                                        color: Theme.ink;
+                                    }
+                                    // Proportional bar
+                                    Rectangle {
+                                        height: 6px;
+                                        border-radius: 3px;
+                                        background: Theme.surface-2;
+                                        clip: true;
+                                        HorizontalLayout {
+                                            spacing: 2px;
+                                            Rectangle {
+                                                horizontal-stretch: max(0.01, root.detail-app-ratio);
+                                                background: Theme.accent;
+                                            }
+                                            if root.detail-data-ratio > 0.001: Rectangle {
+                                                horizontal-stretch: root.detail-data-ratio;
+                                                background: Theme.accent-text;
+                                            }
+                                            if root.detail-cache-ratio > 0.001: Rectangle {
+                                                horizontal-stretch: root.detail-cache-ratio;
+                                                background: Theme.ink-3;
+                                            }
                                         }
-                                        Button {
-                                            text: "Launch";
-                                            clicked => { root.launch-app(app.app-id); }
+                                    }
+                                    HorizontalLayout {
+                                        spacing: Theme.s2;
+                                        VerticalLayout { alignment: center; Rectangle { width: 8px; height: 8px; border-radius: 4px; background: Theme.accent; } }
+                                        Text { text: "App"; font-size: Theme.font-body; color: Theme.ink; horizontal-stretch: 1; }
+                                        Text { text: root.detail-app-size; font-size: Theme.font-body; font-weight: 600; color: Theme.ink; }
+                                    }
+                                    HorizontalLayout {
+                                        spacing: Theme.s2;
+                                        VerticalLayout { alignment: center; Rectangle { width: 8px; height: 8px; border-radius: 4px; background: Theme.accent-text; } }
+                                        Text { text: "User data (~/.config, ~/.local/share)"; font-size: Theme.font-body; color: Theme.ink; horizontal-stretch: 1; }
+                                        Text { text: root.detail-data-size; font-size: Theme.font-body; font-weight: 600; color: Theme.ink; }
+                                    }
+                                    HorizontalLayout {
+                                        spacing: Theme.s2;
+                                        VerticalLayout { alignment: center; Rectangle { width: 8px; height: 8px; border-radius: 4px; background: Theme.ink-3; } }
+                                        Text { text: "Cache (~/.cache)"; font-size: Theme.font-body; color: Theme.ink; horizontal-stretch: 1; }
+                                        Text { text: root.detail-cache-size; font-size: Theme.font-body; font-weight: 600; color: Theme.ink; }
+                                    }
+                                    Rectangle { height: 1px; background: Theme.surface-2; }
+                                    HorizontalLayout {
+                                        spacing: Theme.s2;
+                                        Text { text: "Total"; font-size: Theme.font-body; font-weight: 600; color: Theme.ink; horizontal-stretch: 1; }
+                                        Text { text: root.detail-total-size; font-size: Theme.font-body; font-weight: 600; color: Theme.ink; }
+                                    }
+                                    HorizontalLayout {
+                                        spacing: Theme.s2;
+                                        alignment: start;
+                                        EButton {
+                                            text: "Clear Cache";
+                                            small: true;
+                                            enabled: root.detail-has-cache;
+                                            clicked => { root.clear-app-cache(root.detail-app-id); }
                                         }
-                                        Button {
-                                            text: "App Info";
-                                            clicked => { root.open-app-info(app.app-id); }
+                                        ConfirmButton {
+                                            text: "Clear Data";
+                                            confirm-text: "Confirm Clear Data";
+                                            enabled: root.detail-has-data;
+                                            open <=> root.detail-confirm-clear-data;
+                                            confirmed => { root.clear-app-data(root.detail-app-id); }
+                                        }
+                                    }
+                                    if root.detail-feedback != "": Text {
+                                        text: root.detail-feedback;
+                                        font-size: Theme.font-caption;
+                                        color: Theme.success;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                            }
+
+                            // Uninstall / Stop Managing panel
+                            DangerPanel {
+                                VerticalLayout {
+                                    padding: Theme.s4;
+                                    spacing: Theme.s2;
+                                    Text {
+                                        text: "Uninstall";
+                                        font-size: Theme.font-heading;
+                                        font-weight: 600;
+                                        color: Theme.danger-text;
+                                    }
+                                    ECheck {
+                                        text: "Also remove user data & cache";
+                                        checked <=> root.detail-purge-checked;
+                                    }
+                                    HorizontalLayout {
+                                        spacing: Theme.s2;
+                                        alignment: start;
+                                        ConfirmButton {
+                                            text: "Uninstall " + root.detail-name;
+                                            confirm-text: "Confirm Uninstall";
+                                            trigger-kind: "danger-soft";
+                                            open <=> root.detail-confirm-uninstall;
+                                            confirmed => {
+                                                root.page-dir = -1;
+                                                root.manager-page = "apps";
+                                                root.uninstall-app(root.detail-app-id, root.detail-purge-checked);
+                                            }
+                                        }
+                                        if root.detail-adopted && !root.detail-confirm-uninstall: EButton {
+                                            text: "Stop Managing";
+                                            small: true;
+                                            clicked => {
+                                                root.page-dir = -1;
+                                                root.manager-page = "apps";
+                                                root.forget-app(root.detail-app-id);
+                                            }
                                         }
                                     }
                                 }
@@ -420,407 +896,204 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
-            }
 
-            // === PAGE 2: Android-style Per-App Info ===
-            if root.manager-page == "app_info": ScrollView {
-                vertical-stretch: 1;
-                VerticalBox {
-                    padding: 2px;
-                    spacing: Theme.gap-md;
+                // --- PAGE 3: Settings ---
+                Scene {
+                    width: 100%;
+                    height: 100%;
+                    active: root.manager-page == "settings";
+                    dir: root.page-dir;
 
-                    HorizontalBox {
-                        padding: 0px;
-                        Button {
-                            text: "← Back to Apps";
-                            clicked => {
-                                root.manager-page = "apps";
-                                root.detail-confirm-uninstall = false;
-                                root.detail-confirm-clear-data = false;
-                            }
-                        }
-                    }
+                    ScrollView {
+                        width: 100%;
+                        height: 100%;
+                        VerticalLayout {
+                            spacing: Theme.s3;
 
-                    // Identity & metadata card
-                    Card {
-                        HorizontalBox {
-                            padding: Theme.pad-card;
-                            spacing: Theme.gap-md;
-                            if root.detail-has-icon: Image {
-                                source: root.detail-icon;
-                                width: 52px;
-                                height: 52px;
-                                image-fit: contain;
-                            }
-                            VerticalBox {
-                                padding: 0px;
-                                spacing: 3px;
-                                horizontal-stretch: 1;
-                                Text {
-                                    text: root.detail-name + (root.detail-version != "" ? "  v" + root.detail-version : "");
-                                    font-size: Theme.font-title;
-                                    font-weight: 700;
-                                }
-                                Text {
-                                    text: root.detail-kind + "  •  " + root.detail-app-id;
-                                    font-size: Theme.font-caption;
-                                    color: Theme.muted-text;
-                                }
-                                if root.detail-developer != "": Text {
-                                    text: "Developer: " + root.detail-developer;
-                                    font-size: Theme.font-caption;
-                                    color: Theme.muted-text;
-                                }
-                                if root.detail-signature != "": Text {
-                                    text: "Signature: " + root.detail-signature;
-                                    font-size: Theme.font-caption;
-                                    color: Theme.muted-text;
-                                }
-                                if root.detail-origin != "": Text {
-                                    text: "Origin: " + root.detail-origin;
-                                    font-size: Theme.font-caption;
-                                    color: Theme.muted-text;
-                                    wrap: word-wrap;
-                                }
-                                Text {
-                                    text: "Location: " + root.detail-install-dir;
-                                    font-size: Theme.font-caption;
-                                    color: Theme.muted-text;
-                                    wrap: word-wrap;
-                                }
-                            }
-                        }
-                    }
-
-                    // Quick actions
-                    HorizontalBox {
-                        padding: 0px;
-                        spacing: Theme.gap-sm;
-                        Button {
-                            text: "Launch";
-                            primary: true;
-                            clicked => { root.launch-app(root.detail-app-id); }
-                        }
-                        Button {
-                            text: "Open Folder";
-                            clicked => { root.open-app-folder(root.detail-app-id); }
-                        }
-                        Button {
-                            text: "Update";
-                            clicked => { root.update-app(root.detail-app-id); }
-                        }
-                    }
-
-                    // Storage card (Android App Info breakdown: App / User Data / Cache / Total)
-                    Card {
-                        VerticalBox {
-                            padding: Theme.pad-card;
-                            spacing: Theme.gap-sm;
-                            Text {
-                                text: "Storage";
-                                font-size: Theme.font-section;
-                                font-weight: 700;
-                            }
-                            HorizontalBox {
-                                padding: 0px;
-                                Text { text: "App"; font-size: Theme.font-body; horizontal-stretch: 1; }
-                                Text { text: root.detail-app-size; font-size: Theme.font-body; font-weight: 600; }
-                            }
-                            HorizontalBox {
-                                padding: 0px;
-                                Text { text: "User data (~/.config, ~/.local/share)"; font-size: Theme.font-body; horizontal-stretch: 1; }
-                                Text { text: root.detail-data-size; font-size: Theme.font-body; font-weight: 600; }
-                            }
-                            HorizontalBox {
-                                padding: 0px;
-                                Text { text: "Cache (~/.cache)"; font-size: Theme.font-body; horizontal-stretch: 1; }
-                                Text { text: root.detail-cache-size; font-size: Theme.font-body; font-weight: 600; }
-                            }
-                            Rectangle { height: 1px; background: Theme.border-subtle; }
-                            HorizontalBox {
-                                padding: 0px;
-                                Text { text: "Total"; font-size: Theme.font-body; font-weight: 700; horizontal-stretch: 1; }
-                                Text { text: root.detail-total-size; font-size: Theme.font-body; font-weight: 700; }
-                            }
-                            HorizontalBox {
-                                padding: 0px;
-                                spacing: Theme.gap-sm;
-                                Button {
-                                    text: "Clear Cache";
-                                    enabled: root.detail-has-cache;
-                                    clicked => { root.clear-app-cache(root.detail-app-id); }
-                                }
-                                if !root.detail-confirm-clear-data: Button {
-                                    text: "Clear Data";
-                                    enabled: root.detail-has-data;
-                                    clicked => { root.detail-confirm-clear-data = true; }
-                                }
-                                if root.detail-confirm-clear-data: HorizontalBox {
-                                    padding: 0px;
-                                    spacing: Theme.gap-sm;
-                                    Button {
-                                        text: "Confirm Clear Data";
-                                        primary: true;
-                                        clicked => {
-                                            root.detail-confirm-clear-data = false;
-                                            root.clear-app-data(root.detail-app-id);
+                            Panel {
+                                VerticalLayout {
+                                    padding: Theme.s4;
+                                    spacing: Theme.s2;
+                                    Text {
+                                        text: "Updates";
+                                        font-size: Theme.font-heading;
+                                        font-weight: 600;
+                                        color: Theme.ink;
+                                    }
+                                    HorizontalLayout {
+                                        spacing: Theme.s2;
+                                        Text {
+                                            text: "Check for easi updates automatically";
+                                            font-size: Theme.font-body;
+                                            color: Theme.ink;
+                                            vertical-alignment: center;
+                                            horizontal-stretch: 1;
+                                        }
+                                        ESwitch {
+                                            checked <=> root.auto-check-updates;
+                                            toggled(v) => { root.toggle-auto-update(v); }
                                         }
                                     }
-                                    Button {
-                                        text: "Cancel";
-                                        clicked => { root.detail-confirm-clear-data = false; }
-                                    }
-                                }
-                            }
-                            if root.detail-feedback != "": Text {
-                                text: root.detail-feedback;
-                                font-size: Theme.font-caption;
-                                color: Theme.success;
-                            }
-                        }
-                    }
-
-                    // Uninstall card
-                    Rectangle {
-                        border-width: 1px;
-                        border-color: Theme.danger;
-                        border-radius: Theme.radius-card;
-                        background: Theme.danger-tint;
-                        VerticalBox {
-                            padding: Theme.pad-card;
-                            spacing: Theme.gap-sm;
-                            Text {
-                                text: "Uninstall";
-                                font-size: Theme.font-section;
-                                font-weight: 700;
-                                color: Theme.danger;
-                            }
-                            CheckBox {
-                                text: "Also remove user data & cache";
-                                checked <=> root.detail-purge-checked;
-                            }
-                            HorizontalBox {
-                                padding: 0px;
-                                spacing: Theme.gap-sm;
-                                if !root.detail-confirm-uninstall: Button {
-                                    text: "Uninstall " + root.detail-name;
-                                    clicked => { root.detail-confirm-uninstall = true; }
-                                }
-                                if root.detail-confirm-uninstall: HorizontalBox {
-                                    padding: 0px;
-                                    spacing: Theme.gap-sm;
-                                    Button {
-                                        text: "Confirm Uninstall";
-                                        primary: true;
-                                        clicked => {
-                                            root.detail-confirm-uninstall = false;
-                                            root.manager-page = "apps";
-                                            root.uninstall-app(root.detail-app-id, root.detail-purge-checked);
+                                    HorizontalLayout {
+                                        spacing: Theme.s2;
+                                        Text {
+                                            text: "Installed version: easi " + root.easi-version;
+                                            font-size: Theme.font-caption;
+                                            color: Theme.ink-2;
+                                            vertical-alignment: center;
+                                            horizontal-stretch: 1;
+                                        }
+                                        EButton {
+                                            text: root.easi-update-version != "" ? "Update to " + root.easi-update-version : "Check for easi Update";
+                                            kind: root.easi-update-version != "" ? "primary" : "secondary";
+                                            small: true;
+                                            clicked => { root.run-self-update(); }
                                         }
                                     }
-                                    Button {
-                                        text: "Cancel";
-                                        clicked => { root.detail-confirm-uninstall = false; }
+                                }
+                            }
+
+                            Panel {
+                                VerticalLayout {
+                                    padding: Theme.s4;
+                                    spacing: Theme.s2;
+                                    Text {
+                                        text: "Uninstall Defaults";
+                                        font-size: Theme.font-heading;
+                                        font-weight: 600;
+                                        color: Theme.ink;
                                     }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // === PAGE 3: Settings ===
-            if root.manager-page == "settings": ScrollView {
-                vertical-stretch: 1;
-                VerticalBox {
-                    padding: 2px;
-                    spacing: Theme.gap-md;
-
-                    Card {
-                        VerticalBox {
-                            padding: Theme.pad-card;
-                            spacing: Theme.gap-sm;
-                            Text {
-                                text: "Updates";
-                                font-size: Theme.font-section;
-                                font-weight: 700;
-                            }
-                            HorizontalBox {
-                                padding: 0px;
-                                Text {
-                                    text: "Check for easi updates automatically";
-                                    font-size: Theme.font-body;
-                                    vertical-alignment: center;
-                                    horizontal-stretch: 1;
-                                }
-                                Switch {
-                                    checked <=> root.auto-check-updates;
-                                    toggled => { root.toggle-auto-update(self.checked); }
-                                }
-                            }
-                            HorizontalBox {
-                                padding: 0px;
-                                spacing: Theme.gap-sm;
-                                Text {
-                                    text: "Installed version: easi " + root.easi-version;
-                                    font-size: Theme.font-caption;
-                                    color: Theme.muted-text;
-                                    vertical-alignment: center;
-                                    horizontal-stretch: 1;
-                                }
-                                Button {
-                                    text: root.easi-update-version != "" ? "Update to " + root.easi-update-version : "Check for easi Update";
-                                    primary: root.easi-update-version != "";
-                                    clicked => { root.run-self-update(); }
-                                }
-                            }
-                        }
-                    }
-
-                    Card {
-                        VerticalBox {
-                            padding: Theme.pad-card;
-                            spacing: Theme.gap-sm;
-                            Text {
-                                text: "Uninstall Defaults";
-                                font-size: Theme.font-section;
-                                font-weight: 700;
-                            }
-                            HorizontalBox {
-                                padding: 0px;
-                                Text {
-                                    text: "Also remove app settings & cache by default";
-                                    font-size: Theme.font-body;
-                                    vertical-alignment: center;
-                                    horizontal-stretch: 1;
-                                }
-                                Switch {
-                                    checked <=> root.purge-data-on-uninstall;
-                                }
-                            }
-                        }
-                    }
-
-                    Card {
-                        VerticalBox {
-                            padding: Theme.pad-card;
-                            spacing: Theme.gap-sm;
-                            Text {
-                                text: "Desktop File Associations";
-                                font-size: Theme.font-section;
-                                font-weight: 700;
-                            }
-                            Text {
-                                text: "Register easi to handle downloaded AppImages and archives, or restore your previous archive manager.";
-                                font-size: Theme.font-caption;
-                                color: Theme.muted-text;
-                                wrap: word-wrap;
-                            }
-                            HorizontalBox {
-                                padding: 0px;
-                                spacing: Theme.gap-sm;
-                                Button {
-                                    text: "Register File Associations";
-                                    clicked => { root.run-setup-handlers(); }
-                                }
-                                Button {
-                                    text: "Restore Previous Handlers";
-                                    clicked => { root.run-restore-handlers(); }
-                                }
-                            }
-                            if root.settings-feedback != "": Text {
-                                text: root.settings-feedback;
-                                font-size: Theme.font-caption;
-                                color: Theme.success;
-                                wrap: word-wrap;
-                            }
-                        }
-                    }
-
-                    // Danger Zone safely tucked at the bottom of Settings
-                    Rectangle {
-                        border-width: 1.5px;
-                        border-color: Theme.danger;
-                        border-radius: Theme.radius-card;
-                        background: Theme.danger-tint;
-                        VerticalBox {
-                            padding: Theme.pad-card;
-                            spacing: Theme.gap-sm;
-                            Text {
-                                text: "Danger Zone";
-                                font-size: Theme.font-section;
-                                font-weight: 700;
-                                color: Theme.danger;
-                            }
-                            Text {
-                                text: "Uninstall easi and restore your previous file handlers. Apps you installed in ~/Applications remain intact.";
-                                font-size: Theme.font-caption;
-                                color: Theme.muted-text;
-                                wrap: word-wrap;
-                            }
-                            HorizontalBox {
-                                padding: 0px;
-                                spacing: Theme.gap-sm;
-                                if !root.confirm-self-uninstall: Button {
-                                    text: "Uninstall easi";
-                                    clicked => { root.confirm-self-uninstall = true; }
-                                }
-                                if root.confirm-self-uninstall: HorizontalBox {
-                                    padding: 0px;
-                                    spacing: Theme.gap-sm;
-                                    Button {
-                                        text: "Confirm Uninstall easi";
-                                        primary: true;
-                                        clicked => {
-                                            root.confirm-self-uninstall = false;
-                                            root.run-self-uninstall();
+                                    HorizontalLayout {
+                                        spacing: Theme.s2;
+                                        Text {
+                                            text: "Also remove app settings & cache by default";
+                                            font-size: Theme.font-body;
+                                            color: Theme.ink;
+                                            vertical-alignment: center;
+                                            horizontal-stretch: 1;
+                                        }
+                                        ESwitch {
+                                            checked <=> root.purge-data-on-uninstall;
                                         }
                                     }
-                                    Button {
-                                        text: "Cancel";
-                                        clicked => { root.confirm-self-uninstall = false; }
+                                }
+                            }
+
+                            Panel {
+                                VerticalLayout {
+                                    padding: Theme.s4;
+                                    spacing: Theme.s2;
+                                    Text {
+                                        text: "Default Handler for Downloaded Packages";
+                                        font-size: Theme.font-heading;
+                                        font-weight: 600;
+                                        color: Theme.ink;
+                                    }
+                                    Text {
+                                        text: "Makes double-clicking downloaded .AppImage, .tar.*, .zip, and .7z files open in easi (does not modify already-installed apps).";
+                                        font-size: Theme.font-caption;
+                                        color: Theme.ink-2;
+                                        wrap: word-wrap;
+                                    }
+                                    HorizontalLayout {
+                                        spacing: Theme.s2;
+                                        alignment: start;
+                                        EButton {
+                                            text: "Set easi as Default Handler";
+                                            small: true;
+                                            clicked => { root.run-setup-handlers(); }
+                                        }
+                                        EButton {
+                                            text: "Restore Previous Handlers";
+                                            small: true;
+                                            clicked => { root.run-restore-handlers(); }
+                                        }
+                                    }
+                                    if root.settings-feedback != "": Text {
+                                        text: root.settings-feedback;
+                                        font-size: Theme.font-caption;
+                                        color: Theme.success;
+                                        wrap: word-wrap;
                                     }
                                 }
                             }
-                        }
-                    }
 
-                    // About section
-                    Card {
-                        VerticalBox {
-                            padding: Theme.pad-card;
-                            spacing: 4px;
-                            HorizontalBox {
-                                padding: 0px;
-                                VerticalBox {
-                                    padding: 0px;
-                                    spacing: 2px;
-                                    horizontal-stretch: 1;
+                            DangerPanel {
+                                VerticalLayout {
+                                    padding: Theme.s4;
+                                    spacing: Theme.s2;
                                     Text {
-                                        text: "About easi";
-                                        font-size: Theme.font-section;
-                                        font-weight: 700;
+                                        text: "Danger Zone";
+                                        font-size: Theme.font-heading;
+                                        font-weight: 600;
+                                        color: Theme.danger-text;
                                     }
                                     Text {
-                                        text: "Version " + root.easi-version + "  •  Developer: xuckless";
+                                        text: "Uninstall easi and restore your previous file handlers. Apps you installed in ~/Applications remain intact.";
                                         font-size: Theme.font-caption;
-                                        color: Theme.muted-text;
+                                        color: Theme.ink-2;
+                                        wrap: word-wrap;
                                     }
-                                    Text {
-                                        text: "Copyright © 2026 xuckless  •  Apache-2.0 License";
-                                        font-size: Theme.font-caption;
-                                        color: Theme.muted-text;
-                                    }
-                                    Text {
-                                        text: "github.com/xuckless/easi-install";
-                                        font-size: Theme.font-caption;
-                                        color: Theme.muted-text;
+                                    HorizontalLayout {
+                                        alignment: start;
+                                        ConfirmButton {
+                                            text: "Uninstall easi";
+                                            confirm-text: "Confirm Uninstall easi";
+                                            trigger-kind: "danger-soft";
+                                            open <=> root.confirm-self-uninstall;
+                                            confirmed => { root.run-self-uninstall(); }
+                                        }
                                     }
                                 }
-                                Button {
-                                    text: root.easi-update-version != "" ? "Update to " + root.easi-update-version : "Check for Update";
-                                    primary: root.easi-update-version != "";
-                                    clicked => { root.run-self-update(); }
+                            }
+
+                            Panel {
+                                HorizontalLayout {
+                                    padding: Theme.s4;
+                                    spacing: Theme.s3;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Image {
+                                            source: @image-url("logo-drop.svg");
+                                            width: 40px;
+                                            height: 40px;
+                                            image-fit: contain;
+                                        }
+                                    }
+                                    VerticalLayout {
+                                        spacing: Theme.s1;
+                                        horizontal-stretch: 1;
+                                        Text {
+                                            text: "About easi";
+                                            font-size: Theme.font-heading;
+                                            font-weight: 600;
+                                            color: Theme.ink;
+                                        }
+                                        Text {
+                                            text: "Version " + root.easi-version + "  ·  Developer: xuckless";
+                                            font-size: Theme.font-caption;
+                                            color: Theme.ink-2;
+                                        }
+                                        Text {
+                                            text: "Copyright © 2026 xuckless  ·  Apache-2.0 License";
+                                            font-size: Theme.font-caption;
+                                            color: Theme.ink-2;
+                                        }
+                                        Text {
+                                            text: "github.com/xuckless/easi-install";
+                                            font-family: Theme.font-mono;
+                                            font-size: Theme.font-caption;
+                                            color: Theme.ink-3;
+                                        }
+                                    }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        EButton {
+                                            text: "Check for Update";
+                                            small: true;
+                                            clicked => { root.run-self-update(); }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -828,40 +1101,63 @@ export component AppWindow inherits Window {
                 }
             }
         }
+    }
 
-        // --- Inspecting ---
-        if root.screen == "inspecting": VerticalBox {
+    // =========================================================================
+    // SCENE 2: Inspecting / Handing off
+    // =========================================================================
+    Scene {
+        width: 100%;
+        height: 100%;
+        active: root.screen == "inspecting";
+        dir: root.dir;
+
+        VerticalLayout {
             alignment: center;
-            spacing: Theme.gap-lg;
+            padding-left: 110px;
+            padding-right: 110px;
+            spacing: Theme.s4;
             Text {
                 text: root.status-text;
-                font-size: Theme.font-section;
+                font-size: Theme.font-heading;
                 font-weight: 600;
+                color: Theme.ink;
                 horizontal-alignment: center;
                 wrap: word-wrap;
             }
-            ProgressIndicator { indeterminate: true; }
-            HorizontalBox {
+            EProgress {
+                indeterminate: true;
+            }
+            HorizontalLayout {
                 alignment: center;
-                Button {
+                EButton {
                     text: "Cancel";
                     clicked => { root.cancel(); }
                 }
             }
         }
+    }
 
-        // --- Ready (DMG-style drag + Permissions / Trust + Script Consent) ---
-        if root.screen == "ready": VerticalBox {
-            spacing: Theme.gap-md;
-            padding: 0px;
+    // =========================================================================
+    // SCENE 3: Ready — DMG-style DragStage + Trust & Permissions Summary
+    // =========================================================================
+    Scene {
+        width: 100%;
+        height: 100%;
+        active: root.screen == "ready";
+        dir: root.dir;
 
-            VerticalBox {
-                padding: 0px;
-                spacing: 3px;
+        VerticalLayout {
+            padding: Theme.pad-window;
+            spacing: Theme.s3;
+
+            VerticalLayout {
+                spacing: Theme.s1;
                 Text {
                     text: root.app-name + (root.app-version != "" ? "  " + root.app-version : "");
                     font-size: Theme.font-title;
-                    font-weight: 700;
+                    font-weight: 600;
+                    color: Theme.ink;
                     horizontal-alignment: center;
                 }
                 Text {
@@ -869,387 +1165,455 @@ export component AppWindow inherits Window {
                         ? "Review the script permissions below and check consent before installing"
                         : "Drag the app into Applications — or click Install";
                     font-size: Theme.font-caption;
-                    color: Theme.muted-text;
+                    color: Theme.ink-2;
                     horizontal-alignment: center;
                 }
             }
 
-            // DMG-style drag stage
-            Card {
-                height: 132px;
-
-                drop-zone := Rectangle {
-                    x: parent.width - 178px;
-                    y: 18px;
-                    width: 150px;
-                    height: 96px;
-                    border-width: 2px;
-                    border-radius: Theme.radius-card;
-                    border-color: root.dragging && root.drag-offset-x > 120px ? Theme.accent : Theme.border-strong;
-                    background: root.dragging && root.drag-offset-x > 120px ? Theme.accent-tint : transparent;
-                    VerticalBox {
-                        alignment: center;
-                        spacing: 3px;
-                        Text {
-                            text: "Applications";
-                            font-size: Theme.font-body;
-                            font-weight: 700;
-                            horizontal-alignment: center;
-                        }
-                        Text {
-                            text: "~/Applications";
-                            font-size: Theme.font-caption;
-                            color: Theme.muted-text;
-                            horizontal-alignment: center;
-                        }
-                    }
-                }
-
-                Text {
-                    x: parent.width / 2 - 14px;
-                    y: 50px;
-                    text: "→";
-                    font-size: 24px;
-                    color: Theme.muted-text;
-                }
-
-                Rectangle {
-                    x: 28px + root.drag-offset-x;
-                    y: 18px + root.drag-offset-y;
-                    width: 150px;
-                    height: 96px;
-                    border-width: 1.5px;
-                    border-color: Theme.accent;
-                    border-radius: Theme.radius-card;
-                    background: Palette.background;
-                    VerticalBox {
-                        alignment: center;
-                        padding: 8px;
-                        spacing: 4px;
-                        if root.has-app-icon: Image {
-                            source: root.app-icon;
-                            width: 38px;
-                            height: 38px;
-                            image-fit: contain;
-                        }
-                        Text {
-                            text: root.app-name;
-                            font-size: Theme.font-body;
-                            font-weight: 700;
-                            horizontal-alignment: center;
-                            overflow: elide;
-                        }
-                        Text {
-                            text: root.app-kind;
-                            font-size: 10px;
-                            color: Theme.muted-text;
-                            horizontal-alignment: center;
-                        }
-                    }
-                    ta := TouchArea {
-                        mouse-cursor: (!root.has-script-warning || root.script-consent-checked) ? grab : not-allowed;
-                        moved => {
-                            if (self.pressed && (!root.has-script-warning || root.script-consent-checked)) {
-                                root.dragging = true;
-                                root.drag-offset-x = self.mouse-x - self.pressed-x;
-                                root.drag-offset-y = self.mouse-y - self.pressed-y;
-                            }
-                        }
-                        pointer-event(event) => {
-                            if (event.kind == PointerEventKind.up) {
-                                if (root.dragging && root.drag-offset-x > 120px) {
-                                    root.confirm-install();
-                                }
-                                root.dragging = false;
-                                root.drag-offset-x = 0px;
-                                root.drag-offset-y = 0px;
-                            }
-                        }
-                    }
+            Settle {
+                shown: root.screen == "ready";
+                step: 1;
+                DragStage {
+                    width: parent.width;
+                    icon: root.app-icon;
+                    has-icon: root.has-app-icon;
+                    name: root.app-name;
+                    kind: root.app-kind;
+                    allowed: root.install-allowed;
+                    active: root.screen == "ready";
+                    dropped => { root.confirm-install(); }
                 }
             }
 
-            if root.has-script-warning: Rectangle {
-                border-width: 1.5px;
-                border-color: Theme.danger;
-                border-radius: Theme.radius-card;
-                background: Theme.danger-tint;
-                VerticalBox {
-                    padding: Theme.pad-card;
-                    spacing: Theme.gap-sm;
+            if root.has-script-warning: DangerPanel {
+                VerticalLayout {
+                    padding: Theme.s3;
+                    spacing: Theme.s2;
                     Text {
                         text: "Warning! This app contains a script that does:";
-                        font-size: Theme.font-body;
-                        font-weight: 700;
-                        color: Theme.danger;
+                        font-size: Theme.font-heading;
+                        font-weight: 600;
+                        color: Theme.danger-text;
                     }
                     Text {
                         text: root.script-warning-text;
                         font-size: Theme.font-caption;
+                        color: Theme.ink;
                         wrap: word-wrap;
                     }
-                    CheckBox {
+                    ECheck {
                         text: "I understand and consent to running this installer script";
                         checked <=> root.script-consent-checked;
                     }
                 }
             }
 
-            Card {
+            Panel {
                 vertical-stretch: 1;
                 ScrollView {
-                    VerticalBox {
-                        padding: Theme.pad-card;
-                        spacing: 4px;
+                    width: 100%;
+                    height: 100%;
+                    VerticalLayout {
+                        padding: Theme.s4;
+                        spacing: Theme.s2;
                         Text {
                             text: "Permissions & Trust Summary";
-                            font-size: Theme.font-section;
-                            font-weight: 700;
+                            font-size: Theme.font-heading;
+                            font-weight: 600;
+                            color: Theme.ink;
                         }
                         if root.permissions-text != "": Text {
                             text: root.permissions-text;
                             font-size: Theme.font-caption;
+                            color: Theme.ink-2;
                             wrap: word-wrap;
                         }
-                        Rectangle {
-                            height: 1px;
-                            background: Theme.border-subtle;
+                        HorizontalLayout {
+                            spacing: Theme.s2;
+                            Text { text: "App ID"; width: 72px; font-size: Theme.font-caption; color: Theme.ink-3; }
+                            Text { text: root.app-id; font-family: Theme.font-mono; font-size: Theme.font-caption; color: Theme.ink; horizontal-stretch: 1; }
                         }
-                        Text {
-                            text: "App ID: " + root.app-id + "   •   Size: " + root.trust-size;
-                            font-size: Theme.font-caption;
-                            color: Theme.muted-text;
+                        HorizontalLayout {
+                            spacing: Theme.s2;
+                            Text { text: "Size"; width: 72px; font-size: Theme.font-caption; color: Theme.ink-3; }
+                            Text { text: root.trust-size; font-size: Theme.font-caption; color: Theme.ink; horizontal-stretch: 1; }
                         }
-                        Text {
-                            text: "SHA-256: " + root.trust-sha256;
-                            font-size: Theme.font-caption;
-                            color: Theme.muted-text;
+                        HorizontalLayout {
+                            spacing: Theme.s2;
+                            Text { text: "SHA-256"; width: 72px; font-size: Theme.font-caption; color: Theme.ink-3; }
+                            Text { text: root.trust-sha256; font-family: Theme.font-mono; font-size: Theme.font-caption; color: Theme.ink; horizontal-stretch: 1; }
                         }
-                        if root.trust-origin != "": Text {
-                            text: "Origin: " + root.trust-origin;
-                            font-size: Theme.font-caption;
-                            color: Theme.muted-text;
-                            wrap: word-wrap;
+                        if root.trust-origin != "": HorizontalLayout {
+                            spacing: Theme.s2;
+                            Text { text: "Origin"; width: 72px; font-size: Theme.font-caption; color: Theme.ink-3; }
+                            Text { text: root.trust-origin; font-family: Theme.font-mono; font-size: Theme.font-caption; color: Theme.ink; wrap: word-wrap; horizontal-stretch: 1; }
                         }
-                        Text {
-                            text: "Signature: " + root.trust-signature;
-                            font-size: Theme.font-caption;
-                            color: Theme.muted-text;
+                        HorizontalLayout {
+                            spacing: Theme.s2;
+                            Text { text: "Signature"; width: 72px; font-size: Theme.font-caption; color: Theme.ink-3; }
+                            Text { text: root.trust-signature; font-size: Theme.font-caption; color: Theme.ink; horizontal-stretch: 1; }
                         }
-                        if root.trust-warnings != "": Text {
-                            text: "Warnings: " + root.trust-warnings;
-                            font-size: Theme.font-caption;
-                            font-weight: 600;
-                            color: Theme.danger;
-                            wrap: word-wrap;
+                        if root.trust-warnings != "": HorizontalLayout {
+                            spacing: Theme.s2;
+                            Text { text: "Warnings"; width: 72px; font-size: Theme.font-caption; font-weight: 600; color: Theme.danger-text; }
+                            Text { text: root.trust-warnings; font-size: Theme.font-caption; font-weight: 600; color: Theme.danger-text; wrap: word-wrap; horizontal-stretch: 1; }
                         }
                     }
                 }
             }
 
-            HorizontalBox {
-                padding: 0px;
+            HorizontalLayout {
                 alignment: end;
-                spacing: Theme.gap-sm;
-                Button { text: "Cancel"; clicked => { root.cancel(); } }
-                Button {
+                spacing: Theme.s2;
+                EButton {
+                    text: "Cancel";
+                    clicked => { root.cancel(); }
+                }
+                EButton {
                     text: "Install";
-                    primary: true;
-                    enabled: !root.has-script-warning || root.script-consent-checked;
+                    kind: "primary";
+                    enabled: root.install-allowed;
                     clicked => { root.confirm-install(); }
                 }
             }
         }
+    }
 
-        // --- Conflict ---
-        if root.screen == "conflict": VerticalBox {
+    // =========================================================================
+    // SCENE 4: Conflict — App Already Installed
+    // =========================================================================
+    Scene {
+        width: 100%;
+        height: 100%;
+        active: root.screen == "conflict";
+        dir: root.dir;
+
+        VerticalLayout {
             alignment: center;
-            spacing: Theme.gap-lg;
-            Card {
-                VerticalBox {
-                    padding: Theme.pad-outer;
-                    spacing: Theme.gap-md;
+            padding-left: 90px;
+            padding-right: 90px;
+            spacing: Theme.s4;
+            Panel {
+                VerticalLayout {
+                    padding: Theme.s6;
+                    spacing: Theme.s3;
                     Text {
                         text: "App Already Installed";
                         font-size: Theme.font-title;
-                        font-weight: 700;
+                        font-weight: 600;
+                        color: Theme.ink;
                         horizontal-alignment: center;
                     }
                     Text {
                         text: root.conflict-text;
                         font-size: Theme.font-body;
+                        color: Theme.ink;
                         horizontal-alignment: center;
                         wrap: word-wrap;
                     }
                     Text {
                         text: "SHA-256: " + root.trust-sha256;
+                        font-family: Theme.font-mono;
                         font-size: Theme.font-caption;
-                        color: Theme.muted-text;
+                        color: Theme.ink-2;
                         horizontal-alignment: center;
                     }
                 }
             }
-            HorizontalBox {
+            HorizontalLayout {
                 alignment: end;
-                spacing: Theme.gap-sm;
-                Button { text: "Cancel"; clicked => { root.cancel(); } }
-                Button { text: "Replace"; primary: true; clicked => { root.confirm-install(); } }
+                spacing: Theme.s2;
+                EButton {
+                    text: "Cancel";
+                    clicked => { root.cancel(); }
+                }
+                EButton {
+                    text: "Replace";
+                    kind: "primary";
+                    clicked => { root.confirm-install(); }
+                }
             }
         }
+    }
 
-        // --- Wizard: pick executable or icon ---
-        if root.screen == "wizard_exec" || root.screen == "wizard_icon": VerticalBox {
-            spacing: Theme.gap-md;
-            Text {
-                text: root.screen == "wizard_exec" ? "Choose the Main Program" : "Choose an Application Icon";
-                font-size: Theme.font-title;
-                font-weight: 700;
+    // =========================================================================
+    // SCENE 5: Wizard — Pick Executable / Pick Icon
+    // =========================================================================
+    Scene {
+        width: 100%;
+        height: 100%;
+        active: root.screen == "wizard_exec" || root.screen == "wizard_icon";
+        dir: root.dir;
+
+        VerticalLayout {
+            padding: Theme.pad-window;
+            spacing: Theme.s3;
+            VerticalLayout {
+                spacing: Theme.s1;
+                Text {
+                    text: root.screen == "wizard_exec" ? "Choose the Main Program" : "Choose an Application Icon";
+                    font-size: Theme.font-title;
+                    font-weight: 600;
+                    color: Theme.ink;
+                }
+                Text {
+                    text: "Multiple candidates were found in this package. Select the right one:";
+                    font-size: Theme.font-caption;
+                    color: Theme.ink-2;
+                }
             }
-            Text {
-                text: "Multiple candidates were found in this package. Select the right one:";
-                font-size: Theme.font-caption;
-                color: Theme.muted-text;
-            }
-            ScrollView {
+            Panel {
                 vertical-stretch: 1;
-                VerticalBox {
-                    padding: 2px;
-                    spacing: Theme.gap-sm;
-                    for choice[idx] in root.wizard-choices: Button {
-                        text: choice;
-                        clicked => { root.choose-candidate(idx); }
+                ScrollView {
+                    width: 100%;
+                    height: 100%;
+                    VerticalLayout {
+                        padding: Theme.s2;
+                        spacing: 2px;
+                        for choice[idx] in root.wizard-choices: StaggerRow {
+                            index: idx;
+                            height: 40px;
+                            HorizontalLayout {
+                                padding-left: Theme.s3;
+                                padding-right: Theme.s3;
+                                spacing: Theme.s2;
+                                Text {
+                                    text: choice;
+                                    font-family: Theme.font-mono;
+                                    font-size: Theme.font-caption;
+                                    color: Theme.ink;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: "›";
+                                    font-size: Theme.font-heading;
+                                    color: Theme.ink-3;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.choose-candidate(idx); }
+                            }
+                        }
                     }
                 }
             }
-            HorizontalBox {
+            HorizontalLayout {
                 alignment: end;
-                Button { text: "Cancel"; clicked => { root.cancel(); } }
+                EButton {
+                    text: "Cancel";
+                    clicked => { root.cancel(); }
+                }
             }
         }
+    }
 
-        // --- Wizard: confirm name ---
-        if root.screen == "wizard_name": VerticalBox {
+    // =========================================================================
+    // SCENE 6: Wizard — Confirm Application Name
+    // =========================================================================
+    Scene {
+        width: 100%;
+        height: 100%;
+        active: root.screen == "wizard_name";
+        dir: root.dir;
+
+        VerticalLayout {
             alignment: center;
-            spacing: Theme.gap-lg;
-            Card {
-                VerticalBox {
-                    padding: Theme.pad-outer;
-                    spacing: Theme.gap-md;
+            padding-left: 90px;
+            padding-right: 90px;
+            spacing: Theme.s4;
+            Panel {
+                VerticalLayout {
+                    padding: Theme.s6;
+                    spacing: Theme.s3;
                     Text {
                         text: "Confirm Application Name";
                         font-size: Theme.font-title;
-                        font-weight: 700;
+                        font-weight: 600;
+                        color: Theme.ink;
                     }
-                    LineEdit { text <=> root.wizard-name-input; }
+                    EField {
+                        text <=> root.wizard-name-input;
+                        placeholder: "Application name";
+                        accepted(n) => { root.confirm-name(n); }
+                    }
                 }
             }
-            HorizontalBox {
+            HorizontalLayout {
                 alignment: end;
-                spacing: Theme.gap-sm;
-                Button { text: "Cancel"; clicked => { root.cancel(); } }
-                Button {
+                spacing: Theme.s2;
+                EButton {
+                    text: "Cancel";
+                    clicked => { root.cancel(); }
+                }
+                EButton {
                     text: "Continue";
-                    primary: true;
+                    kind: "primary";
                     clicked => { root.confirm-name(root.wizard-name-input); }
                 }
             }
         }
+    }
 
-        // --- Installing / Cancelling / RollingBack ---
-        if root.screen == "installing": VerticalBox {
+    // =========================================================================
+    // SCENE 7: Installing / Cancelling / Rolling back / Trashing
+    // =========================================================================
+    Scene {
+        width: 100%;
+        height: 100%;
+        active: root.screen == "installing";
+        dir: root.dir;
+
+        VerticalLayout {
             alignment: center;
-            spacing: Theme.gap-lg;
-            Text {
-                text: root.status-text;
-                font-size: Theme.font-section;
-                font-weight: 600;
-                horizontal-alignment: center;
+            padding-left: 110px;
+            padding-right: 110px;
+            spacing: Theme.s4;
+            HorizontalLayout {
+                Text {
+                    text: root.status-text;
+                    font-size: Theme.font-heading;
+                    font-weight: 600;
+                    color: Theme.ink;
+                    horizontal-stretch: 1;
+                }
+                Text {
+                    text: Math.round(root.progress * 100) + "%";
+                    font-family: Theme.font-mono;
+                    font-size: Theme.font-caption;
+                    color: Theme.ink-2;
+                    vertical-alignment: center;
+                }
             }
-            ProgressIndicator { progress: root.progress; }
-            HorizontalBox {
+            EProgress {
+                progress: root.progress;
+                indeterminate: false;
+                muted: root.status-text == "Cancelling…" || root.status-text == "Rolling back…";
+            }
+            HorizontalLayout {
                 alignment: center;
-                Button { text: "Cancel"; clicked => { root.cancel(); } }
+                EButton {
+                    text: "Cancel";
+                    clicked => { root.cancel(); }
+                }
             }
         }
+    }
 
-        // --- OfferTrash (Success screen) ---
-        if root.screen == "offer_trash": VerticalBox {
+    // =========================================================================
+    // SCENE 8: OfferTrash — SuccessMark + Move to Trash
+    // =========================================================================
+    Scene {
+        width: 100%;
+        height: 100%;
+        active: root.screen == "offer_trash";
+        dir: root.dir;
+
+        VerticalLayout {
             alignment: center;
-            spacing: Theme.gap-lg;
-            Card {
-                VerticalBox {
-                    padding: Theme.pad-outer;
-                    spacing: Theme.gap-md;
+            padding-left: 90px;
+            padding-right: 90px;
+            spacing: Theme.s4;
+            Panel {
+                VerticalLayout {
+                    padding: Theme.s6;
+                    spacing: Theme.s3;
+                    HorizontalLayout {
+                        alignment: center;
+                        SuccessMark { shown: root.screen == "offer_trash"; }
+                    }
                     Text {
                         text: root.app-name + " Installed!";
                         font-size: Theme.font-title;
-                        font-weight: 700;
+                        font-weight: 600;
                         color: Theme.success;
                         horizontal-alignment: center;
                     }
                     Text {
-                        text: "Installed to: " + root.install-dir;
+                        text: root.install-dir;
+                        font-family: Theme.font-mono;
                         font-size: Theme.font-caption;
-                        color: Theme.muted-text;
+                        color: Theme.ink-2;
                         horizontal-alignment: center;
                         wrap: word-wrap;
                     }
-                    HorizontalBox {
+                    HorizontalLayout {
                         alignment: center;
-                        CheckBox {
+                        ECheck {
                             text: "Move downloaded package to Trash";
                             checked <=> root.trash-checked;
                         }
                     }
                 }
             }
-            HorizontalBox {
+            HorizontalLayout {
                 alignment: center;
-                Button {
+                EButton {
                     text: "Done";
-                    primary: true;
+                    kind: "primary";
                     clicked => { root.finish-trash(root.trash-checked); }
                 }
             }
         }
+    }
 
-        // --- Done / Cancelled / Failed ---
-        if root.screen == "done" || root.screen == "cancelled" || root.screen == "failed": VerticalBox {
+    // =========================================================================
+    // SCENE 9: Done / Cancelled / Failed
+    // =========================================================================
+    Scene {
+        width: 100%;
+        height: 100%;
+        active: root.screen == "done" || root.screen == "cancelled" || root.screen == "failed";
+        dir: root.dir;
+
+        VerticalLayout {
             alignment: center;
-            spacing: Theme.gap-lg;
-            Card {
-                VerticalBox {
-                    padding: Theme.pad-outer;
-                    spacing: Theme.gap-sm;
+            padding-left: 90px;
+            padding-right: 90px;
+            spacing: Theme.s4;
+            Panel {
+                VerticalLayout {
+                    padding: Theme.s6;
+                    spacing: Theme.s2;
                     Text {
                         text: root.screen == "failed" ? "Installation Failed" : root.status-text;
-                        font-size: Theme.font-section;
-                        font-weight: 700;
-                        color: root.screen == "failed" ? Theme.danger : Palette.foreground;
+                        font-size: Theme.font-heading;
+                        font-weight: 600;
+                        color: root.screen == "failed" ? Theme.danger-text : Theme.ink;
                         horizontal-alignment: center;
                         wrap: word-wrap;
                     }
                     if root.error-text != "": Text {
                         text: root.error-text;
                         font-size: Theme.font-caption;
-                        color: Theme.muted-text;
-                        wrap: word-wrap;
+                        color: Theme.ink-2;
                         horizontal-alignment: center;
+                        wrap: word-wrap;
                     }
                 }
             }
-            HorizontalBox {
+            HorizontalLayout {
                 alignment: center;
-                spacing: Theme.gap-sm;
-                if root.screen == "failed" && root.suggested-command != "": Button {
+                spacing: Theme.s2;
+                if root.screen == "failed" && root.suggested-command != "": EButton {
                     text: root.command-copied ? "Copied!" : "Copy Command";
                     clicked => {
                         root.command-copied = true;
                         root.copy-suggested-command(root.suggested-command);
                     }
                 }
-                Button { text: "App Manager"; clicked => { root.back-to-manager(); } }
-                Button { text: "Close"; primary: true; clicked => { root.close-window(); } }
+                EButton {
+                    text: "App Manager";
+                    clicked => { root.back-to-manager(); }
+                }
+                EButton {
+                    text: "Close";
+                    kind: "primary";
+                    clicked => { root.close-window(); }
+                }
             }
         }
     }

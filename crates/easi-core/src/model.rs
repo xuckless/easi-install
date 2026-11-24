@@ -154,6 +154,7 @@ pub struct InstalledApp {
     pub developer: Option<String>,
     pub origin_url: Option<String>,
     pub signature_summary: Option<String>,
+    pub adopted: bool,
     pub size_bytes: u64,
     pub data_size_bytes: u64,
     pub cache_size_bytes: u64,

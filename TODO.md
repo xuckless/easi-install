@@ -80,7 +80,7 @@ Every arrow is a row in the reducer match. Every unlisted `(state, action)` pair
 - [x] Wizard fallback: pick program, pick icon, confirm name
 - [x] Conflict dialog (replace?)
 - [x] GUI vs CLI selection in `easi` main
-- [ ] → hand to user for visual design pass
+- [x] → hand to user for visual design pass (v2.0.0 Functional Calm design system + Drop logo)
 
 ## M4 — Desktop integration
 - [x] `easi --setup`: register MIME types, set easi as default, remember previous handlers
@@ -126,6 +126,7 @@ Every arrow is a row in the reducer match. Every unlisted `(state, action)` pair
 - [x] Suggestive failures & warnings: Windows/macOS package detection (`.exe`/`.msi`/`.dmg`), friendly distro-package redirects (`.deb`/`.rpm`/`.flatpak`/`.snap`), safe `ld-linux --list` missing shared library warnings, and `/proc/self/mounts` `noexec` mount detection
 - [x] Hardening: atomic replace backup/restore on rollback, pre-install extracted-size & compression-ratio overridable warning, real AppImage `.sha256_sig` GPG verification, live GUI progress streaming, and temp preview icon cleanup
 - [x] Dedicated Settings page (auto-update switch, uninstall defaults, file association register/restore, Danger Zone for Uninstall easi) and Android-style Per-App Info page (icon, developer, signature, origin, App/User Data/Cache storage breakdown, Clear Cache, Clear Data, Uninstall)
+- [x] Discover, adopt & repair existing unmanaged user apps in `$HOME` (`easi scan`/`adopt`/`repair`/`forget`, Detected Apps section with Manage / Manage All, Repair Icon & Launcher, Stop Managing), clarified Settings file-handler copy, and Wayland/X11 Alt-Tab app ID fix (`set_xdg_app_id("easi")` + `StartupWMClass=easi`)
 - [ ] Portable app-list backup (`easi export` / `easi import`) to reinstall upstream-tracked apps on a new Linux machine or fresh SteamOS/CachyOS install
 
 ## Open questions

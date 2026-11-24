@@ -665,6 +665,7 @@ mod tests {
             developer: None,
             origin_url: None,
             signature_summary: None,
+            adopted: false,
             size_bytes: 0,
             data_size_bytes: 0,
             cache_size_bytes: 0,

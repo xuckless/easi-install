@@ -23,6 +23,8 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
     let runner = Arc::new(EffectRunner::new(roots));
     let store = Arc::new(Mutex::new(Store::new()));
     let window = ui::AppWindow::new()?;
+    // Match `easi.desktop` so Wayland/X11 Alt-Tab and taskbars show "easi" instead of "Unknown".
+    let _ = slint::set_xdg_app_id("easi");
     let cfg = easi_core::self_update::load_config(&runner.roots);
     window.set_auto_check_updates(cfg.auto_check_updates);
     window.set_easi_version(env!("CARGO_PKG_VERSION").into());
@@ -107,6 +109,106 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                 win.set_detail_purge_checked(win.get_purge_data_on_uninstall());
                 win.set_manager_page("app_info".into());
             }
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        let r = Arc::clone(&runner);
+        window.on_refresh_apps(move || {
+            dispatch_action(&w, &s, &r, Action::LoadInstalled);
+            refresh_detected_async(&w, &r.roots);
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        let r = Arc::clone(&runner);
+        window.on_add_existing_app_folder(move || {
+            let w = w.clone();
+            let s = Arc::clone(&s);
+            let r = Arc::clone(&r);
+            std::thread::spawn(move || {
+                let mut dialog =
+                    rfd::FileDialog::new().set_title("Choose an existing app folder to manage");
+                if r.roots.applications_dir.is_dir() {
+                    dialog = dialog.set_directory(&r.roots.applications_dir);
+                } else if r.roots.home_dir.is_dir() {
+                    dialog = dialog.set_directory(&r.roots.home_dir);
+                }
+                if let Some(folder) = dialog.pick_folder() {
+                    let _ = easi_core::adopt::adopt_path(&r.roots, &folder, true);
+                    let _ = slint::invoke_from_event_loop(move || {
+                        dispatch_action(&w, &s, &r, Action::LoadInstalled);
+                        refresh_detected_async(&w, &r.roots);
+                    });
+                }
+            });
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        let r = Arc::clone(&runner);
+        window.on_adopt_app(move |app_id| {
+            let w = w.clone();
+            let s = Arc::clone(&s);
+            let r = Arc::clone(&r);
+            let id: String = app_id.into();
+            std::thread::spawn(move || {
+                let discovered = easi_core::adopt::scan_unmanaged_apps(&r.roots);
+                if let Some(app) = discovered.iter().find(|a| a.app_id == id) {
+                    let _ = easi_core::adopt::adopt_app(&r.roots, app, true);
+                }
+                let _ = slint::invoke_from_event_loop(move || {
+                    dispatch_action(&w, &s, &r, Action::LoadInstalled);
+                    refresh_detected_async(&w, &r.roots);
+                });
+            });
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        let r = Arc::clone(&runner);
+        window.on_adopt_all_apps(move || {
+            let w = w.clone();
+            let s = Arc::clone(&s);
+            let r = Arc::clone(&r);
+            std::thread::spawn(move || {
+                let _ = easi_core::adopt::adopt_all(&r.roots, true);
+                let _ = slint::invoke_from_event_loop(move || {
+                    dispatch_action(&w, &s, &r, Action::LoadInstalled);
+                    refresh_detected_async(&w, &r.roots);
+                });
+            });
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        let r = Arc::clone(&runner);
+        window.on_repair_app(move |app_id| {
+            let id: String = app_id.into();
+            let msg = match easi_core::adopt::repair_app(&r.roots, &id) {
+                Ok(fixes) if fixes.is_empty() => "Icon and launcher already look good.".into(),
+                Ok(fixes) => format!("Repaired: {}.", fixes.join(", ")),
+                Err(e) => format!("Repair failed: {}", easi_core::format_user_error(&e)),
+            };
+            if let Some(win) = w.upgrade() {
+                win.set_detail_feedback(msg.into());
+            }
+            dispatch_action(&w, &s, &r, Action::LoadInstalled);
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        let r = Arc::clone(&runner);
+        window.on_forget_app(move |app_id| {
+            let _ = easi_core::adopt::forget_app(&r.roots, app_id.as_str());
+            dispatch_action(&w, &s, &r, Action::LoadInstalled);
+            refresh_detected_async(&w, &r.roots);
         });
     }
     {
@@ -438,11 +540,46 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         dispatch_action(&window.as_weak(), &store, &runner, Action::OpenPath(path));
     } else {
         dispatch_action(&window.as_weak(), &store, &runner, Action::LoadInstalled);
+        refresh_detected_async(&window.as_weak(), &runner.roots);
     }
 
     let res = window.run();
     cleanup_preview_icons();
     res
+}
+
+fn refresh_detected_async(weak: &Weak<ui::AppWindow>, roots: &InstallRoots) {
+    let w = weak.clone();
+    let roots_bg = roots.clone();
+    std::thread::spawn(move || {
+        let rows: Vec<ui::DetectedRow> = easi_core::adopt::scan_unmanaged_apps(&roots_bg)
+            .into_iter()
+            .map(|app| {
+                let issues_text = app
+                    .issues
+                    .iter()
+                    .map(|i| i.label())
+                    .collect::<Vec<_>>()
+                    .join(" • ");
+                ui::DetectedRow {
+                    app_id: app.app_id.into(),
+                    name: app.name.into(),
+                    version: app.version.unwrap_or_default().into(),
+                    kind: match app.kind {
+                        AppKind::Gui => "GUI".into(),
+                        AppKind::Terminal => "CLI".into(),
+                    },
+                    size_text: easi_core::manifest::format_human_bytes(app.size_bytes).into(),
+                    issues_text: issues_text.into(),
+                }
+            })
+            .collect();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(win) = w.upgrade() {
+                win.set_detected_apps(ModelRc::new(VecModel::from(rows)));
+            }
+        });
+    });
 }
 
 fn cleanup_preview_icons() {
@@ -513,10 +650,38 @@ fn project_trust(win: &ui::AppWindow, trust: &TrustSummary) {
     win.set_trust_warnings(trust.warnings.join("; ").into());
 }
 
+fn screen_rank(name: &str) -> i32 {
+    match name {
+        "idle" => 0,
+        "inspecting" => 1,
+        "ready" => 2,
+        "conflict" => 3,
+        "wizard_exec" => 4,
+        "wizard_icon" => 5,
+        "wizard_name" => 6,
+        "installing" => 7,
+        "offer_trash" => 8,
+        _ => 9,
+    }
+}
+
+fn set_screen_with_dir(win: &ui::AppWindow, next: &str) {
+    let cur = win.get_screen().to_string();
+    if cur != next {
+        let dir = if screen_rank(next) >= screen_rank(&cur) {
+            1.0
+        } else {
+            -1.0
+        };
+        win.set_dir(dir);
+        win.set_screen(next.into());
+    }
+}
+
 fn project_state(win: &ui::AppWindow, state: &State) {
     match state {
         State::Idle { installed } => {
-            win.set_screen("idle".into());
+            set_screen_with_dir(win, "idle");
             let total_bytes: u64 = installed.iter().map(|a| a.size_bytes).sum();
             let total_text = if installed.is_empty() {
                 String::new()
@@ -579,17 +744,17 @@ fn project_state(win: &ui::AppWindow, state: &State) {
             }
         }
         State::Inspecting { path } => {
-            win.set_screen("inspecting".into());
+            set_screen_with_dir(win, "inspecting");
             win.set_status_text(format!("Inspecting {}…", path.display()).into());
         }
         State::HandingOff { path } => {
-            win.set_screen("inspecting".into());
+            set_screen_with_dir(win, "inspecting");
             win.set_status_text(
                 format!("Opening {} in previous archive handler…", path.display()).into(),
             );
         }
         State::Ready { plan, trust } => {
-            win.set_screen("ready".into());
+            set_screen_with_dir(win, "ready");
             win.set_app_name(plan.name.clone().into());
             win.set_app_version(plan.version.clone().unwrap_or_default().into());
             win.set_app_id(plan.app_id.clone().into());
@@ -637,7 +802,7 @@ fn project_state(win: &ui::AppWindow, state: &State) {
             plan,
             trust,
         } => {
-            win.set_screen("conflict".into());
+            set_screen_with_dir(win, "conflict");
             let old_v = existing.version.as_deref().unwrap_or("unknown");
             let new_v = plan.version.as_deref().unwrap_or("unknown");
             win.set_conflict_text(
@@ -651,7 +816,7 @@ fn project_state(win: &ui::AppWindow, state: &State) {
         }
         State::NeedsChoice { draft, step, .. } => match step {
             WizardStep::PickExecutable => {
-                win.set_screen("wizard_exec".into());
+                set_screen_with_dir(win, "wizard_exec");
                 let items: Vec<SharedString> = draft
                     .exec_candidates
                     .iter()
@@ -660,7 +825,7 @@ fn project_state(win: &ui::AppWindow, state: &State) {
                 win.set_wizard_choices(ModelRc::new(VecModel::from(items)));
             }
             WizardStep::PickIcon => {
-                win.set_screen("wizard_icon".into());
+                set_screen_with_dir(win, "wizard_icon");
                 let items: Vec<SharedString> = draft
                     .icon_candidates
                     .iter()
@@ -669,35 +834,35 @@ fn project_state(win: &ui::AppWindow, state: &State) {
                 win.set_wizard_choices(ModelRc::new(VecModel::from(items)));
             }
             WizardStep::ConfirmName => {
-                win.set_screen("wizard_name".into());
+                set_screen_with_dir(win, "wizard_name");
                 win.set_wizard_name_input(draft.name.clone().into());
             }
         },
         State::Installing { step, progress, .. } => {
-            win.set_screen("installing".into());
+            set_screen_with_dir(win, "installing");
             win.set_status_text(format!("{step:?}…").into());
             win.set_progress(f32::from(*progress) / 100.0);
         }
         State::Cancelling { .. } => {
-            win.set_screen("installing".into());
+            set_screen_with_dir(win, "installing");
             win.set_status_text("Cancelling…".into());
         }
         State::RollingBack { .. } => {
-            win.set_screen("installing".into());
+            set_screen_with_dir(win, "installing");
             win.set_status_text("Rolling back…".into());
         }
         State::OfferTrash { summary } => {
-            win.set_screen("offer_trash".into());
+            set_screen_with_dir(win, "offer_trash");
             win.set_app_name(summary.name.clone().into());
             win.set_install_dir(summary.install_dir.display().to_string().into());
             win.set_trash_checked(true);
         }
         State::Trashing { .. } => {
-            win.set_screen("installing".into());
+            set_screen_with_dir(win, "installing");
             win.set_status_text("Moving download to Trash…".into());
         }
         State::Done { outcome } => {
-            win.set_screen("done".into());
+            set_screen_with_dir(win, "done");
             win.set_error_text("".into());
             match outcome {
                 DoneOutcome::Installed { summary, trashed } => {
@@ -720,12 +885,12 @@ fn project_state(win: &ui::AppWindow, state: &State) {
             }
         }
         State::Cancelled => {
-            win.set_screen("cancelled".into());
+            set_screen_with_dir(win, "cancelled");
             win.set_status_text("Cancelled.".into());
             win.set_error_text("".into());
         }
         State::Failed { error, rolled_back } => {
-            win.set_screen("failed".into());
+            set_screen_with_dir(win, "failed");
             win.set_command_copied(false);
             let cmd = extract_suggested_command(error).unwrap_or_default();
             win.set_suggested_command(cmd.into());
@@ -786,8 +951,18 @@ fn project_app_detail(win: &ui::AppWindow, roots: &InstallRoots, app: &easi_core
         .saturating_add(app.data_size_bytes)
         .saturating_add(app.cache_size_bytes);
     win.set_detail_total_size(easi_core::manifest::format_human_bytes(total).into());
+    if total > 0 {
+        win.set_detail_app_ratio(app.size_bytes as f32 / total as f32);
+        win.set_detail_data_ratio(app.data_size_bytes as f32 / total as f32);
+        win.set_detail_cache_ratio(app.cache_size_bytes as f32 / total as f32);
+    } else {
+        win.set_detail_app_ratio(1.0);
+        win.set_detail_data_ratio(0.0);
+        win.set_detail_cache_ratio(0.0);
+    }
     win.set_detail_has_cache(app.cache_size_bytes > 0);
     win.set_detail_has_data(app.data_size_bytes > 0);
+    win.set_detail_adopted(app.adopted);
     if let Some(icon_path) = easi_core::manifest::find_installed_icon(roots, &app.app_id)
         && let Ok(img) = slint::Image::load_from_path(&icon_path)
     {

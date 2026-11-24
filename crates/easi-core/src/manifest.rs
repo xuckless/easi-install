@@ -25,6 +25,8 @@ pub struct Manifest {
     pub signature_summary: Option<String>,
     #[serde(default)]
     pub update_source: Option<UpdateSource>,
+    #[serde(default)]
+    pub adopted: bool,
     pub created_files: Vec<PathBuf>,
     pub created_dirs: Vec<PathBuf>,
 }
@@ -41,6 +43,7 @@ impl Manifest {
             developer: self.developer.clone(),
             origin_url: self.origin_url.clone(),
             signature_summary: self.signature_summary.clone(),
+            adopted: self.adopted,
             size_bytes: dir_size_bytes(&self.install_dir),
             data_size_bytes: 0,
             cache_size_bytes: 0,

@@ -72,10 +72,18 @@ pub fn save_handlers(roots: &InstallRoots, handlers: &SavedHandlers) -> Result<P
     Ok(path)
 }
 
-/// Register `easi.desktop`, ensure AppImage MIME definition exists, remember previous default
-/// handlers for supported MIME types, and set `easi.desktop` as the default handler.
+const EASI_ICON_SVG: &str = include_str!("../../../assets/easi.svg");
+const EASI_SYMBOLIC_SVG: &str = include_str!("../../../assets/easi-symbolic.svg");
+
+/// Register `easi.desktop`, install the Drop brand SVG icon, ensure AppImage MIME definition
+/// exists, remember previous default handlers, and set `easi.desktop` as the default handler.
 pub fn run_setup(roots: &InstallRoots, easi_bin: &Path) -> Result<SavedHandlers, EasiError> {
     fs::create_dir_all(&roots.desktop_dir)?;
+    let icon_dir = roots.icons_dir.join("scalable/apps");
+    if fs::create_dir_all(&icon_dir).is_ok() {
+        let _ = fs::write(icon_dir.join("easi.svg"), EASI_ICON_SVG);
+        let _ = fs::write(icon_dir.join("easi-symbolic.svg"), EASI_SYMBOLIC_SVG);
+    }
     let desktop_path = roots.desktop_dir.join(EASI_DESKTOP_ID);
     let mimes = SUPPORTED_MIMES
         .iter()
@@ -97,9 +105,11 @@ pub fn run_setup(roots: &InstallRoots, easi_bin: &Path) -> Result<SavedHandlers,
          Name=easi\n\
          GenericName=App Installer\n\
          Comment=Install downloaded Linux apps\n\
+         Icon=easi\n\
          Exec={exec_quoted} %f\n\
          Terminal=false\n\
          StartupNotify=true\n\
+         StartupWMClass=easi\n\
          Categories=System;Utility;\n\
          MimeType={mimes};\n"
     );

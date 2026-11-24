@@ -1,0 +1,630 @@
+// Easi Install components for crates/easi-gui/ui. Every motion is a plain `animate` block with
+// the numbers from tokens.slint, so these are the implementation, not an approximation.
+// No logic beyond layout and binding (easi AGENTS.md): callbacks still only dispatch Actions.
+import { Theme } from "tokens.slint";
+export { Theme }
+
+// @spec button
+// Press: 0.97 in 120 ms ease-out, back in 160 ms. Hover colour 150 ms.
+export component EButton inherits Rectangle {
+    in property <string> text;
+    in property <string> kind: "secondary"; // "primary" | "danger" | "danger-soft" | "ghost"
+    in property <bool> enabled: true;
+    in property <bool> small: false;
+    callback clicked();
+
+    height: small ? Theme.control-height-small : Theme.control-height;
+    preferred-width: label.preferred-width + (small ? 20px : 28px);
+    min-width: self.preferred-width;
+    border-radius: Theme.radius-control;
+    background: !enabled ? Theme.surface-2
+        : kind == "primary" ? (ta.has-hover ? Theme.accent-hover : Theme.accent)
+        : kind == "danger" ? Theme.danger
+        : kind == "danger-soft" ? (ta.has-hover ? Theme.surface-2 : Theme.surface)
+        : kind == "ghost" ? (ta.has-hover ? Theme.surface-2 : transparent)
+        : (ta.has-hover ? Theme.surface-3 : Theme.surface-2);
+    animate background { duration: Theme.hover; easing: Theme.ease-out; }
+    transform-scale: ta.pressed && enabled ? Theme.press : 1;
+    animate transform-scale { duration: ta.pressed ? Theme.press-in : Theme.press-out; easing: Theme.ease-out; }
+
+    label := Text {
+        text: root.text;
+        font-family: Theme.font-ui;
+        font-size: Theme.font-body;
+        font-weight: 500;
+        color: !root.enabled ? Theme.ink-3
+            : (root.kind == "primary" || root.kind == "danger") ? Theme.on-accent
+            : root.kind == "danger-soft" ? Theme.danger-text : Theme.ink;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+// @end
+
+// @spec switch
+// Track colour and knob travel 200 ms ease-in-out. While pressed the knob stretches 12% toward the
+// side it will travel to (the width grows, the far edge stays put). It never tweens with the finger.
+export component ESwitch inherits Rectangle {
+    in-out property <bool> checked;
+    callback toggled(bool);
+
+    width: 40px;
+    height: 24px;
+    border-radius: 12px;
+    background: checked ? Theme.accent : Theme.surface-3;
+    animate background { duration: Theme.switch; easing: Theme.ease-in-out; }
+
+    knob := Rectangle {
+        property <length> w: ta.pressed ? 20px * 1.12 : 20px;
+        width: w;
+        height: 20px;
+        y: 2px;
+        x: root.checked ? root.width - 2px - self.w : 2px;
+        border-radius: 10px;
+        background: #FFFFFF;
+        drop-shadow-blur: 2px;
+        drop-shadow-offset-y: 1px;
+        drop-shadow-color: #00000038;
+        animate x, width { duration: Theme.switch; easing: Theme.ease-in-out; }
+    }
+    ta := TouchArea {
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled(root.checked);
+        }
+    }
+}
+// @end
+
+// @spec check
+// Box fill 160 ms ease-out; the tick is revealed left to right by a clip mask 40 ms later.
+export component ECheck inherits Rectangle {
+    in-out property <bool> checked;
+    in property <string> text;
+    callback toggled(bool);
+
+    min-width: 26px + label.preferred-width;
+    min-height: max(18px, label.preferred-height);
+
+    box := Rectangle {
+        x: 0;
+        y: (root.height - self.height) / 2;
+        width: 18px;
+        height: 18px;
+        border-radius: 5px;
+        background: root.checked ? Theme.accent : Theme.surface-2;
+        border-width: root.checked ? 0px : 1.5px;
+        border-color: Theme.ink-3;
+        animate background { duration: Theme.check; easing: Theme.ease-out; }
+        Rectangle {
+            x: 3px;
+            y: 3px;
+            height: 12px;
+            width: root.checked ? 12px : 0px;
+            clip: true;
+            animate width { duration: Theme.check; delay: root.checked ? Theme.settle : 0ms; easing: Theme.ease-out; }
+            Path {
+                x: 0;
+                y: 0;
+                width: 12px;
+                height: 12px;
+                viewbox-width: 12;
+                viewbox-height: 12;
+                commands: "M 2.5 6.2 L 5 8.6 L 9.5 3.6";
+                stroke: Theme.on-accent;
+                stroke-width: 1.8px;
+                stroke-line-cap: round;
+                fill: transparent;
+            }
+        }
+    }
+    label := Text {
+        x: 26px;
+        width: root.width - 26px;
+        y: (root.height - self.height) / 2;
+        text: root.text;
+        font-family: Theme.font-ui;
+        font-size: Theme.font-body;
+        color: Theme.ink;
+        wrap: word-wrap;
+    }
+    TouchArea {
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled(root.checked);
+        }
+    }
+}
+// @end
+
+// @spec segment
+// Equal-width segments. One indicator slides 220 ms ease-in-out (the shared-element move);
+// labels recolour in 150 ms. `current` is an index; the app maps it to manager-page / filter-kind.
+export component ESegmented inherits Rectangle {
+    in property <[string]> labels;
+    in property <int> current;
+    in property <length> item-width: 76px;
+    in property <bool> small: false;
+    callback changed(int);
+
+    height: small ? Theme.control-height-small : Theme.control-height;
+    width: labels.length * item-width + 4px;
+    border-radius: Theme.radius-control;
+    background: Theme.surface-2;
+
+    Rectangle {
+        x: 2px + root.current * root.item-width;
+        y: 2px;
+        width: root.item-width;
+        height: root.height - 4px;
+        border-radius: 6px;
+        background: Theme.dark ? Theme.surface-3 : Theme.surface;
+        drop-shadow-blur: 3px;
+        drop-shadow-offset-y: 1px;
+        drop-shadow-color: #00000024;
+        animate x { duration: Theme.segment; easing: Theme.ease-in-out; }
+    }
+    for label[i] in root.labels: Rectangle {
+        x: 2px + i * root.item-width;
+        y: 2px;
+        width: root.item-width;
+        height: root.height - 4px;
+        Text {
+            text: label;
+            font-family: Theme.font-ui;
+            font-size: Theme.font-body;
+            font-weight: 500;
+            color: i == root.current ? Theme.ink : Theme.ink-2;
+            animate color { duration: Theme.hover; easing: Theme.ease-out; }
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        TouchArea {
+            clicked => { root.changed(i); }
+        }
+    }
+}
+// @end
+
+// @spec scene
+// Overlap between screens. Every screen is mounted once inside a Scene instead of behind `if`, so the
+// old one can still be leaving while the new one arrives:
+//   arriving: opacity 0→1 and x +8·dir → 0, 240 ms ease-out
+//   leaving:  opacity 1→0 and x 0 → −8·dir, 190 ms exit ease
+// dir = +1 going forward (deeper / later in the flow), −1 going back. A scene that left forward rests at
+// −8 px, so coming back to it (dir −1) arrives from the left with no extra state.
+export component Scene inherits Rectangle {
+    in property <bool> active;
+    in property <float> dir: 1;
+
+    opacity: active ? 1 : 0;
+    visible: self.opacity > 0.001;
+    animate opacity { duration: root.active ? Theme.enter : Theme.exit; easing: root.active ? Theme.ease-out : Theme.ease-exit; }
+
+    Rectangle {
+        x: root.active ? 0px : -Theme.shift * root.dir;
+        width: root.width;
+        height: root.height;
+        animate x { duration: root.active ? Theme.enter : Theme.exit; easing: root.active ? Theme.ease-out : Theme.ease-exit; }
+        @children
+    }
+    // A leaving scene must not take clicks.
+    if !root.active: TouchArea { }
+}
+// @end
+
+// @spec settle
+// Details settle behind their body: opacity only (Slint has no translate), `step` × 40 ms later.
+export component Settle inherits Rectangle {
+    in property <bool> shown;
+    in property <int> step: 1;
+    opacity: shown ? 1 : 0;
+    animate opacity { duration: root.shown ? Theme.enter : Theme.exit; delay: root.shown ? root.step * Theme.settle : 0ms; easing: Theme.ease-out; }
+}
+// @end
+
+// @spec row
+// List rows. filter-changed() hands Slint a new model, so rows are rebuilt and each runs its entrance once:
+// opacity 0→1, 240 ms ease-out, delay 40 ms + index × 30 ms.
+export component StaggerRow inherits Rectangle {
+    in property <int> index;
+    property <bool> shown: false;
+    init => { self.shown = true; }
+    opacity: shown ? 1 : 0;
+    animate opacity { duration: Theme.enter; delay: Theme.settle + root.index * Theme.stagger; easing: Theme.ease-out; }
+    border-radius: Theme.radius-control;
+    background: ta.has-hover ? Theme.surface-2 : transparent;
+    animate background { duration: Theme.hover; }
+    ta := TouchArea { }
+    @children
+}
+// @end
+
+// @spec progress
+// Determinate: the fill eases to each new value in 240 ms. Indeterminate: a 30% segment loops every
+// 1400 ms at x = (−0.3 + 1.3·s)·W with s = smoothstep(t) = t²(3 − 2t). animation-tick() is only read while
+// indeterminate, so an idle bar costs nothing.
+export component EProgress inherits Rectangle {
+    in property <float> progress;
+    in property <bool> indeterminate;
+    in property <bool> muted;
+
+    height: 4px;
+    border-radius: 2px;
+    background: Theme.surface-2;
+    clip: true;
+
+    property <float> t: root.indeterminate ? mod(animation-tick() / 1ms, 1400) / 1400 : 0;
+
+    Rectangle {
+        visible: !root.indeterminate;
+        x: 0;
+        width: root.width * max(0, min(1, root.progress));
+        height: root.height;
+        border-radius: 2px;
+        background: root.muted ? Theme.ink-3 : Theme.accent;
+        animate width { duration: Theme.progress; easing: Theme.ease-out; }
+        animate background { duration: Theme.hover; }
+    }
+    Rectangle {
+        visible: root.indeterminate;
+        width: root.width * 0.3;
+        x: root.width * (-0.3 + 1.3 * root.t * root.t * (3 - 2 * root.t));
+        height: root.height;
+        border-radius: 2px;
+        background: Theme.accent;
+    }
+}
+// @end
+
+// @spec confirm
+// Inline confirm (Clear Data, Uninstall <app>, Uninstall easi). The pair grows out of the trigger and folds
+// back into it: width 200 ms ease-in-out (160 ms closing); the trigger fades out at once, the pair fades in
+// 40 ms later. Bind `open` to the existing detail-confirm-* / confirm-self-uninstall property.
+export component ConfirmButton inherits Rectangle {
+    in property <string> text;
+    in property <string> confirm-text;
+    in property <string> trigger-kind: "secondary";
+    in property <bool> enabled: true;
+    in-out property <bool> open;
+    callback confirmed();
+
+    height: Theme.control-height-small;
+    width: open ? pair.preferred-width : trigger.preferred-width;
+    animate width { duration: root.open ? Theme.reveal : Theme.reveal-out; easing: Theme.ease-in-out; }
+    clip: true;
+
+    trigger := EButton {
+        x: 0;
+        small: true;
+        text: root.text;
+        kind: root.trigger-kind;
+        enabled: root.enabled;
+        opacity: root.open ? 0 : 1;
+        visible: self.opacity > 0.01;
+        animate opacity { duration: root.open ? Theme.exit : Theme.enter; easing: Theme.ease-out; }
+        clicked => { root.open = true; }
+    }
+    Rectangle {
+        x: 0;
+        width: pair.preferred-width;
+        opacity: root.open ? 1 : 0;
+        visible: self.opacity > 0.01;
+        animate opacity { duration: root.open ? Theme.enter : Theme.exit; delay: root.open ? Theme.settle : 0ms; easing: Theme.ease-out; }
+        pair := HorizontalLayout {
+            spacing: Theme.s1;
+            EButton {
+                small: true;
+                kind: "danger";
+                text: root.confirm-text;
+                clicked => {
+                    root.open = false;
+                    root.confirmed();
+                }
+            }
+            EButton {
+                small: true;
+                text: "Cancel";
+                clicked => { root.open = false; }
+            }
+        }
+    }
+}
+// @end
+
+// @spec success
+// Success: the circle grows 0.6 → 1.05 (240 ms ease-out) then settles to 1 (200 ms ease-in-out): the pulse.
+// The tick is revealed left to right by a mask, 320 ms ease-out, 80 ms after the circle starts.
+export component SuccessMark inherits Rectangle {
+    in property <bool> shown;
+    property <bool> peaked;
+
+    width: 44px;
+    height: 44px;
+    border-radius: 22px;
+    background: Theme.success-soft;
+    transform-scale: !shown ? 0.6 : peaked ? 1 : Theme.pulse;
+    animate transform-scale { duration: root.peaked ? Theme.pulse-down : Theme.enter; easing: root.peaked ? Theme.ease-in-out : Theme.ease-out; }
+
+    Timer {
+        interval: Theme.enter;
+        running: root.shown && !root.peaked;
+        triggered => { root.peaked = true; }
+    }
+    changed shown => { if (!self.shown) { self.peaked = false; } }
+
+    Rectangle {
+        x: 10px;
+        y: 10px;
+        height: 24px;
+        width: root.shown ? 24px : 0px;
+        clip: true;
+        animate width { duration: Theme.check * 2; delay: root.shown ? Theme.settle * 2 : 0ms; easing: Theme.ease-out; }
+        Path {
+            x: 0;
+            y: 0;
+            width: 24px;
+            height: 24px;
+            viewbox-width: 24;
+            viewbox-height: 24;
+            commands: "M 5.5 12.5 L 9.5 16.5 L 18.5 7";
+            stroke: Theme.success;
+            stroke-width: 2.4px;
+            stroke-line-cap: round;
+            fill: transparent;
+        }
+    }
+}
+// @end
+
+// @spec drag-stage
+// The DMG-style stage. One TouchArea covers the whole stage (it doesn't move), and a press counts only on
+// the tile. That fixes today's feedback loop, where the TouchArea rode inside the tile it was moving.
+//   raw  r = mouse − pressed (px)
+//   held o = bandClamp(r, lo, hi), band(d) = sign(d)·26·(1 − 1/(|d|/26 + 1))
+//   d    = folder centre − (tile centre at rest + o)
+//   over = |dx| < tw/2 + 32 and |dy| < th/2 + 32          (replaces drag-offset-x > 120px)
+//   pull = 0.3·clamp(1 − |d|/140, 0, 1), shown = o + d·pull (the magnet; continuous, so nothing jumps)
+// While held nothing tweens (duration 0). Released outside: back to rest, 320 ms ease-out. Released over the
+// folder: x and y glide to the folder centre (360 ms ease-in-out) while `hop` runs 0→1 linearly and the body
+// is lifted by 28·4h(1−h): an exact parabola, so there is an arc even when tile and folder share a height.
+// The body scales to 0.5 and fades in the last 140 ms; the folder pulses (1.05: 120 ms up, 200 ms down) and
+// dropped() fires at 360 + 120 = 480 ms.
+export component DragStage inherits Rectangle {
+    in property <image> icon;
+    in property <bool> has-icon;
+    in property <string> name;
+    in property <string> kind;
+    in property <bool> allowed: true;
+    in property <bool> active: true;  // the Ready scene is showing
+    callback dropped();               // → root.confirm-install()
+
+    height: 148px;
+    border-radius: Theme.radius-section;
+    background: Theme.surface-2;
+
+    property <length> tw: 148px;
+    property <length> th: 100px;
+    property <length> inset: 24px;
+    property <length> t0x: self.inset + self.tw / 2;
+    property <length> t0y: self.height / 2;
+    property <length> fx: self.width - self.inset - self.tw / 2;
+    property <length> fy: self.height / 2;
+
+    property <bool> held;
+    property <bool> dropping;
+    property <bool> landed;
+    property <length> rx;
+    property <length> ry;
+
+    pure function band(d: length) -> length {
+        return (d < 0 ? -1 : 1) * 26px * (1 - 1 / (abs(d) / 26px + 1));
+    }
+    pure function band-clamp(v: length, lo: length, hi: length) -> length {
+        return v < lo ? lo + band(v - lo) : v > hi ? hi + band(v - hi) : v;
+    }
+    property <length> ox: band-clamp(self.rx, -self.inset, self.width - self.inset - self.tw);
+    property <length> oy: band-clamp(self.ry, -(self.height - self.th) / 2, (self.height - self.th) / 2);
+    property <length> dx: self.fx - (self.t0x + self.ox);
+    property <length> dy: self.fy - (self.t0y + self.oy);
+    property <bool> over: abs(self.dx) < self.tw / 2 + 32px && abs(self.dy) < self.th / 2 + 32px;
+    property <float> pull: 0.3 * max(0, min(1, 1 - sqrt((self.dx / 1px) * (self.dx / 1px) + (self.dy / 1px) * (self.dy / 1px)) / 140));
+    property <length> show-x: self.dropping ? self.fx - self.t0x : self.held ? self.ox + self.dx * self.pull : 0px;
+    property <length> show-y: self.dropping ? self.fy - self.t0y : self.held ? self.oy + self.dy * self.pull : 0px;
+    property <bool> lit: (self.held || self.dropping) && self.over;
+    property <float> hop: self.dropping ? 1 : 0;
+    animate hop { duration: root.dropping ? Theme.drop : 0ms; easing: linear; }
+
+    changed active => {
+        if (!self.active) {
+            self.dropping = false;
+            self.landed = false;
+        }
+    }
+
+    // Applications target: a dashed outline (Slint borders are solid, so it's a colorized SVG).
+    folder := Rectangle {
+        x: root.width - root.inset - root.tw;
+        y: (root.height - root.th) / 2;
+        width: root.tw;
+        height: root.th;
+        border-radius: Theme.radius-tile;
+        background: root.lit ? Theme.accent-soft : Theme.surface-2;
+        animate background { duration: Theme.hover; easing: Theme.ease-out; }
+        transform-scale: root.landed ? Theme.pulse : 1;
+        animate transform-scale { duration: root.landed ? Theme.pulse-up : Theme.pulse-down; easing: root.landed ? Theme.ease-out : Theme.ease-in-out; }
+
+        Image {
+            source: @image-url("target-dash.svg");
+            width: parent.width;
+            height: parent.height;
+            colorize: root.lit ? Theme.accent : Theme.ink-3;
+            animate colorize { duration: Theme.hover; }
+        }
+        Image {
+            x: (parent.width - 40px) / 2;
+            y: 16px;
+            width: 40px;
+            height: 32px;
+            source: @image-url("folder-back.svg");
+            colorize: root.lit ? Theme.accent : Theme.ink-2;
+            animate colorize { duration: Theme.hover; }
+        }
+        // The front lid shortens toward its bottom edge, so the folder reads as opening.
+        Image {
+            x: (parent.width - 40px) / 2;
+            y: 16px;
+            width: 40px;
+            height: 32px;
+            source: @image-url("folder-lid.svg");
+            colorize: root.lit ? Theme.accent-text : Theme.ink-3;
+            transform-origin: { x: self.width / 2, y: self.height };
+            transform-scale-y: root.lit ? 0.78 : 1;
+            animate transform-scale-y, colorize { duration: Theme.hover; easing: Theme.ease-out; }
+        }
+        Text {
+            y: 54px;
+            width: parent.width;
+            text: "Applications";
+            font-family: Theme.font-ui;
+            font-size: Theme.font-heading;
+            font-weight: 600;
+            color: Theme.ink;
+            horizontal-alignment: center;
+        }
+        Text {
+            y: 74px;
+            width: parent.width;
+            text: "~/Applications";
+            font-family: Theme.font-mono;
+            font-size: Theme.font-caption;
+            color: Theme.ink-2;
+            horizontal-alignment: center;
+        }
+    }
+
+    Path {
+        x: (root.width - 48px) / 2;
+        y: (root.height - 16px) / 2;
+        width: 48px;
+        height: 16px;
+        viewbox-width: 48;
+        viewbox-height: 16;
+        commands: "M 2 8 L 44 8 M 38 3 L 44 8 L 38 13";
+        stroke: Theme.ink-3;
+        stroke-width: 1.6px;
+        stroke-line-cap: round;
+        fill: transparent;
+    }
+
+    tile := Rectangle {
+        x: root.inset + root.show-x;
+        y: (root.height - root.th) / 2 + root.show-y;
+        width: root.tw;
+        height: root.th;
+        animate x, y { duration: root.held ? 0ms : root.dropping ? Theme.drop : Theme.return; easing: root.dropping ? Theme.ease-in-out : Theme.ease-out; }
+
+        // The hop lives on its own element: it's a per-frame binding of the animated `hop`, never animated itself.
+        body := Rectangle {
+            y: -Theme.hop * 4 * root.hop * (1 - root.hop);
+            width: parent.width;
+            height: parent.height;
+            transform-scale: root.dropping ? 0.5 : root.held ? Theme.lift-scale : 1;
+            animate transform-scale { duration: root.dropping ? Theme.drop : Theme.lift; easing: root.dropping ? Theme.ease-in-out : Theme.ease-out; }
+            opacity: root.dropping ? 0 : 1;
+            animate opacity { duration: Theme.fade-into-folder; delay: root.dropping ? Theme.drop - Theme.fade-into-folder : 0ms; }
+            border-radius: Theme.radius-tile;
+            background: Theme.surface;
+            drop-shadow-blur: root.held ? 24px : 6px;
+            drop-shadow-offset-y: root.held ? 10px : 1px;
+            drop-shadow-color: Theme.dark ? #00000080 : #0000002e;
+            animate drop-shadow-blur, drop-shadow-offset-y { duration: Theme.lift; easing: Theme.ease-out; }
+
+            VerticalLayout {
+                alignment: center;
+                padding: 8px;
+                spacing: 4px;
+                if root.has-icon: HorizontalLayout {
+                    alignment: center;
+                    Image {
+                        source: root.icon;
+                        width: 40px;
+                        height: 40px;
+                        image-fit: contain;
+                    }
+                }
+                Text {
+                    text: root.name;
+                    font-family: Theme.font-ui;
+                    font-size: Theme.font-heading;
+                    font-weight: 600;
+                    color: Theme.ink;
+                    horizontal-alignment: center;
+                    overflow: elide;
+                }
+                Text {
+                    text: root.kind;
+                    font-family: Theme.font-ui;
+                    font-size: Theme.font-micro;
+                    color: Theme.ink-2;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+    }
+
+    drop-timer := Timer {
+        interval: Theme.drop;
+        running: false;
+        triggered => {
+            self.running = false;
+            root.landed = true;
+            land-timer.running = true;
+        }
+    }
+    land-timer := Timer {
+        interval: Theme.pulse-up;
+        running: false;
+        triggered => {
+            self.running = false;
+            root.landed = false;
+            root.dropped();
+        }
+    }
+
+    TouchArea {
+        property <bool> on-tile: self.mouse-x >= tile.x && self.mouse-x <= tile.x + tile.width
+            && self.mouse-y >= tile.y && self.mouse-y <= tile.y + tile.height;
+        mouse-cursor: !root.allowed && self.on-tile ? MouseCursor.not-allowed
+            : root.held ? MouseCursor.grabbing
+            : self.on-tile ? MouseCursor.grab : MouseCursor.default;
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down && root.allowed && !root.dropping && self.on-tile) {
+                root.held = true;
+                root.rx = 0px;
+                root.ry = 0px;
+            }
+            if (event.kind == PointerEventKind.up && root.held) {
+                if (root.over) {
+                    root.dropping = true;
+                    drop-timer.running = true;
+                }
+                root.held = false;
+                root.rx = 0px;
+                root.ry = 0px;
+            }
+        }
+        moved => {
+            if (root.held) {
+                root.rx = self.mouse-x - self.pressed-x;
+                root.ry = self.mouse-y - self.pressed-y;
+            }
+        }
+    }
+}
+// @end
