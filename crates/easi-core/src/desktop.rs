@@ -22,8 +22,24 @@ pub const SUPPORTED_MIMES: &[&str] = &[
     "application/x-xz-compressed-tar",
     "application/x-zstd-compressed-tar",
     "application/x-bzip-compressed-tar",
+    "application/x-bzip2-compressed-tar",
     "application/zip",
 ];
+
+const APPIMAGE_MIME_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/vnd.appimage">
+    <comment>AppImage application bundle</comment>
+    <sub-class-of type="application/x-executable"/>
+    <glob pattern="*.AppImage"/>
+    <glob pattern="*.appimage"/>
+    <magic priority="60">
+      <match type="string" offset="8" value="AI\x02"/>
+      <match type="string" offset="8" value="AI\x01"/>
+    </magic>
+  </mime-type>
+</mime-info>
+"#;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct SavedHandlers {
@@ -46,24 +62,44 @@ pub fn save_handlers(roots: &InstallRoots, handlers: &SavedHandlers) -> Result<P
     Ok(path)
 }
 
-/// Register `easi.desktop`, remember previous default handlers for supported MIME types,
-/// and set `easi.desktop` as the default handler.
+/// Register `easi.desktop`, ensure AppImage MIME definition exists, remember previous default
+/// handlers for supported MIME types, and set `easi.desktop` as the default handler.
 pub fn run_setup(roots: &InstallRoots, easi_bin: &Path) -> Result<SavedHandlers, EasiError> {
     fs::create_dir_all(&roots.desktop_dir)?;
     let desktop_path = roots.desktop_dir.join(EASI_DESKTOP_ID);
     let mimes = SUPPORTED_MIMES.join(";");
+    let exec_str = easi_bin.to_string_lossy();
+    let exec_quoted = if exec_str.contains(' ') {
+        format!("\"{exec_str}\"")
+    } else {
+        exec_str.into_owned()
+    };
+    // Omit NoDisplay=true so file managers (GNOME Files / Dolphin) always show easi
+    // in "Right-Click -> Open With" in addition to using it as the default handler.
     let content = format!(
         "[Desktop Entry]\n\
          Type=Application\n\
          Name=easi\n\
+         GenericName=App Installer\n\
          Comment=Install downloaded Linux apps\n\
-         Exec={} %f\n\
+         Exec={exec_quoted} %f\n\
          Terminal=false\n\
-         NoDisplay=true\n\
-         MimeType={mimes};\n",
-        easi_bin.to_string_lossy()
+         StartupNotify=true\n\
+         Categories=System;Utility;\n\
+         MimeType={mimes};\n"
     );
     fs::write(&desktop_path, content)?;
+
+    // Install AppImage MIME XML for distros that don't ship shared-mime-info rules for it.
+    let mime_root = roots.home_dir.join(".local/share/mime");
+    let mime_packages = mime_root.join("packages");
+    if fs::create_dir_all(&mime_packages).is_ok()
+        && fs::write(mime_packages.join("easi-appimage.xml"), APPIMAGE_MIME_XML).is_ok()
+    {
+        let _ = Command::new("update-mime-database")
+            .arg(&mime_root)
+            .output();
+    }
 
     let mut saved = load_saved_handlers(roots);
     for mime in SUPPORTED_MIMES {
@@ -114,8 +150,15 @@ pub fn handoff_non_app(roots: &InstallRoots, path: &Path) -> Result<(), EasiErro
         }
     }
 
-    // Fallback: try common archive managers directly to avoid looping back into easi.
-    for fallback in ["file-roller", "ark", "engrampa", "xarchiver"] {
+    // Fallback: try common archive/file managers directly to avoid looping back into easi.
+    for fallback in [
+        "file-roller",
+        "ark",
+        "engrampa",
+        "xarchiver",
+        "nautilus",
+        "dolphin",
+    ] {
         if Command::new(fallback).arg(path).spawn().is_ok() {
             return Ok(());
         }
