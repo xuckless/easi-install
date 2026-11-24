@@ -328,6 +328,361 @@ fn is_icon_path(path: &str) -> bool {
         || lower.ends_with("/.diricon")
 }
 
+fn is_asar_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower == "app.asar" || lower.ends_with("/resources/app.asar") || lower == "resources/app.asar"
+}
+
+const MAX_ASAR_HEADER_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Debug, Clone)]
+struct AsarIconCandidate {
+    path: String,
+    offset: u64,
+    size: u64,
+    score: i32,
+}
+
+/// Parse an Electron ASAR header JSON tree and collect `.png`/`.svg` icon candidates (zero deps).
+fn parse_asar_icon_candidates(json: &str) -> Vec<AsarIconCandidate> {
+    let bytes = json.as_bytes();
+    let mut pos = 0usize;
+    let mut out = Vec::new();
+    skip_ws(bytes, &mut pos);
+    parse_asar_dir_object(bytes, &mut pos, "", &mut out);
+    out.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| b.size.cmp(&a.size))
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    out
+}
+
+fn score_asar_icon(path: &str, size: u64) -> i32 {
+    let lower = path.to_ascii_lowercase();
+    let mut score = 10i32;
+    if lower == "icon.png"
+        || lower == "icon.svg"
+        || lower.ends_with("/icon.png")
+        || lower.ends_with("/icon.svg")
+    {
+        score += 60;
+    }
+    if lower.ends_with(".svg") {
+        score += 35;
+    }
+    if lower.contains("512x512") || lower.contains("256x256") {
+        score += 30;
+    }
+    if lower.contains("logo") || lower.contains("appicon") {
+        score += 20;
+    }
+    if lower.contains("tray") || lower.contains("template") || lower.contains("16x16") {
+        score -= 40;
+    }
+    if lower.contains("node_modules/") || lower.contains("test/") {
+        score -= 80;
+    }
+    if size >= 4096 {
+        score += 15;
+    }
+    score
+}
+
+fn skip_ws(b: &[u8], pos: &mut usize) {
+    while *pos < b.len() && matches!(b[*pos], b' ' | b'\t' | b'\r' | b'\n') {
+        *pos += 1;
+    }
+}
+
+fn parse_json_str(b: &[u8], pos: &mut usize) -> Option<String> {
+    skip_ws(b, pos);
+    if *pos >= b.len() || b[*pos] != b'"' {
+        return None;
+    }
+    *pos += 1;
+    let mut s = String::new();
+    while *pos < b.len() {
+        let ch = b[*pos];
+        *pos += 1;
+        if ch == b'"' {
+            return Some(s);
+        }
+        if ch == b'\\' && *pos < b.len() {
+            let esc = b[*pos];
+            *pos += 1;
+            match esc {
+                b'"' => s.push('"'),
+                b'\\' => s.push('\\'),
+                b'/' => s.push('/'),
+                b'n' => s.push('\n'),
+                b'r' => s.push('\r'),
+                b't' => s.push('\t'),
+                b'u' if *pos + 4 <= b.len() => {
+                    *pos += 4;
+                }
+                other => s.push(other as char),
+            }
+        } else {
+            s.push(ch as char);
+        }
+    }
+    None
+}
+
+fn skip_json_value(b: &[u8], pos: &mut usize) {
+    skip_ws(b, pos);
+    if *pos >= b.len() {
+        return;
+    }
+    match b[*pos] {
+        b'"' => {
+            let _ = parse_json_str(b, pos);
+        }
+        b'{' => {
+            *pos += 1;
+            loop {
+                skip_ws(b, pos);
+                if *pos >= b.len() || b[*pos] == b'}' {
+                    if *pos < b.len() {
+                        *pos += 1;
+                    }
+                    break;
+                }
+                if parse_json_str(b, pos).is_none() {
+                    break;
+                }
+                skip_ws(b, pos);
+                if *pos < b.len() && b[*pos] == b':' {
+                    *pos += 1;
+                }
+                skip_json_value(b, pos);
+                skip_ws(b, pos);
+                if *pos < b.len() && b[*pos] == b',' {
+                    *pos += 1;
+                }
+            }
+        }
+        b'[' => {
+            *pos += 1;
+            loop {
+                skip_ws(b, pos);
+                if *pos >= b.len() || b[*pos] == b']' {
+                    if *pos < b.len() {
+                        *pos += 1;
+                    }
+                    break;
+                }
+                skip_json_value(b, pos);
+                skip_ws(b, pos);
+                if *pos < b.len() && b[*pos] == b',' {
+                    *pos += 1;
+                }
+            }
+        }
+        _ => {
+            while *pos < b.len()
+                && !matches!(b[*pos], b',' | b'}' | b']' | b' ' | b'\t' | b'\r' | b'\n')
+            {
+                *pos += 1;
+            }
+        }
+    }
+}
+
+fn parse_json_u64(b: &[u8], pos: &mut usize) -> Option<u64> {
+    skip_ws(b, pos);
+    if *pos >= b.len() {
+        return None;
+    }
+    if b[*pos] == b'"' {
+        return parse_json_str(b, pos)?.parse::<u64>().ok();
+    }
+    let start = *pos;
+    while *pos < b.len() && b[*pos].is_ascii_digit() {
+        *pos += 1;
+    }
+    std::str::from_utf8(&b[start..*pos])
+        .ok()?
+        .parse::<u64>()
+        .ok()
+}
+
+fn parse_asar_dir_object(
+    b: &[u8],
+    pos: &mut usize,
+    prefix: &str,
+    out: &mut Vec<AsarIconCandidate>,
+) {
+    skip_ws(b, pos);
+    if *pos >= b.len() || b[*pos] != b'{' {
+        skip_json_value(b, pos);
+        return;
+    }
+    *pos += 1;
+    let mut size: Option<u64> = None;
+    let mut offset: Option<u64> = None;
+    let mut is_unpacked = false;
+    loop {
+        skip_ws(b, pos);
+        if *pos >= b.len() || b[*pos] == b'}' {
+            if *pos < b.len() {
+                *pos += 1;
+            }
+            break;
+        }
+        let Some(key) = parse_json_str(b, pos) else {
+            break;
+        };
+        skip_ws(b, pos);
+        if *pos < b.len() && b[*pos] == b':' {
+            *pos += 1;
+        }
+        skip_ws(b, pos);
+        if key == "files" && *pos < b.len() && b[*pos] == b'{' {
+            *pos += 1;
+            loop {
+                skip_ws(b, pos);
+                if *pos >= b.len() || b[*pos] == b'}' {
+                    if *pos < b.len() {
+                        *pos += 1;
+                    }
+                    break;
+                }
+                let Some(entry_name) = parse_json_str(b, pos) else {
+                    break;
+                };
+                skip_ws(b, pos);
+                if *pos < b.len() && b[*pos] == b':' {
+                    *pos += 1;
+                }
+                let child_path = if prefix.is_empty() {
+                    entry_name.clone()
+                } else {
+                    format!("{prefix}/{entry_name}")
+                };
+                if child_path.starts_with("node_modules/") || child_path.contains("/node_modules/")
+                {
+                    skip_json_value(b, pos);
+                } else {
+                    parse_asar_dir_object(b, pos, &child_path, out);
+                }
+                skip_ws(b, pos);
+                if *pos < b.len() && b[*pos] == b',' {
+                    *pos += 1;
+                }
+            }
+        } else if key == "size" {
+            size = parse_json_u64(b, pos);
+        } else if key == "offset" {
+            offset = parse_json_u64(b, pos);
+        } else if key == "unpacked" {
+            let start = *pos;
+            skip_json_value(b, pos);
+            if &b[start..*pos] == b"true" {
+                is_unpacked = true;
+            }
+        } else {
+            skip_json_value(b, pos);
+        }
+        skip_ws(b, pos);
+        if *pos < b.len() && b[*pos] == b',' {
+            *pos += 1;
+        }
+    }
+
+    if !is_unpacked
+        && let (Some(sz), Some(off)) = (size, offset)
+        && sz > 0
+        && sz <= MAX_ICON_BYTES
+        && !prefix.is_empty()
+    {
+        let lower = prefix.to_ascii_lowercase();
+        if lower.ends_with(".png") || lower.ends_with(".svg") {
+            let score = score_asar_icon(prefix, sz);
+            out.push(AsarIconCandidate {
+                path: prefix.to_string(),
+                offset: off,
+                size: sz,
+                score,
+            });
+        }
+    }
+}
+
+/// Extract the best `.png`/`.svg` app icon from an on-disk Electron `app.asar` file in O(1) seek.
+pub fn extract_icon_from_asar_path(asar_path: &Path) -> Option<(String, Vec<u8>)> {
+    let mut file = File::open(asar_path).ok()?;
+    let mut hdr = [0u8; 16];
+    file.read_exact(&mut hdr).ok()?;
+    let hdr_obj_size = u32::from_le_bytes(hdr[4..8].try_into().ok()?) as u64;
+    let json_len = u32::from_le_bytes(hdr[12..16].try_into().ok()?) as usize;
+    if json_len == 0 || json_len > MAX_ASAR_HEADER_BYTES {
+        return None;
+    }
+    let mut json_buf = vec![0u8; json_len];
+    file.read_exact(&mut json_buf).ok()?;
+    let json = std::str::from_utf8(&json_buf).ok()?;
+    let data_base = 8u64.checked_add(hdr_obj_size)?;
+
+    for cand in parse_asar_icon_candidates(json) {
+        let abs_off = data_base.checked_add(cand.offset)?;
+        if file.seek(SeekFrom::Start(abs_off)).is_err() {
+            continue;
+        }
+        let mut buf = vec![0u8; cand.size as usize];
+        if file.read_exact(&mut buf).is_ok()
+            && (buf.starts_with(b"\x89PNG")
+                || std::str::from_utf8(&buf[..buf.len().min(512)])
+                    .is_ok_and(|s| s.contains("<svg")))
+        {
+            return Some((cand.path, buf));
+        }
+    }
+    None
+}
+
+/// Extract the best `.png`/`.svg` app icon from a streaming Electron `app.asar` entry without
+/// buffering the entire ASAR archive in RAM.
+fn extract_icon_from_asar_stream<R: Read + ?Sized>(
+    reader: &mut R,
+    budget: &mut usize,
+) -> Option<(String, Vec<u8>)> {
+    let mut hdr = [0u8; 16];
+    reader.read_exact(&mut hdr).ok()?;
+    let hdr_obj_size = u32::from_le_bytes(hdr[4..8].try_into().ok()?) as u64;
+    let json_len = u32::from_le_bytes(hdr[12..16].try_into().ok()?) as usize;
+    if json_len == 0 || json_len > MAX_ASAR_HEADER_BYTES {
+        return None;
+    }
+    let mut json_buf = vec![0u8; json_len];
+    reader.read_exact(&mut json_buf).ok()?;
+    let json = std::str::from_utf8(&json_buf).ok()?;
+    let data_base = 8u64.checked_add(hdr_obj_size)?;
+    let consumed = 16u64.checked_add(json_len as u64)?;
+    if data_base < consumed {
+        return None;
+    }
+
+    let best = parse_asar_icon_candidates(json).into_iter().next()?;
+    let target_off = data_base.checked_add(best.offset)?;
+    let skip = target_off.checked_sub(consumed)?;
+    if best.size as usize > *budget {
+        return None;
+    }
+    std::io::copy(&mut reader.take(skip), &mut std::io::sink()).ok()?;
+    let mut buf = vec![0u8; best.size as usize];
+    reader.read_exact(&mut buf).ok()?;
+    if buf.starts_with(b"\x89PNG")
+        || std::str::from_utf8(&buf[..buf.len().min(512)]).is_ok_and(|s| s.contains("<svg"))
+    {
+        *budget = budget.saturating_sub(buf.len());
+        return Some((best.path, buf));
+    }
+    None
+}
+
 fn is_meta_hint_path(path: &str) -> bool {
     let base = Path::new(path)
         .file_name()
@@ -485,6 +840,24 @@ fn list_tar<R: Read>(reader: R) -> Result<PackageContents, EasiError> {
                 {
                     contents.embedded_icons.push((raw_path.clone(), buf));
                 }
+            } else if is_asar_path(&raw_path) {
+                if let Some((icon_rel, buf)) =
+                    extract_icon_from_asar_stream(&mut entry, &mut inspect_budget)
+                {
+                    let virtual_path = format!("asar://{icon_rel}");
+                    contents.entries.push(ArchiveEntry {
+                        path: virtual_path.clone(),
+                        size: buf.len() as u64,
+                        mode: 0o644,
+                        is_dir: false,
+                        is_symlink: false,
+                        symlink_target: None,
+                        is_elf: false,
+                        elf_arch: None,
+                        is_script: false,
+                    });
+                    contents.embedded_icons.push((virtual_path, buf));
+                }
             } else {
                 let mut magic = [0u8; 20];
                 let n = entry.read(&mut magic).unwrap_or(0);
@@ -567,6 +940,24 @@ fn list_zip(path: &Path) -> Result<PackageContents, EasiError> {
                     read_bounded_bytes(&mut entry, MAX_ICON_BYTES, &mut inspect_budget)
                 {
                     contents.embedded_icons.push((raw_path.clone(), buf));
+                }
+            } else if is_asar_path(&raw_path) {
+                if let Some((icon_rel, buf)) =
+                    extract_icon_from_asar_stream(&mut entry, &mut inspect_budget)
+                {
+                    let virtual_path = format!("asar://{icon_rel}");
+                    contents.entries.push(ArchiveEntry {
+                        path: virtual_path.clone(),
+                        size: buf.len() as u64,
+                        mode: 0o644,
+                        is_dir: false,
+                        is_symlink: false,
+                        symlink_target: None,
+                        is_elf: false,
+                        elf_arch: None,
+                        is_script: false,
+                    });
+                    contents.embedded_icons.push((virtual_path, buf));
                 }
             } else {
                 let mut magic = [0u8; 20];
@@ -1195,5 +1586,35 @@ mod tests {
                 .iter()
                 .any(|a| a.contains("pipes remote data"))
         );
+
+        // Electron ASAR icon extraction picks icon.png over trayTemplate.png.
+        let png_bytes = b"\x89PNG\r\n\x1a\nFAKE_ICON_DATA";
+        let tray_bytes = b"\x89PNG\r\n\x1a\nTRAY";
+        let json = format!(
+            r#"{{"files":{{"trayTemplate.png":{{"size":{},"offset":"0"}},"icon.png":{{"size":{},"offset":"{}"}}}}}}"#,
+            tray_bytes.len(),
+            png_bytes.len(),
+            tray_bytes.len()
+        );
+        let json_bytes = json.as_bytes();
+        let pad = (4 - (json_bytes.len() % 4)) % 4;
+        let hdr_str_size = (json_bytes.len() + pad + 4) as u32;
+        let hdr_obj_size = hdr_str_size + 4;
+        let mut asar = Vec::new();
+        asar.extend_from_slice(&4u32.to_le_bytes());
+        asar.extend_from_slice(&hdr_obj_size.to_le_bytes());
+        asar.extend_from_slice(&hdr_str_size.to_le_bytes());
+        asar.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+        asar.extend_from_slice(json_bytes);
+        asar.resize(asar.len() + pad, 0);
+        asar.extend_from_slice(tray_bytes);
+        asar.extend_from_slice(png_bytes);
+
+        let mut budget = MAX_TOTAL_INSPECT_BYTES;
+        let mut cursor = std::io::Cursor::new(&asar);
+        let (path, extracted) =
+            extract_icon_from_asar_stream(&mut cursor, &mut budget).unwrap_or_default();
+        assert_eq!(path, "icon.png");
+        assert_eq!(extracted, png_bytes);
     }
 }

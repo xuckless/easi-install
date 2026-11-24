@@ -379,6 +379,12 @@ where
                             installed_icon_name = Some(icon_dest.to_string_lossy().into_owned());
                         }
                     }
+                } else if let Some((asar_rel, bytes)) =
+                    crate::detect::extract_icon_from_asar_path(&app_dir.join("resources/app.asar"))
+                    && let Some(icon_dest) =
+                        write_hicolor_icon(roots, &icon_name, &asar_rel, &bytes, tx)?
+                {
+                    installed_icon_name = Some(icon_dest.to_string_lossy().into_owned());
                 }
             }
             PlanOp::WireDesktop => {

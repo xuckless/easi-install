@@ -924,6 +924,17 @@ fn find_best_icon_bytes(manifest: &Manifest) -> Option<(&'static str, Vec<u8>)> 
                 }
             }
         }
+        // Fallback for Electron apps whose icon is packed inside `resources/app.asar`.
+        if let Some((_, bytes)) = crate::detect::extract_icon_from_asar_path(
+            &manifest.install_dir.join("resources/app.asar"),
+        ) {
+            if is_svg_bytes(&bytes) {
+                return Some(("svg", bytes));
+            }
+            if bytes.starts_with(b"\x89PNG") {
+                return Some(("png", bytes));
+            }
+        }
     }
     None
 }
