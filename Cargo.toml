@@ -16,6 +16,8 @@ clap = { version = "4.6", features = ["derive"] }
 # slint: GUI toolkit (project requirement).
 slint = "1.19"
 slint-build = "1.19"
+# rfd: native Linux XDG Desktop Portal file picker (works on GNOME, KDE/SteamOS, Mint, CachyOS).
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
 # thiserror: typed error enums (AGENTS.md requirement).
 thiserror = "2"
 # serde + toml: manifest & saved-handler config persistence.

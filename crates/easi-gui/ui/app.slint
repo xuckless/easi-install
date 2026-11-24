@@ -54,6 +54,7 @@ export component AppWindow inherits Window {
     property <bool> dragging: false;
 
     // Actions dispatched back to the Redux store
+    callback browse-package();
     callback open-path(string);
     callback uninstall-app(string);
     callback confirm-install();
@@ -81,13 +82,17 @@ export component AppWindow inherits Window {
                 font-size: 12px;
             }
             HorizontalBox {
+                Button {
+                    text: "Install Package…";
+                    primary: true;
+                    clicked => { root.browse-package(); }
+                }
                 LineEdit {
                     text <=> root.idle-path-input;
-                    placeholder-text: "/path/to/package.AppImage";
+                    placeholder-text: "Or paste /path/to/package.AppImage";
                 }
                 Button {
-                    text: "Install File…";
-                    primary: true;
+                    text: "Open";
                     enabled: root.idle-path-input != "";
                     clicked => { root.open-path(root.idle-path-input); }
                 }

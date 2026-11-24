@@ -10,6 +10,7 @@ workspace = true
 [dependencies]
 easi-core.workspace = true
 slint.workspace = true
+rfd.workspace = true
 
 [build-dependencies]
 slint-build.workspace = true

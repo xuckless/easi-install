@@ -33,6 +33,39 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         let w = window.as_weak();
         let s = Arc::clone(&store);
         let r = Arc::clone(&runner);
+        window.on_browse_package(move || {
+            let w = w.clone();
+            let s = Arc::clone(&s);
+            let r = Arc::clone(&r);
+            std::thread::spawn(move || {
+                let mut dialog = rfd::FileDialog::new()
+                    .set_title("Choose a package to install")
+                    .add_filter(
+                        "Supported Packages",
+                        &[
+                            "AppImage", "appimage", "tar", "gz", "tgz", "xz", "txz", "zst", "bz2",
+                            "zip", "7z", "run", "sh",
+                        ],
+                    )
+                    .add_filter("All Files", &["*"]);
+                if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+                    let dl = home.join("Downloads");
+                    if dl.is_dir() {
+                        dialog = dialog.set_directory(dl);
+                    }
+                }
+                if let Some(path) = dialog.pick_file() {
+                    let _ = slint::invoke_from_event_loop(move || {
+                        dispatch_action(&w, &s, &r, Action::OpenPath(path));
+                    });
+                }
+            });
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        let r = Arc::clone(&runner);
         window.on_open_path(move |p| {
             dispatch_action(&w, &s, &r, Action::OpenPath(PathBuf::from(p.as_str())));
         });
