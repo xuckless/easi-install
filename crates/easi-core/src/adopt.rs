@@ -281,13 +281,16 @@ pub fn adopt_app(
         created_files.push(dp.clone());
     }
 
-    // Try to detect AppImage .upd_info update source if applicable.
+    // Auto-detect upstream update source from AppImage .upd_info OR on-disk config files
+    // (Electron app-update.yml, JetBrains product-info.json, Firefox/Zen application.ini, package.json).
     let update_source = if app.exec_path.is_file()
         && let Ok(fmt) = detect_file_format(&app.exec_path)
         && fmt == Format::AppImageType2
         && let Ok(contents) = inspect_contents(&app.exec_path, fmt)
     {
         crate::upstream::detect_update_source(contents.appimage_upd_info.as_deref(), None, None)
+    } else if app.install_dir.is_dir() {
+        crate::upstream::detect_dir_update_source(&app.install_dir)
     } else {
         None
     };
@@ -445,6 +448,15 @@ pub fn repair_app(roots: &InstallRoots, query: &str) -> Result<Vec<String>, Easi
                 fixes.push(format!("Linked ~/.local/bin/{bin_slug}"));
             }
         }
+    }
+
+    // 5. Auto-detect upstream update source from app config files if not yet set.
+    if manifest.update_source.is_none()
+        && manifest.install_dir.is_dir()
+        && let Some(src) = crate::upstream::detect_dir_update_source(&manifest.install_dir)
+    {
+        fixes.push(format!("Detected update source ({})", src.display_label()));
+        manifest.update_source = Some(src);
     }
 
     save_manifest(roots, &manifest)?;

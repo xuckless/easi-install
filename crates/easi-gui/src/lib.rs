@@ -215,6 +215,59 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         let w = window.as_weak();
         let s = Arc::clone(&store);
         let r = Arc::clone(&runner);
+        window.on_set_update_source(move |app_id, url| {
+            let id: String = app_id.into();
+            let raw: String = url.into();
+            let msg = match easi_core::upstream::parse_user_update_url(&raw) {
+                Some(src) => {
+                    let label = src.display_label();
+                    match easi_core::upstream::set_app_update_source(&r.roots, &id, Some(src)) {
+                        Ok(_) => format!("Saved update source: {label}."),
+                        Err(e) => format!(
+                            "Failed to save source: {}",
+                            easi_core::format_user_error(&e)
+                        ),
+                    }
+                }
+                None => {
+                    "Could not recognize that URL (use https://…, owner/repo, or jetbrains:CODE)."
+                        .into()
+                }
+            };
+            if let Some(win) = w.upgrade() {
+                win.set_detail_feedback(msg.into());
+            }
+            dispatch_action(&w, &s, &r, Action::LoadInstalled);
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        let r = Arc::clone(&runner);
+        window.on_autodetect_update_source(move |app_id| {
+            let id: String = app_id.into();
+            let msg = match easi_core::manifest::resolve_installed(&r.roots, &id) {
+                Ok(m) => {
+                    if let Some(src) = easi_core::upstream::detect_dir_update_source(&m.install_dir) {
+                        let label = src.display_label();
+                        let _ = easi_core::upstream::set_app_update_source(&r.roots, &id, Some(src));
+                        format!("Detected update source: {label}.")
+                    } else {
+                        "No embedded update config found in this app folder — paste a URL below instead.".into()
+                    }
+                }
+                Err(e) => format!("Auto-detect failed: {}", easi_core::format_user_error(&e)),
+            };
+            if let Some(win) = w.upgrade() {
+                win.set_detail_feedback(msg.into());
+            }
+            dispatch_action(&w, &s, &r, Action::LoadInstalled);
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        let r = Arc::clone(&runner);
         window.on_clear_app_cache(move |app_id| {
             let id: String = app_id.into();
             let msg = match easi_core::install::clear_app_cache(&r.roots, &id) {
@@ -963,6 +1016,12 @@ fn project_app_detail(win: &ui::AppWindow, roots: &InstallRoots, app: &easi_core
     win.set_detail_has_cache(app.cache_size_bytes > 0);
     win.set_detail_has_data(app.data_size_bytes > 0);
     win.set_detail_adopted(app.adopted);
+    let src_label = easi_core::manifest::resolve_installed(roots, &app.app_id)
+        .ok()
+        .and_then(|m| m.update_source)
+        .map(|s| s.display_label())
+        .unwrap_or_default();
+    win.set_detail_update_source(src_label.into());
     if let Some(icon_path) = easi_core::manifest::find_installed_icon(roots, &app.app_id)
         && let Ok(img) = slint::Image::load_from_path(&icon_path)
     {

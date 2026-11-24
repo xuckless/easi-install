@@ -1,5 +1,7 @@
-//! Upstream update checks for installed apps (AppImage `.upd_info` zsync & GitHub Releases).
+//! Upstream update checks & one-click updates across GitHub, GitLab, Codeberg,
+//! AppImage `.upd_info` zsync, Electron-builder CDN YAML, JetBrains CDN, and direct CDN redirects.
 
+use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::AtomicBool;
@@ -10,7 +12,7 @@ use crate::appid::slug_and_version;
 use crate::error::EasiError;
 use crate::inspect::classify_package;
 use crate::install::execute_install;
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, resolve_installed, save_manifest};
 use crate::model::{Classified, InstallSummary, UpdateSource};
 use crate::roots::InstallRoots;
 use crate::self_update::{extract_json_string_field, is_newer_version};
@@ -40,10 +42,10 @@ pub enum AppUpdateStatus {
     },
 }
 
-/// Detect an upstream `UpdateSource` from priority-ordered metadata:
+/// Detect an upstream `UpdateSource` from priority-ordered package metadata:
 /// 1. AppImage `.upd_info` section (`gh-releases-zsync|...` or `zsync|...`)
-/// 2. Download origin xattr (`user.xdg.origin.url` pointing to GitHub Releases)
-/// 3. AppStream metainfo XML GitHub URL
+/// 2. Download origin xattr (`user.xdg.origin.url` pointing to GitHub/GitLab/Codeberg/zsync/yml)
+/// 3. AppStream metainfo XML repository URL
 pub fn detect_update_source(
     appimage_upd_info: Option<&str>,
     origin_url: Option<&str>,
@@ -55,22 +57,190 @@ pub fn detect_update_source(
         return Some(src);
     }
     if let Some(url) = origin_url
-        && let Some(src) = parse_github_url(url)
+        && let Some(src) = parse_forge_or_known_url(url)
     {
         return Some(src);
     }
-    if let Some(xml) = metainfo_xml
-        && let Some(idx) = xml.find("https://github.com/")
-    {
-        let rest = &xml[idx..];
-        let end = rest
-            .find(|c: char| c == '<' || c == '"' || c.is_whitespace())
-            .unwrap_or(rest.len());
-        if let Some(src) = parse_github_url(&rest[..end]) {
-            return Some(src);
+    if let Some(xml) = metainfo_xml {
+        for host in [
+            "https://github.com/",
+            "https://gitlab.com/",
+            "https://codeberg.org/",
+        ] {
+            if let Some(idx) = xml.find(host) {
+                let rest = &xml[idx..];
+                let end = rest
+                    .find(|c: char| c == '<' || c == '"' || c.is_whitespace())
+                    .unwrap_or(rest.len());
+                if let Some(src) = parse_forge_or_known_url(&rest[..end]) {
+                    return Some(src);
+                }
+            }
         }
     }
     None
+}
+
+/// Auto-detect an upstream `UpdateSource` from real config files inside an extracted app directory:
+/// 1. Electron-builder `resources/app-update.yml` or `app-update.yml` (GitHub or generic CDN YAML)
+/// 2. JetBrains `product-info.json` (`productCode` -> official JetBrains CDN API)
+/// 3. Firefox/Gecko `application.ini` (`SourceRepository=` -> GitHub/GitLab/Codeberg)
+/// 4. `resources/app/package.json` or `package.json` (`repository` / `homepage`)
+pub fn detect_dir_update_source(install_dir: &Path) -> Option<UpdateSource> {
+    for rel in ["resources/app-update.yml", "app-update.yml"] {
+        if let Ok(yaml) = fs::read_to_string(install_dir.join(rel))
+            && let Some(src) = parse_electron_app_update_yml(&yaml)
+        {
+            return Some(src);
+        }
+    }
+
+    if let Ok(json) = fs::read_to_string(install_dir.join("product-info.json"))
+        && let Some(code) = extract_json_string_field(&json, "productCode")
+        && !code.is_empty()
+    {
+        return Some(UpdateSource::JetBrains { product_code: code });
+    }
+
+    if let Ok(ini) = fs::read_to_string(install_dir.join("application.ini")) {
+        for line in ini.lines() {
+            if let Some(repo) = line.trim().strip_prefix("SourceRepository=")
+                && let Some(src) = parse_forge_or_known_url(repo.trim())
+            {
+                return Some(src);
+            }
+        }
+    }
+
+    for rel in ["resources/app/package.json", "package.json"] {
+        if let Ok(json) = fs::read_to_string(install_dir.join(rel)) {
+            for field in ["url", "repository", "homepage"] {
+                if let Some(val) = extract_json_string_field(&json, field)
+                    && let Some(src) = parse_forge_or_known_url(&val)
+                {
+                    return Some(src);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Parse Electron-builder's `app-update.yml` (supports `github`, `generic`, `s3`, `spaces`).
+pub fn parse_electron_app_update_yml(yaml: &str) -> Option<UpdateSource> {
+    let provider = yaml_field(yaml, "provider")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if provider == "github" {
+        let owner = yaml_field(yaml, "owner")?;
+        let repo = yaml_field(yaml, "repo")?;
+        return Some(UpdateSource::GitHubRelease {
+            owner,
+            repo,
+            asset_pattern: None,
+        });
+    }
+    if matches!(
+        provider.as_str(),
+        "generic" | "s3" | "spaces" | "custom" | ""
+    ) && let Some(url) = yaml_field(yaml, "url")
+        && (url.starts_with("https://") || url.starts_with("http://"))
+    {
+        return Some(UpdateSource::ElectronYaml { url });
+    }
+    None
+}
+
+/// Parse a user-supplied update source string (GitHub, GitLab, Codeberg, zsync, Electron YAML,
+/// `jetbrains:<CODE>`, or any direct CDN/proxy HTTP(S) download URL).
+pub fn parse_user_update_url(input: &str) -> Option<UpdateSource> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(code) = trimmed
+        .strip_prefix("jetbrains:")
+        .or_else(|| trimmed.strip_prefix("jb:"))
+    {
+        let c = code.trim().to_ascii_uppercase();
+        if !c.is_empty() {
+            return Some(UpdateSource::JetBrains { product_code: c });
+        }
+    }
+    if let Some(src) = parse_forge_or_known_url(trimmed) {
+        return Some(src);
+    }
+    // Shorthand `owner/repo` -> GitHub.
+    if !trimmed.contains("://") && !trimmed.contains(' ') {
+        let parts: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
+        if parts.len() == 2 {
+            return Some(UpdateSource::GitHubRelease {
+                owner: parts[0].to_string(),
+                repo: parts[1].trim_end_matches(".git").to_string(),
+                asset_pattern: None,
+            });
+        }
+    }
+    // Any other HTTP(S) URL -> direct CDN / proxy redirect check.
+    if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
+        return Some(UpdateSource::HttpRedirect {
+            url: trimmed.to_string(),
+        });
+    }
+    None
+}
+
+fn parse_forge_or_known_url(raw: &str) -> Option<UpdateSource> {
+    let url = raw
+        .trim()
+        .strip_prefix("git+")
+        .unwrap_or(raw.trim())
+        .trim_end_matches('/');
+    if url.ends_with(".zsync") {
+        return Some(UpdateSource::ZsyncUrl {
+            url: url.to_string(),
+        });
+    }
+    if url.ends_with(".yml") || url.ends_with(".yaml") {
+        return Some(UpdateSource::ElectronYaml {
+            url: url.to_string(),
+        });
+    }
+    if let Some(src) = parse_github_url(url) {
+        return Some(src);
+    }
+    for (prefix, host, forge) in [
+        ("https://gitlab.com/", "gitlab.com", "gitlab"),
+        ("http://gitlab.com/", "gitlab.com", "gitlab"),
+        ("https://codeberg.org/", "codeberg.org", "gitea"),
+        ("http://codeberg.org/", "codeberg.org", "gitea"),
+    ] {
+        if let Some(rest) = url.strip_prefix(prefix) {
+            let segs: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+            if segs.len() >= 2 {
+                let project = format!("{}/{}", segs[0], segs[1].trim_end_matches(".git"));
+                return Some(UpdateSource::ForgeRelease {
+                    host: host.to_string(),
+                    project,
+                    forge: forge.to_string(),
+                });
+            }
+        }
+    }
+    None
+}
+
+/// Persist or clear a custom/auto-detected `UpdateSource` on an installed app's manifest.
+pub fn set_app_update_source(
+    roots: &InstallRoots,
+    query: &str,
+    source: Option<UpdateSource>,
+) -> Result<Manifest, EasiError> {
+    let mut manifest = resolve_installed(roots, query)?;
+    manifest.update_source = source;
+    save_manifest(roots, &manifest)?;
+    Ok(manifest)
 }
 
 pub fn parse_appimage_upd_info(upd: &str) -> Option<UpdateSource> {
@@ -118,6 +288,77 @@ pub fn parse_zsync_version(header: &str) -> Option<String> {
     None
 }
 
+/// Parse Electron-builder `latest-linux.yml` -> `(version, relative_or_absolute_path)`.
+pub fn parse_electron_latest_yml(yaml: &str) -> Option<(String, Option<String>)> {
+    let ver = yaml_field(yaml, "version")?;
+    let path = yaml_field(yaml, "path").or_else(|| yaml_field(yaml, "url"));
+    Some((ver.trim_start_matches('v').to_string(), path))
+}
+
+/// Parse JetBrains releases API JSON -> `(version, linux_download_link)`.
+pub fn parse_jetbrains_release_json(json: &str, arch: &str) -> Option<(String, Option<String>)> {
+    let version = extract_json_string_field(json, "version")?;
+    let key = if arch == "aarch64" {
+        "\"linuxARM64\""
+    } else {
+        "\"linux\""
+    };
+    let link = json
+        .find(key)
+        .and_then(|idx| extract_json_string_field(&json[idx..], "link"));
+    Some((version, link))
+}
+
+fn yaml_field(yaml: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}:");
+    for line in yaml.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix(&prefix) {
+            let val = rest.trim().trim_matches('"').trim_matches('\'');
+            if !val.is_empty() {
+                return Some(val.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn electron_yaml_url(base_or_yml: &str, arch: &str) -> String {
+    if base_or_yml.ends_with(".yml") || base_or_yml.ends_with(".yaml") {
+        base_or_yml.to_string()
+    } else {
+        let file = if arch == "aarch64" {
+            "latest-linux-arm64.yml"
+        } else {
+            "latest-linux.yml"
+        };
+        format!("{}/{file}", base_or_yml.trim_end_matches('/'))
+    }
+}
+
+fn version_status(
+    manifest: &Manifest,
+    current: String,
+    latest: String,
+    release_url: String,
+) -> AppUpdateStatus {
+    if is_newer_version(&current, &latest) {
+        AppUpdateStatus::UpdateAvailable {
+            app_id: manifest.app_id.clone(),
+            name: manifest.name.clone(),
+            current_version: current,
+            latest_version: latest,
+            release_url,
+        }
+    } else {
+        AppUpdateStatus::UpToDate {
+            app_id: manifest.app_id.clone(),
+            name: manifest.name.clone(),
+            current_version: current,
+        }
+    }
+}
+
 /// Check one installed app against its recorded `UpdateSource`.
 pub fn check_app_update(manifest: &Manifest) -> AppUpdateStatus {
     let Some(source) = &manifest.update_source else {
@@ -131,6 +372,12 @@ pub fn check_app_update(manifest: &Manifest) -> AppUpdateStatus {
         .clone()
         .unwrap_or_else(|| "0.0.0".to_string());
 
+    let fail = |reason: String| AppUpdateStatus::CheckFailed {
+        app_id: manifest.app_id.clone(),
+        name: manifest.name.clone(),
+        reason,
+    };
+
     match source {
         UpdateSource::GitHubRelease { owner, repo, .. } => {
             let api = format!("https://api.github.com/repos/{owner}/{repo}/releases/latest");
@@ -139,68 +386,87 @@ pub fn check_app_update(manifest: &Manifest) -> AppUpdateStatus {
                 Ok(body) => match extract_json_string_field(&body, "tag_name") {
                     Some(tag) => {
                         let latest = tag.trim_start_matches('v').to_string();
-                        if is_newer_version(&current, &latest) {
-                            AppUpdateStatus::UpdateAvailable {
-                                app_id: manifest.app_id.clone(),
-                                name: manifest.name.clone(),
-                                current_version: current,
-                                latest_version: latest,
-                                release_url,
-                            }
-                        } else {
-                            AppUpdateStatus::UpToDate {
-                                app_id: manifest.app_id.clone(),
-                                name: manifest.name.clone(),
-                                current_version: current,
-                            }
-                        }
+                        version_status(manifest, current, latest, release_url)
                     }
-                    None => AppUpdateStatus::CheckFailed {
-                        app_id: manifest.app_id.clone(),
-                        name: manifest.name.clone(),
-                        reason: "no tag_name in GitHub release response".into(),
-                    },
+                    None => fail("no tag_name in GitHub release response".into()),
                 },
-                Err(reason) => AppUpdateStatus::CheckFailed {
-                    app_id: manifest.app_id.clone(),
-                    name: manifest.name.clone(),
-                    reason,
+                Err(reason) => fail(reason),
+            }
+        }
+        UpdateSource::ForgeRelease {
+            host,
+            project,
+            forge,
+        } => {
+            let (api, release_url) = if forge == "gitlab" {
+                let encoded = project.replace('/', "%2F");
+                (
+                    format!("https://{host}/api/v4/projects/{encoded}/releases?per_page=1"),
+                    format!("https://{host}/{project}/-/releases"),
+                )
+            } else {
+                (
+                    format!("https://{host}/api/v1/repos/{project}/releases/latest"),
+                    format!("https://{host}/{project}/releases"),
+                )
+            };
+            match curl_text(&api, &["-fsSL", "--max-time", "5"]) {
+                Ok(body) => match extract_json_string_field(&body, "tag_name") {
+                    Some(tag) => {
+                        let latest = tag.trim_start_matches('v').to_string();
+                        version_status(manifest, current, latest, release_url)
+                    }
+                    None => fail(format!("no tag_name in {host} release response")),
                 },
+                Err(reason) => fail(reason),
             }
         }
         UpdateSource::ZsyncUrl { url } => {
             match curl_text(url, &["-fsSL", "--max-time", "5", "-r", "0-4095"]) {
                 Ok(header) => match parse_zsync_version(&header) {
-                    Some(latest) => {
-                        if is_newer_version(&current, &latest) {
-                            AppUpdateStatus::UpdateAvailable {
-                                app_id: manifest.app_id.clone(),
-                                name: manifest.name.clone(),
-                                current_version: current,
-                                latest_version: latest,
-                                release_url: url.clone(),
-                            }
-                        } else {
-                            AppUpdateStatus::UpToDate {
-                                app_id: manifest.app_id.clone(),
-                                name: manifest.name.clone(),
-                                current_version: current,
-                            }
-                        }
-                    }
-                    None => AppUpdateStatus::CheckFailed {
-                        app_id: manifest.app_id.clone(),
-                        name: manifest.name.clone(),
-                        reason: "could not parse version from .zsync header".into(),
-                    },
+                    Some(latest) => version_status(manifest, current, latest, url.clone()),
+                    None => fail("could not parse version from .zsync header".into()),
                 },
-                Err(reason) => AppUpdateStatus::CheckFailed {
-                    app_id: manifest.app_id.clone(),
-                    name: manifest.name.clone(),
-                    reason,
-                },
+                Err(reason) => fail(reason),
             }
         }
+        UpdateSource::ElectronYaml { url } => {
+            let yml_url = electron_yaml_url(url, std::env::consts::ARCH);
+            match curl_text(&yml_url, &["-fsSL", "--max-time", "5"]) {
+                Ok(body) => match parse_electron_latest_yml(&body) {
+                    Some((latest, _)) => version_status(manifest, current, latest, yml_url),
+                    None => fail("could not parse version from latest-linux.yml".into()),
+                },
+                Err(reason) => fail(reason),
+            }
+        }
+        UpdateSource::JetBrains { product_code } => {
+            let api = format!(
+                "https://data.services.jetbrains.com/products/releases?code={product_code}&latest=true&type=release"
+            );
+            match curl_text(&api, &["-fsSL", "--max-time", "5"]) {
+                Ok(body) => match parse_jetbrains_release_json(&body, std::env::consts::ARCH) {
+                    Some((latest, link)) => version_status(
+                        manifest,
+                        current,
+                        latest,
+                        link.unwrap_or_else(|| api.clone()),
+                    ),
+                    None => fail("could not parse JetBrains release metadata".into()),
+                },
+                Err(reason) => fail(reason),
+            }
+        }
+        UpdateSource::HttpRedirect { url } => match resolve_redirect_url(url) {
+            Ok(final_url) => {
+                let fname = final_url.rsplit('/').next().unwrap_or(&final_url);
+                match slug_and_version(fname).1 {
+                    Some(latest) => version_status(manifest, current, latest, final_url),
+                    None => fail("redirect filename did not include a version number".into()),
+                }
+            }
+            Err(reason) => fail(reason),
+        },
     }
 }
 
@@ -216,25 +482,46 @@ fn curl_text(url: &str, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Extract all `browser_download_url` values from a GitHub Releases JSON payload.
+fn resolve_redirect_url(url: &str) -> Result<String, String> {
+    let out = Command::new("curl")
+        .args([
+            "-fsSLI",
+            "--max-time",
+            "5",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{url_effective}",
+        ])
+        .arg(url)
+        .output()
+        .map_err(|e| format!("curl failed: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("HTTP HEAD failed for {url}"));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Extract all `browser_download_url` / `direct_asset_url` values from a forge Releases JSON payload.
 pub fn extract_github_asset_urls(json: &str) -> Vec<String> {
     let mut urls = Vec::new();
-    let needle = "\"browser_download_url\"";
-    let mut rest = json;
-    while let Some(idx) = rest.find(needle) {
-        rest = &rest[idx + needle.len()..];
-        if let Some(after_colon) = rest.trim_start().strip_prefix(':')
-            && let Some(after_quote) = after_colon.trim_start().strip_prefix('"')
-            && let Some(end) = after_quote.find('"')
-        {
-            urls.push(after_quote[..end].to_string());
-            rest = &after_quote[end + 1..];
+    for needle in ["\"browser_download_url\"", "\"direct_asset_url\""] {
+        let mut rest = json;
+        while let Some(idx) = rest.find(needle) {
+            rest = &rest[idx + needle.len()..];
+            if let Some(after_colon) = rest.trim_start().strip_prefix(':')
+                && let Some(after_quote) = after_colon.trim_start().strip_prefix('"')
+                && let Some(end) = after_quote.find('"')
+            {
+                urls.push(after_quote[..end].to_string());
+                rest = &after_quote[end + 1..];
+            }
         }
     }
     urls
 }
 
-/// Score GitHub release asset URLs and pick the best match for the current Linux arch and
+/// Score forge release asset URLs and pick the best match for the current Linux arch and
 /// previously installed package extension.
 pub fn select_best_github_asset(
     urls: &[String],
@@ -321,6 +608,28 @@ pub fn download_and_update_app(
                     ))
                 })?
         }
+        UpdateSource::ForgeRelease {
+            host,
+            project,
+            forge,
+        } => {
+            let api = if forge == "gitlab" {
+                let encoded = project.replace('/', "%2F");
+                format!("https://{host}/api/v4/projects/{encoded}/releases?per_page=1")
+            } else {
+                format!("https://{host}/api/v1/repos/{project}/releases/latest")
+            };
+            let body =
+                curl_text(&api, &["-fsSL", "--max-time", "15"]).map_err(EasiError::Desktop)?;
+            let urls = extract_github_asset_urls(&body);
+            select_best_github_asset(&urls, std::env::consts::ARCH, &manifest.source_filename)
+                .ok_or_else(|| {
+                    EasiError::Desktop(format!(
+                        "no matching Linux release asset found on {host} for {}",
+                        manifest.name
+                    ))
+                })?
+        }
         UpdateSource::ZsyncUrl { url } => {
             let header = curl_text(url, &["-fsSL", "--max-time", "10", "-r", "0-4095"])
                 .map_err(EasiError::Desktop)?;
@@ -328,10 +637,47 @@ pub fn download_and_update_app(
                 EasiError::Desktop(format!("could not resolve download URL from {url}"))
             })?
         }
+        UpdateSource::ElectronYaml { url } => {
+            let yml_url = electron_yaml_url(url, std::env::consts::ARCH);
+            let body =
+                curl_text(&yml_url, &["-fsSL", "--max-time", "10"]).map_err(EasiError::Desktop)?;
+            let (_, path_opt) = parse_electron_latest_yml(&body).ok_or_else(|| {
+                EasiError::Desktop(format!("could not parse download path from {yml_url}"))
+            })?;
+            let rel = path_opt
+                .ok_or_else(|| EasiError::Desktop(format!("no file path listed in {yml_url}")))?;
+            if rel.starts_with("http://") || rel.starts_with("https://") {
+                rel
+            } else if let Some((base, _)) = yml_url.rsplit_once('/') {
+                format!("{base}/{rel}")
+            } else {
+                rel
+            }
+        }
+        UpdateSource::JetBrains { product_code } => {
+            let api = format!(
+                "https://data.services.jetbrains.com/products/releases?code={product_code}&latest=true&type=release"
+            );
+            let body =
+                curl_text(&api, &["-fsSL", "--max-time", "15"]).map_err(EasiError::Desktop)?;
+            parse_jetbrains_release_json(&body, std::env::consts::ARCH)
+                .and_then(|(_, link)| link)
+                .ok_or_else(|| {
+                    EasiError::Desktop(format!(
+                        "no Linux download found on JetBrains CDN for {product_code}"
+                    ))
+                })?
+        }
+        UpdateSource::HttpRedirect { url } => {
+            resolve_redirect_url(url).unwrap_or_else(|_| url.clone())
+        }
     };
 
     let tmp = TempDir::new()?;
     let fname = download_url
+        .split('?')
+        .next()
+        .unwrap_or(&download_url)
         .rsplit('/')
         .next()
         .filter(|s| !s.is_empty())
@@ -399,6 +745,7 @@ fn download_to_file(url: &str, dest: &Path) -> Result<(), EasiError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -436,5 +783,88 @@ mod tests {
         let zsync =
             "zsync: 0.6.2\nFilename: CoolApp-2.4.1-x86_64.AppImage\nMTime: Mon, 01 Jan 2026\n";
         assert_eq!(parse_zsync_version(zsync).as_deref(), Some("2.4.1"));
+    }
+
+    #[test]
+    fn detects_cdn_electron_jetbrains_gecko_and_user_urls() {
+        let tmp = TempDir::new().unwrap();
+
+        // 1. Electron generic CDN (non-GitHub!)
+        let elec_dir = tmp.path().join("electron-app");
+        fs::create_dir_all(elec_dir.join("resources")).unwrap();
+        fs::write(
+            elec_dir.join("resources/app-update.yml"),
+            "provider: generic\nurl: https://cdn.example.com/releases/linux\n",
+        )
+        .unwrap();
+        assert_eq!(
+            detect_dir_update_source(&elec_dir),
+            Some(UpdateSource::ElectronYaml {
+                url: "https://cdn.example.com/releases/linux".into()
+            })
+        );
+
+        // 2. JetBrains product-info.json
+        let jb_dir = tmp.path().join("webstorm");
+        fs::create_dir_all(&jb_dir).unwrap();
+        fs::write(
+            jb_dir.join("product-info.json"),
+            r#"{"name":"WebStorm","version":"2026.1","productCode":"WS"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            detect_dir_update_source(&jb_dir),
+            Some(UpdateSource::JetBrains {
+                product_code: "WS".into()
+            })
+        );
+
+        // 3. Firefox/Zen application.ini
+        let zen_dir = tmp.path().join("zen");
+        fs::create_dir_all(&zen_dir).unwrap();
+        fs::write(
+            zen_dir.join("application.ini"),
+            "[App]\nName=Zen\nVersion=1.12.5b\nSourceRepository=https://github.com/zen-browser/desktop\n",
+        )
+        .unwrap();
+        assert_eq!(
+            detect_dir_update_source(&zen_dir),
+            Some(UpdateSource::GitHubRelease {
+                owner: "zen-browser".into(),
+                repo: "desktop".into(),
+                asset_pattern: None
+            })
+        );
+
+        // 4. Parse latest-linux.yml + JetBrains JSON + user CDN/forge URLs
+        let yml = "version: 3.2.1\npath: MyApp-3.2.1-x86_64.AppImage\n";
+        assert_eq!(
+            parse_electron_latest_yml(yml),
+            Some(("3.2.1".into(), Some("MyApp-3.2.1-x86_64.AppImage".into())))
+        );
+
+        let jb_json = r#"{"WS":[{"version":"2026.1.2","downloads":{"linux":{"link":"https://download.jetbrains.com/webstorm/WebStorm-2026.1.2.tar.gz"}}}]}"#;
+        assert_eq!(
+            parse_jetbrains_release_json(jb_json, "x86_64"),
+            Some((
+                "2026.1.2".into(),
+                Some("https://download.jetbrains.com/webstorm/WebStorm-2026.1.2.tar.gz".into())
+            ))
+        );
+
+        assert_eq!(
+            parse_user_update_url("https://gitlab.com/foo/bar"),
+            Some(UpdateSource::ForgeRelease {
+                host: "gitlab.com".into(),
+                project: "foo/bar".into(),
+                forge: "gitlab".into()
+            })
+        );
+        assert_eq!(
+            parse_user_update_url("https://downloads.vendor.com/latest/app-linux.tar.gz"),
+            Some(UpdateSource::HttpRedirect {
+                url: "https://downloads.vendor.com/latest/app-linux.tar.gz".into()
+            })
+        );
     }
 }

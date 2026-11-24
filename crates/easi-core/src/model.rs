@@ -65,9 +65,40 @@ pub enum UpdateSource {
         repo: String,
         asset_pattern: Option<String>,
     },
+    /// GitLab or Codeberg/Gitea/Forgejo releases API.
+    ForgeRelease {
+        host: String,
+        project: String,
+        forge: String,
+    },
     ZsyncUrl {
         url: String,
     },
+    /// Electron-builder generic/CDN provider serving `latest-linux.yml`.
+    ElectronYaml {
+        url: String,
+    },
+    /// JetBrains official CDN releases API (`product-info.json` productCode).
+    JetBrains {
+        product_code: String,
+    },
+    /// Direct CDN / proxy "latest download" redirect URL.
+    HttpRedirect {
+        url: String,
+    },
+}
+
+impl UpdateSource {
+    pub fn display_label(&self) -> String {
+        match self {
+            Self::GitHubRelease { owner, repo, .. } => format!("GitHub: {owner}/{repo}"),
+            Self::ForgeRelease { host, project, .. } => format!("{host}: {project}"),
+            Self::ZsyncUrl { url } => format!("zsync: {url}"),
+            Self::ElectronYaml { url } => format!("Electron CDN: {url}"),
+            Self::JetBrains { product_code } => format!("JetBrains CDN ({product_code})"),
+            Self::HttpRedirect { url } => format!("Direct URL: {url}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

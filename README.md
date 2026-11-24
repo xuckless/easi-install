@@ -39,6 +39,7 @@ easi list                          # list installed apps (reconciles self-update
 easi scan                          # discover existing unmanaged user apps in $HOME
 easi adopt <app|path> [--all]      # adopt existing app(s) and repair icons/launchers
 easi repair <app>                  # repair missing icon, .desktop, StartupWMClass, or CLI link
+easi set-source <app> [url]        # auto-detect or link update source (GitHub, GitLab, Codeberg, Electron CDN, JetBrains, direct URL)
 easi forget <app>                  # stop managing an app without deleting its files
 easi uninstall <app>               # clean uninstall (replays manifest in reverse)
 easi check-updates                 # check upstream releases (AppImage zsync / GitHub Releases)

@@ -21,6 +21,7 @@ const CLI_SUBCOMMANDS: &[&str] = &[
     "adopt",
     "repair",
     "forget",
+    "set-source",
     "config",
     "help",
 ];

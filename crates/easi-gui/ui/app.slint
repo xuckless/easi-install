@@ -173,6 +173,8 @@ export component AppWindow inherits Window {
     in property <image> detail-icon;
     in property <bool> detail-has-icon: false;
     in property <bool> detail-adopted: false;
+    in property <string> detail-update-source: "";
+    in-out property <string> detail-source-input: "";
     in property <string> detail-feedback: "";
     in-out property <bool> detail-purge-checked: false;
     in-out property <bool> detail-confirm-clear-data: false;
@@ -224,6 +226,8 @@ export component AppWindow inherits Window {
     callback adopt-all-apps();
     callback repair-app(string);
     callback forget-app(string);
+    callback set-update-source(string, string);
+    callback autodetect-update-source(string);
     callback clear-app-cache(string);
     callback clear-app-data(string);
     callback uninstall-app(string, bool);
@@ -766,6 +770,61 @@ export component AppWindow inherits Window {
                                 EButton {
                                     text: "Repair Icon & Launcher";
                                     clicked => { root.repair-app(root.detail-app-id); }
+                                }
+                            }
+
+                            // Update Source panel (auto-detected from app config/CDN or custom URL)
+                            Panel {
+                                VerticalLayout {
+                                    padding: Theme.s4;
+                                    spacing: Theme.s2;
+                                    HorizontalLayout {
+                                        spacing: Theme.s2;
+                                        Text {
+                                            text: "Update Source";
+                                            font-size: Theme.font-heading;
+                                            font-weight: 600;
+                                            color: Theme.ink;
+                                            vertical-alignment: center;
+                                            horizontal-stretch: 1;
+                                        }
+                                        EButton {
+                                            text: "Auto-Detect";
+                                            small: true;
+                                            clicked => { root.autodetect-update-source(root.detail-app-id); }
+                                        }
+                                    }
+                                    Text {
+                                        text: root.detail-update-source != "" ? root.detail-update-source : "None — click Auto-Detect or paste a GitHub, GitLab, Codeberg, CDN, or latest-download URL.";
+                                        font-family: root.detail-update-source != "" ? Theme.font-mono : Theme.font-ui;
+                                        font-size: Theme.font-caption;
+                                        color: Theme.ink-2;
+                                        wrap: word-wrap;
+                                    }
+                                    HorizontalLayout {
+                                        spacing: Theme.s2;
+                                        EField {
+                                            text <=> root.detail-source-input;
+                                            placeholder: "https://… or owner/repo or jetbrains:WS";
+                                            mono: root.detail-source-input != "";
+                                            horizontal-stretch: 1;
+                                            accepted(u) => {
+                                                if (u != "") {
+                                                    root.set-update-source(root.detail-app-id, u);
+                                                    root.detail-source-input = "";
+                                                }
+                                            }
+                                        }
+                                        EButton {
+                                            text: "Save";
+                                            small: true;
+                                            enabled: root.detail-source-input != "";
+                                            clicked => {
+                                                root.set-update-source(root.detail-app-id, root.detail-source-input);
+                                                root.detail-source-input = "";
+                                            }
+                                        }
+                                    }
                                 }
                             }
 

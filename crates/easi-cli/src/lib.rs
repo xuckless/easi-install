@@ -83,6 +83,15 @@ pub enum Command {
     Repair { app: String },
     /// Stop managing an app in easi without deleting any of its files on disk.
     Forget { app: String },
+    /// Set or auto-detect the upstream update source (GitHub, GitLab, Codeberg, CDN YAML, JetBrains, or direct URL).
+    SetSource {
+        app: String,
+        /// Repository, CDN, or latest-download URL (omit to auto-detect from app config files).
+        url: Option<String>,
+        /// Clear the recorded update source.
+        #[arg(long)]
+        clear: bool,
+    },
     /// Update easi itself.
     SelfUpdate,
     /// Cleanly uninstall easi itself and restore previous MIME handlers (keeps installed apps).
@@ -141,6 +150,9 @@ pub fn run(cli: Cli) -> ExitCode {
         }
         Some(Command::Repair { app }) => run_repair_cmd(&roots, &app),
         Some(Command::Forget { app }) => run_forget_cmd(&roots, &app),
+        Some(Command::SetSource { app, url, clear }) => {
+            run_set_source_cmd(&roots, &app, url.as_deref(), clear)
+        }
         Some(Command::SelfUpdate) => run_self_update_cmd(),
         Some(Command::SelfUninstall) => run_self_uninstall_cmd(&roots, cli.yes),
         Some(Command::Config { auto_update }) => run_config_cmd(&roots, auto_update),
@@ -591,6 +603,62 @@ fn run_forget_cmd(roots: &InstallRoots, app: &str) -> ExitCode {
                 "Stopped managing {} ({}). App files on disk were not modified.",
                 m.name, m.app_id
             );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("easi: {}", format_user_error(&e));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_set_source_cmd(roots: &InstallRoots, app: &str, url: Option<&str>, clear: bool) -> ExitCode {
+    if clear {
+        return match easi_core::upstream::set_app_update_source(roots, app, None) {
+            Ok(m) => {
+                println!("Cleared update source for {} ({}).", m.name, m.app_id);
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("easi: {}", format_user_error(&e));
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    let source = if let Some(u) = url {
+        match easi_core::upstream::parse_user_update_url(u) {
+            Some(s) => s,
+            None => {
+                eprintln!(
+                    "easi: unrecognized update source '{u}' (pass a GitHub/GitLab/Codeberg/CDN/latest URL or `jetbrains:<CODE>`)"
+                );
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        match resolve_installed(roots, app) {
+            Ok(m) => match easi_core::upstream::detect_dir_update_source(&m.install_dir) {
+                Some(s) => s,
+                None => {
+                    eprintln!(
+                        "easi: no embedded update config found in {}; pass a URL explicitly: `easi set-source {app} <url>`",
+                        m.install_dir.display()
+                    );
+                    return ExitCode::FAILURE;
+                }
+            },
+            Err(e) => {
+                eprintln!("easi: {}", format_user_error(&e));
+                return ExitCode::FAILURE;
+            }
+        }
+    };
+
+    let label = source.display_label();
+    match easi_core::upstream::set_app_update_source(roots, app, Some(source)) {
+        Ok(m) => {
+            println!("Set update source for {} ({}) -> {label}", m.name, m.app_id);
             ExitCode::SUCCESS
         }
         Err(e) => {

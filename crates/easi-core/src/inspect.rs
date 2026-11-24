@@ -645,7 +645,13 @@ where
             crate::model::UpdateSource::GitHubRelease { repo, .. } => {
                 Some(display_name_from_slug(&repo))
             }
-            crate::model::UpdateSource::ZsyncUrl { .. } => None,
+            crate::model::UpdateSource::ForgeRelease { project, .. } => {
+                project.rsplit('/').next().map(display_name_from_slug)
+            }
+            crate::model::UpdateSource::ZsyncUrl { .. }
+            | crate::model::UpdateSource::ElectronYaml { .. }
+            | crate::model::UpdateSource::JetBrains { .. }
+            | crate::model::UpdateSource::HttpRedirect { .. } => None,
         });
 
     let name = desktop_name
@@ -740,7 +746,13 @@ where
         .or_else(|| {
             update_source.as_ref().and_then(|src| match src {
                 crate::model::UpdateSource::GitHubRelease { owner, .. } => Some(owner.clone()),
-                crate::model::UpdateSource::ZsyncUrl { .. } => None,
+                crate::model::UpdateSource::ForgeRelease { project, .. } => {
+                    project.split('/').next().map(str::to_string)
+                }
+                crate::model::UpdateSource::JetBrains { .. } => Some("JetBrains".into()),
+                crate::model::UpdateSource::ZsyncUrl { .. }
+                | crate::model::UpdateSource::ElectronYaml { .. }
+                | crate::model::UpdateSource::HttpRedirect { .. } => None,
             })
         });
     let signature_summary = match &trust.signature {
