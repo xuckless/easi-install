@@ -136,18 +136,18 @@ export component AppWindow inherits Window {
     background: Theme.ground;
     default-font-family: Theme.font-ui;
 
-    // Projected state from easi-core::State
+    // Projected state from easi-core::Store (State + ManagerUi) — views are pure functions of state.
     in property <string> screen: "idle";
     in property <float> dir: 1;
-    in-out property <string> manager-page: "apps"; // "apps" | "settings" | "app_info"
-    property <float> page-dir: 1;
+    in property <string> manager-page: "apps"; // "apps" | "settings" | "app_info"
+    in property <float> page-dir: 1;
     in property <string> easi-version: "";
     in property <[InstalledRow]> installed-apps: [];
     in property <[DetectedRow]> detected-apps: [];
     in property <string> total-size-text: "";
-    in-out property <string> search-query: "";
-    in-out property <string> filter-kind: "all";
-    in-out property <bool> sort-by-size: false;
+    in property <string> search-query: "";
+    in property <string> filter-kind: "all";
+    in property <bool> sort-by-size: false;
     in property <string> easi-update-version: "";
     in property <int> outdated-count: 0;
     in property <string> updating-app-id: "";
@@ -157,10 +157,10 @@ export component AppWindow inherits Window {
     in property <bool> busy-picker: false;
     in property <string> self-update-state: "idle"; // "idle" | "updating" | "updated" | "up_to_date" | "failed"
     in property <string> self-update-message: "";
-    in-out property <bool> auto-check-updates: true;
-    in-out property <bool> bg-update-timer: false;
-    in-out property <bool> purge-data-on-uninstall: false;
-    in-out property <bool> confirm-self-uninstall: false;
+    in property <bool> auto-check-updates: true;
+    in property <bool> bg-update-timer: false;
+    in property <bool> purge-data-on-uninstall: false;
+    in property <bool> confirm-self-uninstall: false;
     in property <string> settings-feedback: "";
 
     // Selected App Info (Android-style per-app view)
@@ -188,9 +188,9 @@ export component AppWindow inherits Window {
     in property <string> detail-update-source: "";
     in-out property <string> detail-source-input: "";
     in property <string> detail-feedback: "";
-    in-out property <bool> detail-purge-checked: false;
-    in-out property <bool> detail-confirm-clear-data: false;
-    in-out property <bool> detail-confirm-uninstall: false;
+    in property <bool> detail-purge-checked: false;
+    in property <bool> detail-confirm-clear-data: false;
+    in property <bool> detail-confirm-uninstall: false;
 
     // Installer flow projections
     in property <string> app-name: "";
@@ -202,7 +202,7 @@ export component AppWindow inherits Window {
     in property <string> status-text: "";
     in property <string> error-text: "";
     in property <string> suggested-command: "";
-    in-out property <bool> command-copied: false;
+    in property <bool> command-copied: false;
     in property <string> conflict-text: "";
 
     // Trust summary & permissions projection
@@ -214,12 +214,12 @@ export component AppWindow inherits Window {
     in property <string> permissions-text: "";
     in property <bool> has-script-warning: false;
     in property <string> script-warning-text: "";
-    in-out property <bool> script-consent-checked: false;
+    in property <bool> script-consent-checked: false;
 
     // Progress & post-install
     in property <float> progress: 0.0;
     in property <string> install-dir: "";
-    in-out property <bool> trash-checked: true;
+    in property <bool> trash-checked: true;
 
     // Wizard state
     in property <[string]> wizard-choices: [];
@@ -229,6 +229,15 @@ export component AppWindow inherits Window {
     property <bool> install-allowed: !root.has-script-warning || root.script-consent-checked;
 
     // Actions dispatched back to the Redux store
+    callback set-manager-page(string);
+    callback set-search-query(string);
+    callback set-filter-kind(string);
+    callback toggle-sort-by-size();
+    callback set-purge-default(bool);
+    callback set-detail-purge(bool);
+    callback set-confirm(string);
+    callback set-trash-checked(bool);
+    callback set-script-consent(bool);
     callback browse-package();
     callback open-path(string);
     callback open-app-info(string);
@@ -302,11 +311,7 @@ export component AppWindow inherits Window {
                 ESegmented {
                     labels: ["Apps", "Settings"];
                     current: root.manager-page == "settings" ? 1 : 0;
-                    changed(i) => {
-                        root.page-dir = i == 1 ? 1 : -1;
-                        root.manager-page = i == 1 ? "settings" : "apps";
-                        root.confirm-self-uninstall = false;
-                    }
+                    changed(i) => { root.set-manager-page(i == 1 ? "settings" : "apps"); }
                 }
             }
 
@@ -447,10 +452,7 @@ export component AppWindow inherits Window {
                                     text: root.sort-by-size ? "Sort: Largest" : "Sort: Name";
                                     small: true;
                                     enabled: root.installed-apps.length > 1;
-                                    clicked => {
-                                        root.sort-by-size = !root.sort-by-size;
-                                        root.filter-changed();
-                                    }
+                                    clicked => { root.toggle-sort-by-size(); }
                                 }
                                 if root.outdated-count > 0: EButton {
                                     text: root.updating-app-id == "__all__"
@@ -488,10 +490,10 @@ export component AppWindow inherits Window {
                             HorizontalLayout {
                                 spacing: Theme.s2;
                                 EField {
-                                    text <=> root.search-query;
+                                    text: root.search-query;
                                     placeholder: "Filter installed apps…";
                                     horizontal-stretch: 1;
-                                    edited => { root.filter-changed(); }
+                                    edited(q) => { root.set-search-query(q); }
                                 }
                                 ESegmented {
                                     small: true;
@@ -499,8 +501,7 @@ export component AppWindow inherits Window {
                                     labels: ["All", "GUI", "CLI"];
                                     current: root.filter-kind == "gui" ? 1 : root.filter-kind == "cli" ? 2 : 0;
                                     changed(i) => {
-                                        root.filter-kind = i == 1 ? "gui" : i == 2 ? "cli" : "all";
-                                        root.filter-changed();
+                                        root.set-filter-kind(i == 1 ? "gui" : i == 2 ? "cli" : "all");
                                     }
                                 }
                             }
@@ -628,10 +629,7 @@ export component AppWindow inherits Window {
                                                             EButton {
                                                                 text: "App Info";
                                                                 small: true;
-                                                                clicked => {
-                                                                    root.page-dir = 1;
-                                                                    root.open-app-info(app.app-id);
-                                                                }
+                                                                clicked => { root.open-app-info(app.app-id); }
                                                             }
                                                         }
                                                     }
@@ -772,12 +770,7 @@ export component AppWindow inherits Window {
                                     text: "← Back to Apps";
                                     kind: "ghost";
                                     small: true;
-                                    clicked => {
-                                        root.page-dir = -1;
-                                        root.manager-page = "apps";
-                                        root.detail-confirm-uninstall = false;
-                                        root.detail-confirm-clear-data = false;
-                                    }
+                                    clicked => { root.set-manager-page("apps"); }
                                 }
                             }
 
@@ -1012,7 +1005,8 @@ export component AppWindow inherits Window {
                                             text: "Clear Data";
                                             confirm-text: "Confirm Clear Data";
                                             enabled: root.detail-has-data;
-                                            open <=> root.detail-confirm-clear-data;
+                                            open: root.detail-confirm-clear-data;
+                                            toggled(o) => { root.set-confirm(o ? "clear_data" : "none"); }
                                             confirmed => { root.clear-app-data(root.detail-app-id); }
                                         }
                                     }
@@ -1038,7 +1032,8 @@ export component AppWindow inherits Window {
                                     }
                                     ECheck {
                                         text: "Also remove user data & cache";
-                                        checked <=> root.detail-purge-checked;
+                                        checked: root.detail-purge-checked;
+                                        toggled(v) => { root.set-detail-purge(v); }
                                     }
                                     HorizontalLayout {
                                         spacing: Theme.s2;
@@ -1047,10 +1042,10 @@ export component AppWindow inherits Window {
                                             text: "Uninstall " + root.detail-name;
                                             confirm-text: "Confirm Uninstall";
                                             trigger-kind: "danger-soft";
-                                            open <=> root.detail-confirm-uninstall;
+                                            open: root.detail-confirm-uninstall;
+                                            toggled(o) => { root.set-confirm(o ? "uninstall_app" : "none"); }
                                             confirmed => {
-                                                root.page-dir = -1;
-                                                root.manager-page = "apps";
+                                                root.set-manager-page("apps");
                                                 root.uninstall-app(root.detail-app-id, root.detail-purge-checked);
                                             }
                                         }
@@ -1058,8 +1053,7 @@ export component AppWindow inherits Window {
                                             text: "Stop Managing";
                                             small: true;
                                             clicked => {
-                                                root.page-dir = -1;
-                                                root.manager-page = "apps";
+                                                root.set-manager-page("apps");
                                                 root.forget-app(root.detail-app-id);
                                             }
                                         }
@@ -1104,7 +1098,7 @@ export component AppWindow inherits Window {
                                             horizontal-stretch: 1;
                                         }
                                         ESwitch {
-                                            checked <=> root.auto-check-updates;
+                                            checked: root.auto-check-updates;
                                             toggled(v) => { root.toggle-auto-update(v); }
                                         }
                                     }
@@ -1118,7 +1112,7 @@ export component AppWindow inherits Window {
                                             horizontal-stretch: 1;
                                         }
                                         ESwitch {
-                                            checked <=> root.bg-update-timer;
+                                            checked: root.bg-update-timer;
                                             toggled(v) => { root.toggle-bg-update-timer(v); }
                                         }
                                     }
@@ -1176,7 +1170,8 @@ export component AppWindow inherits Window {
                                             horizontal-stretch: 1;
                                         }
                                         ESwitch {
-                                            checked <=> root.purge-data-on-uninstall;
+                                            checked: root.purge-data-on-uninstall;
+                                            toggled(v) => { root.set-purge-default(v); }
                                         }
                                     }
                                 }
@@ -1243,7 +1238,8 @@ export component AppWindow inherits Window {
                                             text: "Uninstall easi";
                                             confirm-text: "Confirm Uninstall easi";
                                             trigger-kind: "danger-soft";
-                                            open <=> root.confirm-self-uninstall;
+                                            open: root.confirm-self-uninstall;
+                                            toggled(o) => { root.set-confirm(o ? "self_uninstall" : "none"); }
                                             confirmed => { root.run-self-uninstall(); }
                                         }
                                     }
@@ -1416,7 +1412,8 @@ export component AppWindow inherits Window {
                     }
                     ECheck {
                         text: "I understand and consent to running this installer script";
-                        checked <=> root.script-consent-checked;
+                        checked: root.script-consent-checked;
+                        toggled(v) => { root.set-script-consent(v); }
                     }
                 }
             }
@@ -1757,7 +1754,8 @@ export component AppWindow inherits Window {
                         alignment: center;
                         ECheck {
                             text: "Move downloaded package to Trash";
-                            checked <=> root.trash-checked;
+                            checked: root.trash-checked;
+                            toggled(v) => { root.set-trash-checked(v); }
                         }
                     }
                 }
@@ -1813,10 +1811,7 @@ export component AppWindow inherits Window {
                 spacing: Theme.s2;
                 if root.screen == "failed" && root.suggested-command != "": EButton {
                     text: root.command-copied ? "Copied!" : "Copy Command";
-                    clicked => {
-                        root.command-copied = true;
-                        root.copy-suggested-command(root.suggested-command);
-                    }
+                    clicked => { root.copy-suggested-command(root.suggested-command); }
                 }
                 EButton {
                     text: "App Manager";

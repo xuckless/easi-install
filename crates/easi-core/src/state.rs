@@ -57,8 +57,92 @@ pub enum State {
     Cancelled,
     Failed {
         error: String,
-        rolled_back: bool,
     },
+    FailedRolledBack {
+        error: String,
+    },
+}
+
+/// Active page in the standalone App Manager (replaces string/boolean UI state in Slint).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ManagerPage {
+    #[default]
+    Apps,
+    AppInfo {
+        app_id: String,
+    },
+    Settings,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FilterKind {
+    #[default]
+    All,
+    Gui,
+    Cli,
+}
+
+/// Active inline confirmation prompt (at most one at a time — never multiple booleans).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ConfirmPrompt {
+    #[default]
+    None,
+    ClearData,
+    UninstallApp,
+    SelfUninstall,
+}
+
+/// Pure UI state owned by `Store` so views are strictly functions of state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagerUi {
+    pub page: ManagerPage,
+    pub search_query: String,
+    pub filter_kind: FilterKind,
+    pub sort_by_size: bool,
+    pub auto_check_updates: bool,
+    pub bg_update_timer: bool,
+    pub purge_default: bool,
+    pub detail_purge: bool,
+    pub confirm: ConfirmPrompt,
+    pub trash_checked: bool,
+    pub script_consent_checked: bool,
+    pub command_copied: bool,
+}
+
+impl Default for ManagerUi {
+    fn default() -> Self {
+        Self {
+            page: ManagerPage::Apps,
+            search_query: String::new(),
+            filter_kind: FilterKind::All,
+            sort_by_size: false,
+            auto_check_updates: true,
+            bg_update_timer: false,
+            purge_default: false,
+            detail_purge: false,
+            confirm: ConfirmPrompt::None,
+            trash_checked: true,
+            script_consent_checked: false,
+            command_copied: false,
+        }
+    }
+}
+
+/// Pure UI intents dispatched from the Slint view into `Store::dispatch_ui`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UiAction {
+    Navigate(ManagerPage),
+    SetSearchQuery(String),
+    SetFilterKind(FilterKind),
+    ToggleSortBySize,
+    SetAutoCheckUpdates(bool),
+    SetBgUpdateTimer(bool),
+    SetPurgeDefault(bool),
+    SetDetailPurge(bool),
+    SetConfirm(ConfirmPrompt),
+    SetTrashChecked(bool),
+    SetScriptConsent(bool),
+    SetCommandCopied(bool),
 }
 
 impl Default for State {
@@ -78,8 +162,7 @@ pub enum Action {
     },
     UninstallFinished {
         app_id: String,
-        ok: bool,
-        error: Option<String>,
+        result: Result<(), String>,
     },
     OpenPath(PathBuf),
     Inspected(Box<Classified>),

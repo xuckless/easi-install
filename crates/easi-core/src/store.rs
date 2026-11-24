@@ -2,23 +2,35 @@
 
 use std::collections::VecDeque;
 
-use crate::reduce::reduce;
-use crate::state::{Action, Effect, State};
+use crate::reduce::{reduce, reduce_ui};
+use crate::state::{Action, Effect, ManagerUi, State, UiAction};
 
 #[derive(Debug, Default)]
 pub struct Store {
     state: State,
+    ui: ManagerUi,
 }
 
 impl Store {
     pub fn new() -> Self {
         Self {
             state: State::Idle { installed: vec![] },
+            ui: ManagerUi::default(),
         }
     }
 
     pub fn state(&self) -> &State {
         &self.state
+    }
+
+    pub fn ui(&self) -> &ManagerUi {
+        &self.ui
+    }
+
+    /// Apply a pure UI intent through `reduce_ui`.
+    pub fn dispatch_ui(&mut self, action: UiAction) {
+        let prev = std::mem::take(&mut self.ui);
+        self.ui = reduce_ui(prev, action);
     }
 
     /// Apply one action through the pure reducer and return resulting effects.

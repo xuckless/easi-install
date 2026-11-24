@@ -25,6 +25,8 @@ pub use model::{
     InstallSummary, InstalledApp, RollbackReason, ScriptReport, SignatureStatus, TrustSummary,
     UpdateSource, WizardStep,
 };
-pub use reduce::reduce;
-pub use state::{Action, Effect, State};
+pub use reduce::{reduce, reduce_ui};
+pub use state::{
+    Action, ConfirmPrompt, Effect, FilterKind, ManagerPage, ManagerUi, State, UiAction,
+};
 pub use store::Store;

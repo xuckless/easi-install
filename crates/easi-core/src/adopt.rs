@@ -6,7 +6,9 @@ use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
-use crate::appid::{display_name_from_slug, guess_startup_wm_class, slug_and_version};
+use crate::appid::{
+    display_name_from_raw, display_name_from_slug, guess_startup_wm_class, slug_and_version,
+};
 use crate::detect::{ArchiveEntry, detect_file_format, inspect_contents};
 use crate::error::EasiError;
 use crate::inspect::{desktop_field, score_icons};
@@ -320,7 +322,7 @@ pub fn scan_unmanaged_apps(roots: &InstallRoots) -> Vec<DiscoveredApp> {
                 continue;
             }
             seen_execs.insert(canon_exec.clone());
-            let name = display_name_from_slug(slug_clean);
+            let name = display_name_from_raw(&fname);
             let kind = if matches!(fmt, Format::AppImageType1 | Format::AppImageType2) {
                 AppKind::Gui
             } else {
@@ -751,7 +753,7 @@ fn discover_from_file(canon_path: &Path) -> Option<DiscoveredApp> {
         .unwrap_or_default();
     let (slug, ver) = slug_and_version(&fname);
     let app_id = format!("easi.{}", if slug.is_empty() { "app" } else { &slug });
-    let name = display_name_from_slug(&slug);
+    let name = display_name_from_raw(&fname);
     let kind = if matches!(fmt, Format::AppImageType1 | Format::AppImageType2) {
         AppKind::Gui
     } else {
@@ -784,7 +786,7 @@ fn discover_from_dir(roots: &InstallRoots, canon_dir: &Path) -> Option<Discovere
     let slug_clean = if slug.is_empty() { "app" } else { &slug };
     let exec_path = find_best_exec_in_dir(canon_dir, slug_clean)?;
     let app_id = format!("easi.{slug_clean}");
-    let name = display_name_from_slug(slug_clean);
+    let name = display_name_from_raw(&dir_name);
     let version = detect_dir_version(canon_dir, &exec_path).or(dir_ver);
 
     let mut icon_entries = Vec::new();

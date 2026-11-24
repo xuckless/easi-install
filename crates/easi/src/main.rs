@@ -57,6 +57,8 @@ fn main() -> ExitCode {
                 command: Some(easi_cli::Command::Install {
                     path,
                     dry_run: false,
+                    trash: false,
+                    add_to_path: false,
                 }),
             });
         }

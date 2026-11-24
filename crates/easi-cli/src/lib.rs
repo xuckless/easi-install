@@ -47,6 +47,12 @@ pub enum Command {
         /// Print planned writes and trust summary without modifying disk.
         #[arg(long)]
         dry_run: bool,
+        /// Move the downloaded source package to Trash after installing (opt-in under -y).
+        #[arg(long)]
+        trash: bool,
+        /// Add ~/.local/bin to your shell profile if missing (opt-in under -y).
+        #[arg(long)]
+        add_to_path: bool,
     },
     /// Inspect a package and print its trust summary and planned writes without installing.
     Inspect { path: PathBuf },
@@ -134,12 +140,17 @@ pub fn run(cli: Cli) -> ExitCode {
     }
 
     match cli.command {
-        Some(Command::Install { path, dry_run }) => {
+        Some(Command::Install {
+            path,
+            dry_run,
+            trash,
+            add_to_path,
+        }) => {
             maybe_notify_update(&roots);
             if dry_run {
                 run_inspect_cmd(&roots, path)
             } else {
-                run_install_cmd(&roots, path, cli.yes)
+                run_install_cmd(&roots, path, cli.yes, trash, add_to_path)
             }
         }
         Some(Command::Inspect { path }) => run_inspect_cmd(&roots, path),
@@ -867,7 +878,13 @@ fn run_uninstall_cmd(roots: &InstallRoots, app: &str, purge_data: bool, yes: boo
     }
 }
 
-fn run_install_cmd(roots: &InstallRoots, path: PathBuf, yes: bool) -> ExitCode {
+fn run_install_cmd(
+    roots: &InstallRoots,
+    path: PathBuf,
+    yes: bool,
+    opt_in_trash: bool,
+    opt_in_add_to_path: bool,
+) -> ExitCode {
     let runner = EffectRunner::new(roots.clone());
     let mut store = Store::new();
 
@@ -986,24 +1003,34 @@ fn run_install_cmd(roots: &InstallRoots, path: PathBuf, yes: bool) -> ExitCode {
                     summary.name,
                     summary.install_dir.display()
                 );
-                if summary.kind == AppKind::Terminal
-                    && !summary.bin_on_path
-                    && (yes
-                        || prompt_yes_no(
-                            "~/.local/bin is not in PATH. Add it to your shell profile?",
-                            true,
-                        ))
-                {
-                    match add_bin_to_shell_rc(&roots.home_dir) {
-                        Ok(rc) => {
-                            println!("Updated {}. Restart your shell to apply.", rc.display())
+                if summary.kind == AppKind::Terminal && !summary.bin_on_path {
+                    if opt_in_add_to_path
+                        || (!yes
+                            && prompt_yes_no(
+                                "~/.local/bin is not in PATH. Add it to your shell profile?",
+                                true,
+                            ))
+                    {
+                        match add_bin_to_shell_rc(&roots.home_dir) {
+                            Ok(rc) => {
+                                println!("Updated {}. Restart your shell to apply.", rc.display())
+                            }
+                            Err(e) => eprintln!("Could not update shell profile: {e}"),
                         }
-                        Err(e) => eprintln!("Could not update shell profile: {e}"),
+                    } else if yes {
+                        println!(
+                            "Note: ~/.local/bin is not in PATH (pass --add-to-path to update your shell rc)."
+                        );
                     }
                 }
-                if yes || prompt_yes_no("Move downloaded package to Trash?", true) {
+                if opt_in_trash
+                    || (!yes && prompt_yes_no("Move downloaded package to Trash?", true))
+                {
                     Action::TrashSource
                 } else {
+                    if yes {
+                        println!("Kept downloaded package (pass --trash to move it to Trash).");
+                    }
                     Action::KeepSource
                 }
             }
@@ -1032,12 +1059,12 @@ fn run_install_cmd(roots: &InstallRoots, path: PathBuf, yes: bool) -> ExitCode {
                 println!("Cancelled.");
                 return ExitCode::SUCCESS;
             }
-            State::Failed { error, rolled_back } => {
-                if *rolled_back {
-                    eprintln!("easi: install failed (rolled back cleanly): {error}");
-                } else {
-                    eprintln!("easi: failed: {error}");
-                }
+            State::FailedRolledBack { error } => {
+                eprintln!("easi: install failed (rolled back cleanly): {error}");
+                return ExitCode::FAILURE;
+            }
+            State::Failed { error } => {
+                eprintln!("easi: failed: {error}");
                 return ExitCode::FAILURE;
             }
             State::Idle { .. }

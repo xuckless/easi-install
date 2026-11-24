@@ -56,14 +56,12 @@ impl EffectRunner {
                         crate::desktop::notify("App uninstalled", &format!("Removed {}", m.name));
                         emit(Action::UninstallFinished {
                             app_id,
-                            ok: true,
-                            error: None,
+                            result: Ok(()),
                         });
                     }
                     Err(err) => emit(Action::UninstallFinished {
                         app_id,
-                        ok: false,
-                        error: Some(format_user_error(&err)),
+                        result: Err(format_user_error(&err)),
                     }),
                 }
             }

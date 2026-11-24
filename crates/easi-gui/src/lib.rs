@@ -14,7 +14,8 @@ use std::sync::{Arc, Mutex};
 use easi_core::roots::InstallRoots;
 use easi_core::runner::EffectRunner;
 use easi_core::{
-    Action, AppKind, DoneOutcome, Effect, SignatureStatus, State, Store, TrustSummary, WizardStep,
+    Action, AppKind, ConfirmPrompt, DoneOutcome, Effect, FilterKind, ManagerPage, ManagerUi,
+    SignatureStatus, State, Store, TrustSummary, UiAction, WizardStep,
 };
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
 
@@ -66,14 +67,14 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
     // Match `easi.desktop` so Wayland/X11 Alt-Tab and taskbars show "easi" instead of "Unknown".
     let _ = slint::set_xdg_app_id("easi");
     let cfg = easi_core::self_update::load_config(&runner.roots);
-    window.set_auto_check_updates(cfg.auto_check_updates);
-    window.set_bg_update_timer(easi_core::desktop::is_background_update_timer_enabled(
-        &runner.roots,
-    ));
+    let bg_timer = easi_core::desktop::is_background_update_timer_enabled(&runner.roots);
     window.set_easi_version(env!("CARGO_PKG_VERSION").into());
 
-    if let Ok(st) = store.lock() {
-        project_state(&window, st.state());
+    if let Ok(mut st) = store.lock() {
+        st.dispatch_ui(UiAction::SetAutoCheckUpdates(cfg.auto_check_updates));
+        st.dispatch_ui(UiAction::SetBgUpdateTimer(bg_timer));
+        project_ui(&window, st.ui());
+        project_state(&window, st.state(), st.ui());
     }
 
     // Background brew-style update check for easi itself (never blocks startup).
@@ -94,6 +95,84 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
     }
 
     // Wire UI callbacks -> pure dispatch into Redux store.
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        window.on_set_manager_page(move |page| {
+            let next = match page.as_str() {
+                "settings" => ManagerPage::Settings,
+                _ => ManagerPage::Apps,
+            };
+            dispatch_ui(&w, &s, UiAction::Navigate(next));
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        window.on_set_search_query(move |q| {
+            dispatch_ui(&w, &s, UiAction::SetSearchQuery(q.into()));
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        window.on_set_filter_kind(move |k| {
+            let fk = match k.as_str() {
+                "gui" => FilterKind::Gui,
+                "cli" => FilterKind::Cli,
+                _ => FilterKind::All,
+            };
+            dispatch_ui(&w, &s, UiAction::SetFilterKind(fk));
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        window.on_toggle_sort_by_size(move || {
+            dispatch_ui(&w, &s, UiAction::ToggleSortBySize);
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        window.on_set_purge_default(move |v| {
+            dispatch_ui(&w, &s, UiAction::SetPurgeDefault(v));
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        window.on_set_detail_purge(move |v| {
+            dispatch_ui(&w, &s, UiAction::SetDetailPurge(v));
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        window.on_set_confirm(move |c| {
+            let cp = match c.as_str() {
+                "clear_data" => ConfirmPrompt::ClearData,
+                "uninstall_app" => ConfirmPrompt::UninstallApp,
+                "self_uninstall" => ConfirmPrompt::SelfUninstall,
+                _ => ConfirmPrompt::None,
+            };
+            dispatch_ui(&w, &s, UiAction::SetConfirm(cp));
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        window.on_set_trash_checked(move |v| {
+            dispatch_ui(&w, &s, UiAction::SetTrashChecked(v));
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        window.on_set_script_consent(move |v| {
+            dispatch_ui(&w, &s, UiAction::SetScriptConsent(v));
+        });
+    }
     {
         let w = window.as_weak();
         let s = Arc::clone(&store);
@@ -151,16 +230,17 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         let r = Arc::clone(&runner);
         window.on_open_app_info(move |app_id| {
             let id: String = app_id.into();
-            if let (Some(win), Ok(st)) = (w.upgrade(), s.lock())
-                && let State::Idle { installed } = st.state()
-                && let Some(app) = installed.iter().find(|a| a.app_id == id)
-            {
-                project_app_detail(&win, &r.roots, app);
-                win.set_detail_feedback("".into());
-                win.set_detail_confirm_clear_data(false);
-                win.set_detail_confirm_uninstall(false);
-                win.set_detail_purge_checked(win.get_purge_data_on_uninstall());
-                win.set_manager_page("app_info".into());
+            if let (Some(win), Ok(mut st)) = (w.upgrade(), s.lock()) {
+                st.dispatch_ui(UiAction::Navigate(ManagerPage::AppInfo {
+                    app_id: id.clone(),
+                }));
+                project_ui(&win, st.ui());
+                if let State::Idle { installed } = st.state()
+                    && let Some(app) = installed.iter().find(|a| a.app_id == id)
+                {
+                    project_app_detail(&win, &r.roots, app);
+                    win.set_detail_feedback("".into());
+                }
             }
         });
     }
@@ -517,13 +597,16 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         let s = Arc::clone(&store);
         window.on_filter_changed(move || {
             if let (Some(win), Ok(st)) = (w.upgrade(), s.lock()) {
-                project_state(&win, st.state());
+                project_state(&win, st.state(), st.ui());
             }
         });
     }
     {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
         window.on_copy_suggested_command(move |cmd| {
             let _ = easi_core::desktop::copy_to_clipboard(cmd.as_str());
+            dispatch_ui(&w, &s, UiAction::SetCommandCopied(true));
         });
     }
     {
@@ -715,13 +798,17 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         });
     }
     {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
         let r = Arc::clone(&runner);
         window.on_toggle_auto_update(move |enabled| {
             let _ = easi_core::self_update::set_auto_check_updates(&r.roots, enabled);
+            dispatch_ui(&w, &s, UiAction::SetAutoCheckUpdates(enabled));
         });
     }
     {
         let w = window.as_weak();
+        let s = Arc::clone(&store);
         let r = Arc::clone(&runner);
         window.on_toggle_bg_update_timer(move |enabled| {
             let msg = match std::env::current_exe()
@@ -730,9 +817,13 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                     easi_core::desktop::set_background_update_timer(&r.roots, &exe, enabled)
                 }) {
                 Ok(true) => {
+                    dispatch_ui(&w, &s, UiAction::SetBgUpdateTimer(true));
                     "Enabled daily background app update checks (systemd user timer).".into()
                 }
-                Ok(false) => "Disabled background app update checks.".into(),
+                Ok(false) => {
+                    dispatch_ui(&w, &s, UiAction::SetBgUpdateTimer(false));
+                    "Disabled background app update checks.".into()
+                }
                 Err(e) => format!("Timer update failed: {}", easi_core::format_user_error(&e)),
             };
             if let Some(win) = w.upgrade() {
@@ -915,6 +1006,62 @@ fn cleanup_preview_icons() {
     }
 }
 
+fn dispatch_ui(weak: &Weak<ui::AppWindow>, store: &Arc<Mutex<Store>>, action: UiAction) {
+    if let Ok(mut st) = store.lock() {
+        st.dispatch_ui(action);
+        if let Some(win) = weak.upgrade() {
+            project_ui(&win, st.ui());
+            project_state(&win, st.state(), st.ui());
+        }
+    }
+}
+
+fn page_rank(page: &str) -> i32 {
+    match page {
+        "apps" => 0,
+        "app_info" => 1,
+        _ => 2,
+    }
+}
+
+fn project_ui(win: &ui::AppWindow, ui: &ManagerUi) {
+    let next_page = match &ui.page {
+        ManagerPage::Apps => "apps",
+        ManagerPage::AppInfo { .. } => "app_info",
+        ManagerPage::Settings => "settings",
+    };
+    let cur_page = win.get_manager_page().to_string();
+    if cur_page != next_page {
+        let dir = if page_rank(next_page) >= page_rank(&cur_page) {
+            1.0
+        } else {
+            -1.0
+        };
+        win.set_page_dir(dir);
+        win.set_manager_page(next_page.into());
+    }
+    win.set_search_query(ui.search_query.clone().into());
+    win.set_filter_kind(
+        match ui.filter_kind {
+            FilterKind::All => "all",
+            FilterKind::Gui => "gui",
+            FilterKind::Cli => "cli",
+        }
+        .into(),
+    );
+    win.set_sort_by_size(ui.sort_by_size);
+    win.set_auto_check_updates(ui.auto_check_updates);
+    win.set_bg_update_timer(ui.bg_update_timer);
+    win.set_purge_data_on_uninstall(ui.purge_default);
+    win.set_detail_purge_checked(ui.detail_purge);
+    win.set_detail_confirm_clear_data(ui.confirm == ConfirmPrompt::ClearData);
+    win.set_detail_confirm_uninstall(ui.confirm == ConfirmPrompt::UninstallApp);
+    win.set_confirm_self_uninstall(ui.confirm == ConfirmPrompt::SelfUninstall);
+    win.set_trash_checked(ui.trash_checked);
+    win.set_script_consent_checked(ui.script_consent_checked);
+    win.set_command_copied(ui.command_copied);
+}
+
 fn dispatch_action(
     weak: &Weak<ui::AppWindow>,
     store: &Arc<Mutex<Store>>,
@@ -924,8 +1071,19 @@ fn dispatch_action(
     let effects = match store.lock() {
         Ok(mut st) => {
             let eff = st.dispatch(action);
+            if matches!(st.state(), State::Ready { .. }) {
+                st.dispatch_ui(UiAction::SetScriptConsent(false));
+            } else if matches!(st.state(), State::OfferTrash { .. }) {
+                st.dispatch_ui(UiAction::SetTrashChecked(true));
+            } else if matches!(
+                st.state(),
+                State::Failed { .. } | State::FailedRolledBack { .. }
+            ) {
+                st.dispatch_ui(UiAction::SetCommandCopied(false));
+            }
             if let Some(win) = weak.upgrade() {
-                project_state(&win, st.state());
+                project_ui(&win, st.ui());
+                project_state(&win, st.state(), st.ui());
             }
             eff
         }
@@ -997,7 +1155,7 @@ fn set_screen_with_dir(win: &ui::AppWindow, next: &str) {
     }
 }
 
-fn project_state(win: &ui::AppWindow, state: &State) {
+fn project_state(win: &ui::AppWindow, state: &State, ui: &ManagerUi) {
     match state {
         State::Idle { installed } => {
             set_screen_with_dir(win, "idle");
@@ -1009,17 +1167,17 @@ fn project_state(win: &ui::AppWindow, state: &State) {
             };
             win.set_total_size_text(total_text.into());
 
-            let query = win.get_search_query().to_string().to_ascii_lowercase();
-            let kind_filter = win.get_filter_kind().to_string();
-            let sort_by_size = win.get_sort_by_size();
+            let query = ui.search_query.to_ascii_lowercase();
+            let kind_filter = ui.filter_kind;
+            let sort_by_size = ui.sort_by_size;
 
             let mut filtered: Vec<&easi_core::InstalledApp> = installed
                 .iter()
                 .filter(|app| {
-                    let kind_ok = match kind_filter.as_str() {
-                        "gui" => app.kind == AppKind::Gui,
-                        "cli" => app.kind == AppKind::Terminal,
-                        _ => true,
+                    let kind_ok = match kind_filter {
+                        FilterKind::Gui => app.kind == AppKind::Gui,
+                        FilterKind::Cli => app.kind == AppKind::Terminal,
+                        FilterKind::All => true,
                     };
                     let query_ok = query.is_empty()
                         || app.name.to_ascii_lowercase().contains(&query)
@@ -1219,17 +1377,17 @@ fn project_state(win: &ui::AppWindow, state: &State) {
             win.set_status_text("Cancelled.".into());
             win.set_error_text("".into());
         }
-        State::Failed { error, rolled_back } => {
+        State::Failed { error } => {
             set_screen_with_dir(win, "failed");
-            win.set_command_copied(false);
             let cmd = extract_suggested_command(error).unwrap_or_default();
             win.set_suggested_command(cmd.into());
-            let suffix = if *rolled_back {
-                " (rolled back cleanly)"
-            } else {
-                ""
-            };
-            win.set_error_text(format!("{error}{suffix}").into());
+            win.set_error_text(error.clone().into());
+        }
+        State::FailedRolledBack { error } => {
+            set_screen_with_dir(win, "failed");
+            let cmd = extract_suggested_command(error).unwrap_or_default();
+            win.set_suggested_command(cmd.into());
+            win.set_error_text(format!("{error} (rolled back cleanly)").into());
         }
     }
 }

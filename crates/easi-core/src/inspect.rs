@@ -9,7 +9,8 @@ use std::process::Command;
 use sha2::{Digest, Sha256};
 
 use crate::appid::{
-    IdInputs, display_name_from_slug, guess_startup_wm_class, resolve_app_id, slug_and_version,
+    IdInputs, display_name_from_raw, display_name_from_slug, guess_startup_wm_class,
+    resolve_app_id, slug_and_version,
 };
 use crate::detect::{ArchiveEntry, PackageContents, detect_file_format, inspect_contents};
 use crate::error::EasiError;
@@ -702,8 +703,11 @@ where
         .or_else(|| contents.meta_name.clone())
         .or(upd_repo_name)
         .unwrap_or_else(|| {
-            let slug = app_id.strip_prefix("easi.").unwrap_or(&app_id);
-            display_name_from_slug(slug)
+            let raw_hint = top_dir
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(source_name.as_str());
+            display_name_from_raw(raw_hint)
         });
     let resolved_version = desktop_version
         .or_else(|| contents.meta_version.clone())

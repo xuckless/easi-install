@@ -141,7 +141,7 @@ fn is_version_token(token: &str) -> bool {
     first.is_ascii_digit() && t.chars().all(|c| c.is_ascii_digit() || c == '.')
 }
 
-/// Convert a slug or raw filename into a clean display name.
+/// Convert a slug into a title-cased display name.
 pub fn display_name_from_slug(slug: &str) -> String {
     slug.split(['-', '_', '.'])
         .filter(|s| !s.is_empty())
@@ -154,6 +154,69 @@ pub fn display_name_from_slug(slug: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Derive a clean display name from a raw filename or directory name while preserving original
+/// CamelCase (e.g. `"MyTool-1.0.tar.gz"` -> `"MyTool"`, `"EveryAI.AppImage"` -> `"EveryAI"`),
+/// and title-casing all-lowercase slugs (`"zen-browser"` -> `"Zen Browser"`).
+pub fn display_name_from_raw(raw: &str) -> String {
+    let base = Path::new(raw)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| raw.to_string());
+    let mut stem = base.as_str();
+    for ext in [
+        ".tar.gz",
+        ".tar.xz",
+        ".tar.zst",
+        ".tar.bz2",
+        ".tar.lz4",
+        ".tgz",
+        ".txz",
+        ".AppImage",
+        ".appimage",
+        ".zip",
+        ".7z",
+        ".jar",
+        ".tar",
+        ".run",
+        ".sh",
+        ".bin",
+        ".desktop",
+    ] {
+        if let Some(s) = stem.strip_suffix(ext) {
+            stem = s;
+            break;
+        }
+    }
+    let mut kept = Vec::new();
+    for part in stem.split(['-', '_', ' ']).filter(|s| !s.is_empty()) {
+        let lower = part.to_ascii_lowercase();
+        if is_version_token(&lower) || STRIP_TOKENS.contains(&lower.as_str()) {
+            continue;
+        }
+        let cleaned: String = part
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '.')
+            .collect();
+        if !cleaned.is_empty() {
+            // Preserve original casing if the word already has any uppercase letter (e.g. MyTool, EveryAI);
+            // otherwise title-case the first letter (e.g. "zen" -> "Zen").
+            if cleaned.chars().any(|c| c.is_ascii_uppercase()) {
+                kept.push(cleaned);
+            } else {
+                let mut chars = cleaned.chars();
+                if let Some(first) = chars.next() {
+                    kept.push(first.to_ascii_uppercase().to_string() + chars.as_str());
+                }
+            }
+        }
+    }
+    if kept.is_empty() {
+        display_name_from_slug(&slug_and_version(raw).0)
+    } else {
+        kept.join(" ")
+    }
 }
 
 /// Guess `StartupWMClass` from the main executable basename.
@@ -267,5 +330,9 @@ mod tests {
             assert_eq!(slug, exp_slug);
             assert_eq!(ver.as_deref(), exp_ver);
         }
+        assert_eq!(display_name_from_raw("MyTool-1.0.tar.gz"), "MyTool");
+        assert_eq!(display_name_from_raw("EveryAI.AppImage"), "EveryAI");
+        assert_eq!(display_name_from_raw("WebStorm-261.24374.125"), "WebStorm");
+        assert_eq!(display_name_from_raw("zen-browser"), "Zen Browser");
     }
 }

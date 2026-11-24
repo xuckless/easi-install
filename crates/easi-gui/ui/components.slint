@@ -292,6 +292,7 @@ export component ConfirmButton inherits Rectangle {
     in property <string> trigger-kind: "secondary";
     in property <bool> enabled: true;
     in-out property <bool> open;
+    callback toggled(bool);
     callback confirmed();
 
     height: Theme.control-height-small;
@@ -309,7 +310,10 @@ export component ConfirmButton inherits Rectangle {
         opacity: root.open ? 0 : 1;
         visible: self.opacity > 0.01;
         animate opacity { duration: root.open ? Theme.exit : Theme.enter; easing: Theme.ease-out; }
-        clicked => { root.open = true; }
+        clicked => {
+            root.open = true;
+            root.toggled(true);
+        }
     }
     Rectangle {
         x: 0;
@@ -325,13 +329,17 @@ export component ConfirmButton inherits Rectangle {
                 text: root.confirm-text;
                 clicked => {
                     root.open = false;
+                    root.toggled(false);
                     root.confirmed();
                 }
             }
             EButton {
                 small: true;
                 text: "Cancel";
-                clicked => { root.open = false; }
+                clicked => {
+                    root.open = false;
+                    root.toggled(false);
+                }
             }
         }
     }

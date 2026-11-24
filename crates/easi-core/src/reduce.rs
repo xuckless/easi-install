@@ -1,7 +1,32 @@
 //! Pure Redux reducer. Every `(State, Action)` pair is handled explicitly — no `_ =>` catch-all.
 
 use crate::model::{Classified, DoneOutcome, InstallStep, RollbackReason, WizardStep};
-use crate::state::{Action, Effect, State};
+use crate::state::{Action, ConfirmPrompt, Effect, ManagerUi, State, UiAction};
+
+/// Pure UI state reducer — exhaustive over all `UiAction` variants.
+pub fn reduce_ui(mut ui: ManagerUi, action: UiAction) -> ManagerUi {
+    match action {
+        UiAction::Navigate(page) => {
+            if matches!(page, crate::state::ManagerPage::AppInfo { .. }) {
+                ui.detail_purge = ui.purge_default;
+            }
+            ui.page = page;
+            ui.confirm = ConfirmPrompt::None;
+        }
+        UiAction::SetSearchQuery(q) => ui.search_query = q,
+        UiAction::SetFilterKind(kind) => ui.filter_kind = kind,
+        UiAction::ToggleSortBySize => ui.sort_by_size = !ui.sort_by_size,
+        UiAction::SetAutoCheckUpdates(v) => ui.auto_check_updates = v,
+        UiAction::SetBgUpdateTimer(v) => ui.bg_update_timer = v,
+        UiAction::SetPurgeDefault(v) => ui.purge_default = v,
+        UiAction::SetDetailPurge(v) => ui.detail_purge = v,
+        UiAction::SetConfirm(c) => ui.confirm = c,
+        UiAction::SetTrashChecked(v) => ui.trash_checked = v,
+        UiAction::SetScriptConsent(v) => ui.script_consent_checked = v,
+        UiAction::SetCommandCopied(v) => ui.command_copied = v,
+    }
+    ui
+}
 
 pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
     match (state, action) {
@@ -17,21 +42,15 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
         (state @ State::Idle { .. }, Action::UninstallApp { app_id, purge_data }) => {
             (state, vec![Effect::UninstallApp { app_id, purge_data }])
         }
-        (state @ State::Idle { .. }, Action::UninstallFinished { ok: true, .. }) => {
+        (state @ State::Idle { .. }, Action::UninstallFinished { result: Ok(()), .. }) => {
             (state, vec![Effect::ListInstalled])
         }
         (
             State::Idle { .. },
             Action::UninstallFinished {
-                ok: false, error, ..
+                result: Err(error), ..
             },
-        ) => (
-            State::Failed {
-                error: error.unwrap_or_else(|| "uninstall failed".into()),
-                rolled_back: false,
-            },
-            vec![],
-        ),
+        ) => (State::Failed { error }, vec![]),
         (
             state @ State::Idle { .. },
             Action::Inspected(_)
@@ -77,13 +96,9 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
                 vec![Effect::HandOff { path }],
             ),
         },
-        (State::Inspecting { .. }, Action::InspectFailed(error)) => (
-            State::Failed {
-                error,
-                rolled_back: false,
-            },
-            vec![],
-        ),
+        (State::Inspecting { .. }, Action::InspectFailed(error)) => {
+            (State::Failed { error }, vec![])
+        }
         (State::Inspecting { .. }, Action::Cancel) => (State::Cancelled, vec![]),
         (
             state @ State::Inspecting { .. },
@@ -116,13 +131,9 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
             },
             vec![],
         ),
-        (State::HandingOff { .. }, Action::HandOffFailed(error)) => (
-            State::Failed {
-                error,
-                rolled_back: false,
-            },
-            vec![],
-        ),
+        (State::HandingOff { .. }, Action::HandOffFailed(error)) => {
+            (State::Failed { error }, vec![])
+        }
         (
             state @ State::HandingOff { .. },
             Action::LoadInstalled
@@ -455,13 +466,13 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
         // --- RollingBack ---
         (State::RollingBack { reason, .. }, Action::RollbackFinished { ok }) => match reason {
             RollbackReason::Cancelled => (State::Cancelled, vec![]),
-            RollbackReason::Failed(error) => (
-                State::Failed {
-                    error,
-                    rolled_back: ok,
-                },
-                vec![],
-            ),
+            RollbackReason::Failed(error) => {
+                if ok {
+                    (State::FailedRolledBack { error }, vec![])
+                } else {
+                    (State::Failed { error }, vec![])
+                }
+            }
         },
         (
             state @ State::RollingBack { .. },
@@ -575,17 +586,32 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
             | Action::Reset,
         ) => (state, vec![]),
 
-        // --- Terminal states: Done / Cancelled / Failed ---
-        (State::Done { .. } | State::Cancelled | State::Failed { .. }, Action::Reset) => (
+        // --- Terminal states: Done / Cancelled / Failed / FailedRolledBack ---
+        (
+            State::Done { .. }
+            | State::Cancelled
+            | State::Failed { .. }
+            | State::FailedRolledBack { .. },
+            Action::Reset,
+        ) => (
             State::Idle { installed: vec![] },
             vec![Effect::ListInstalled],
         ),
-        (State::Done { .. } | State::Cancelled | State::Failed { .. }, Action::OpenPath(path)) => (
+        (
+            State::Done { .. }
+            | State::Cancelled
+            | State::Failed { .. }
+            | State::FailedRolledBack { .. },
+            Action::OpenPath(path),
+        ) => (
             State::Inspecting { path: path.clone() },
             vec![Effect::Inspect { path }],
         ),
         (
-            state @ (State::Done { .. } | State::Cancelled | State::Failed { .. }),
+            state @ (State::Done { .. }
+            | State::Cancelled
+            | State::Failed { .. }
+            | State::FailedRolledBack { .. }),
             Action::LoadInstalled
             | Action::InstalledLoaded(_)
             | Action::UninstallApp { .. }
@@ -803,7 +829,6 @@ mod tests {
                 action: Action::InspectFailed("bad file".into()),
                 expected_state: State::Failed {
                     error: "bad file".into(),
-                    rolled_back: false,
                 },
                 expected_effects: vec![],
             },
@@ -972,15 +997,14 @@ mod tests {
                 }],
             },
             Row {
-                name: "rolling_back(failed) + rollback_finished -> failed(rolled_back=true)",
+                name: "rolling_back(failed) + rollback_finished(ok=true) -> failed_rolled_back",
                 from: State::RollingBack {
                     plan: plan.clone(),
                     reason: RollbackReason::Failed("disk full".into()),
                 },
                 action: Action::RollbackFinished { ok: true },
-                expected_state: State::Failed {
+                expected_state: State::FailedRolledBack {
                     error: "disk full".into(),
-                    rolled_back: true,
                 },
                 expected_effects: vec![],
             },
@@ -1060,10 +1084,7 @@ mod tests {
             },
             Row {
                 name: "failed + open_path -> inspecting",
-                from: State::Failed {
-                    error: "x".into(),
-                    rolled_back: false,
-                },
+                from: State::Failed { error: "x".into() },
                 action: Action::OpenPath(p.clone()),
                 expected_state: State::Inspecting { path: p.clone() },
                 expected_effects: vec![Effect::Inspect { path: p.clone() }],
