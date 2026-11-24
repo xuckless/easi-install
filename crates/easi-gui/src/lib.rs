@@ -41,6 +41,22 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         let w = window.as_weak();
         let s = Arc::clone(&store);
         let r = Arc::clone(&runner);
+        window.on_uninstall_app(move |app_id| {
+            dispatch_action(&w, &s, &r, Action::UninstallApp(app_id.into()));
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        let r = Arc::clone(&runner);
+        window.on_back_to_manager(move || {
+            dispatch_action(&w, &s, &r, Action::Reset);
+        });
+    }
+    {
+        let w = window.as_weak();
+        let s = Arc::clone(&store);
+        let r = Arc::clone(&runner);
         window.on_confirm_install(move || {
             dispatch_action(&w, &s, &r, Action::ConfirmInstall);
         });
@@ -116,6 +132,8 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
 
     if let Some(path) = initial_path {
         dispatch_action(&window.as_weak(), &store, &runner, Action::OpenPath(path));
+    } else {
+        dispatch_action(&window.as_weak(), &store, &runner, Action::LoadInstalled);
     }
 
     window.run()
@@ -175,8 +193,21 @@ fn project_trust(win: &ui::AppWindow, trust: &TrustSummary) {
 
 fn project_state(win: &ui::AppWindow, state: &State) {
     match state {
-        State::Idle => {
+        State::Idle { installed } => {
             win.set_screen("idle".into());
+            let rows: Vec<ui::InstalledRow> = installed
+                .iter()
+                .map(|app| ui::InstalledRow {
+                    app_id: app.app_id.clone().into(),
+                    name: app.name.clone().into(),
+                    version: app.version.clone().unwrap_or_default().into(),
+                    kind: match app.kind {
+                        AppKind::Gui => "GUI".into(),
+                        AppKind::Terminal => "CLI".into(),
+                    },
+                })
+                .collect();
+            win.set_installed_apps(ModelRc::new(VecModel::from(rows)));
         }
         State::Inspecting { path } => {
             win.set_screen("inspecting".into());
@@ -205,6 +236,30 @@ fn project_state(win: &ui::AppWindow, state: &State) {
                 win.set_has_app_icon(true);
             } else {
                 win.set_has_app_icon(false);
+            }
+            let perms = plan
+                .planned_writes
+                .iter()
+                .map(|p| format!("• {p}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            win.set_permissions_text(perms.into());
+            if let Some(script) = &trust.script_report {
+                win.set_has_script_warning(true);
+                win.set_script_consent_checked(false);
+                let mut lines: Vec<String> =
+                    script.actions.iter().map(|a| format!("• {a}")).collect();
+                if script.obfuscated {
+                    lines.push(
+                        "• Obfuscated/binary payload detected — exact actions cannot be fully verified."
+                            .into(),
+                    );
+                }
+                win.set_script_warning_text(lines.join("\n").into());
+            } else {
+                win.set_has_script_warning(false);
+                win.set_script_consent_checked(true);
+                win.set_script_warning_text("".into());
             }
             project_trust(win, trust);
         }

@@ -31,6 +31,8 @@ zstd = "0.13"
 bzip2 = "0.5"
 # zip: pure-Rust zip inspection & safe extraction.
 zip = { version = "2", default-features = false, features = ["deflate", "bzip2", "zstd"] }
+# sevenz-rust: pure-Rust .7z inspection & safe extraction.
+sevenz-rust = "0.6"
 # backhand: pure-Rust SquashFS reader for AppImage type 2 without executing untrusted files.
 backhand = "0.21"
 # tempfile: fresh temp dirs for untrusted extraction and temp-root tests.

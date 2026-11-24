@@ -8,11 +8,15 @@ use serde::{Deserialize, Serialize};
 pub enum Format {
     AppImageType1,
     AppImageType2,
+    Tar,
     TarGz,
     TarXz,
     TarZst,
     TarBz2,
     Zip,
+    SevenZ,
+    BareElf,
+    ShellInstaller,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -30,12 +34,19 @@ pub enum SignatureStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptReport {
+    pub actions: Vec<String>,
+    pub obfuscated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustSummary {
     pub size_bytes: u64,
     pub sha256: String,
     pub origin_url: Option<String>,
     pub signature: SignatureStatus,
     pub warnings: Vec<String>,
+    pub script_report: Option<ScriptReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +69,7 @@ pub struct InstallPlan {
     pub icon_bytes: Option<Vec<u8>>,
     pub desktop_entry: Option<String>,
     pub startup_wm_class: Option<String>,
+    pub planned_writes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +108,7 @@ impl ChoiceDraft {
             icon_bytes: None,
             desktop_entry: self.desktop_entry,
             startup_wm_class: self.startup_wm_class,
+            planned_writes: vec![],
         }
     }
 }

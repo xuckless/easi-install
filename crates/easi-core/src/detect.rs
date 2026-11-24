@@ -12,7 +12,7 @@ use xz2::read::XzDecoder;
 use zip::ZipArchive;
 
 use crate::error::EasiError;
-use crate::model::Format;
+use crate::model::{Format, ScriptReport};
 
 /// One row in the magic-byte format table.
 struct MagicRule {
@@ -78,6 +78,20 @@ const FORMAT_RULES: &[MagicRule] = &[
         extra_offset: None,
         format: Format::Zip,
     },
+    // 7z archive
+    MagicRule {
+        offset: 0,
+        bytes: &[0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c],
+        extra_offset: None,
+        format: Format::SevenZ,
+    },
+    // uncompressed tar (POSIX ustar at offset 257)
+    MagicRule {
+        offset: 257,
+        bytes: b"ustar",
+        extra_offset: None,
+        format: Format::Tar,
+    },
 ];
 
 /// Identify format purely from file header magic bytes.
@@ -103,16 +117,35 @@ pub fn detect_file_format(path: &Path) -> Result<Format, EasiError> {
         return Err(EasiError::NotFound(path.to_path_buf()));
     }
     let mut file = File::open(path)?;
-    let mut header = [0u8; 64];
+    let mut header = [0u8; 512];
     let n = file.read(&mut header)?;
     if let Some(fmt) = detect_format(&header[..n]) {
         return Ok(fmt);
     }
-    // Older AppImage Type 1 binaries omit `AI\x01` at offset 8 but carry ISO9660 `CD001` at 0x8001.
-    if n >= 4 && &header[..4] == b"\x7fELF" && file.seek(SeekFrom::Start(0x8001)).is_ok() {
-        let mut iso = [0u8; 5];
-        if file.read_exact(&mut iso).is_ok() && &iso == b"CD001" {
-            return Ok(Format::AppImageType1);
+    if n >= 4 && &header[..4] == b"\x7fELF" {
+        // Older AppImage Type 1 binaries omit `AI\x01` at offset 8 but carry ISO9660 `CD001` at 0x8001.
+        if file.seek(SeekFrom::Start(0x8001)).is_ok() {
+            let mut iso = [0u8; 5];
+            if file.read_exact(&mut iso).is_ok() && &iso == b"CD001" {
+                return Ok(Format::AppImageType1);
+            }
+        }
+        // Reject shared libraries (.so); accept standalone ELF executables.
+        let fname = path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        if !fname.ends_with(".so") && !fname.contains(".so.") {
+            return Ok(Format::BareElf);
+        }
+    }
+    if n >= 2 && &header[..2] == b"#!" {
+        let lower = path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        if lower.ends_with(".run") || lower.ends_with(".sh") {
+            return Ok(Format::ShellInstaller);
         }
     }
     Err(EasiError::UnsupportedFormat(path.to_path_buf()))
@@ -139,6 +172,7 @@ pub struct PackageContents {
     pub metainfo_files: Vec<(String, String)>,
     pub embedded_icons: Vec<(String, Vec<u8>)>,
     pub has_appimage_sig_section: bool,
+    pub script_report: Option<ScriptReport>,
 }
 
 const MAX_METADATA_BYTES: u64 = 256 * 1024;
@@ -161,9 +195,10 @@ fn is_icon_path(path: &str) -> bool {
         || lower.ends_with("/.diricon")
 }
 
-/// Inspect archive or AppImage without extracting to disk or executing untrusted code.
+/// Inspect archive, AppImage, bare ELF, or shell installer without extracting or executing.
 pub fn inspect_contents(path: &Path, format: Format) -> Result<PackageContents, EasiError> {
     match format {
+        Format::Tar => list_tar(BufReader::new(File::open(path)?)),
         Format::TarGz => {
             let file = File::open(path)?;
             list_tar(GzDecoder::new(BufReader::new(file)))
@@ -183,8 +218,10 @@ pub fn inspect_contents(path: &Path, format: Format) -> Result<PackageContents, 
             list_tar(BzDecoder::new(BufReader::new(file)))
         }
         Format::Zip => list_zip(path),
+        Format::SevenZ => list_sevenz(path),
         Format::AppImageType2 => list_appimage_type2(path),
-        Format::AppImageType1 => list_appimage_type1(path),
+        Format::AppImageType1 | Format::BareElf => list_single_executable(path),
+        Format::ShellInstaller => inspect_shell_installer(path),
     }
 }
 
@@ -470,14 +507,65 @@ fn list_appimage_type2(path: &Path) -> Result<PackageContents, EasiError> {
     Ok(contents)
 }
 
-fn list_appimage_type1(path: &Path) -> Result<PackageContents, EasiError> {
-    // Type 1 AppImages embed an ISO9660 image. We treat the AppImage itself as the executable
-    // and avoid executing it; metadata falls back cleanly to filename-based synthesis.
+fn list_sevenz(path: &Path) -> Result<PackageContents, EasiError> {
+    let mut reader = sevenz_rust::SevenZReader::open(path, sevenz_rust::Password::empty())
+        .map_err(|e| EasiError::Archive(e.to_string()))?;
+    let mut contents = PackageContents::default();
+    reader
+        .for_each_entries(|entry, data| {
+            let raw_path = entry.name().to_string();
+            let size = entry.size();
+            let is_dir = entry.is_directory();
+            let mut is_elf = false;
+            let mut is_script = false;
+
+            if !is_dir && size > 0 {
+                if (is_desktop_path(&raw_path) || is_metainfo_path(&raw_path))
+                    && size <= MAX_METADATA_BYTES
+                {
+                    let mut text = String::new();
+                    if data.read_to_string(&mut text).is_ok() {
+                        if is_desktop_path(&raw_path) {
+                            contents.desktop_files.push((raw_path.clone(), text));
+                        } else {
+                            contents.metainfo_files.push((raw_path.clone(), text));
+                        }
+                    }
+                } else if is_icon_path(&raw_path) && size <= MAX_ICON_BYTES {
+                    let mut buf = Vec::new();
+                    if data.read_to_end(&mut buf).is_ok() {
+                        contents.embedded_icons.push((raw_path.clone(), buf));
+                    }
+                } else {
+                    let mut magic = [0u8; 4];
+                    let n = data.read(&mut magic).unwrap_or(0);
+                    is_elf = n >= 4 && &magic == b"\x7fELF";
+                    is_script = n >= 2 && &magic[..2] == b"#!";
+                }
+            }
+
+            contents.entries.push(ArchiveEntry {
+                path: raw_path,
+                size,
+                mode: if is_elf || is_script { 0o755 } else { 0o644 },
+                is_dir,
+                is_symlink: false,
+                symlink_target: None,
+                is_elf,
+                is_script,
+            });
+            Ok(true)
+        })
+        .map_err(|e| EasiError::Archive(e.to_string()))?;
+    Ok(contents)
+}
+
+fn list_single_executable(path: &Path) -> Result<PackageContents, EasiError> {
     let meta = std::fs::metadata(path)?;
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "app.AppImage".into());
+        .unwrap_or_else(|| "app".into());
     Ok(PackageContents {
         entries: vec![ArchiveEntry {
             path: name,
@@ -489,6 +577,127 @@ fn list_appimage_type1(path: &Path) -> Result<PackageContents, EasiError> {
             is_elf: true,
             is_script: false,
         }],
+        ..Default::default()
+    })
+}
+
+struct ScriptRule {
+    needles: &'static [&'static str],
+    description: &'static str,
+    obfuscation: bool,
+}
+
+/// Static capability/permission rules scanned in `.run` / `.sh` scripts before asking consent.
+const SCRIPT_RULES: &[ScriptRule] = &[
+    ScriptRule {
+        needles: &["sudo ", "pkexec ", "doas ", "\nsu "],
+        description: "requests administrator/root privileges (sudo/pkexec/su)",
+        obfuscation: false,
+    },
+    ScriptRule {
+        needles: &["curl ", "wget ", "http://", "https://", "nc "],
+        description: "accesses the network (curl/wget/URL)",
+        obfuscation: false,
+    },
+    ScriptRule {
+        needles: &["/usr/", "/opt/", "/etc/", "/var/", "/lib/systemd"],
+        description: "reads or writes system directories (/usr, /opt, /etc, /var)",
+        obfuscation: false,
+    },
+    ScriptRule {
+        needles: &["systemctl", "crontab", "autostart"],
+        description: "registers background services or autostart entries",
+        obfuscation: false,
+    },
+    ScriptRule {
+        needles: &[".bashrc", ".zshrc", ".profile", "/etc/profile"],
+        description: "modifies shell startup files (.bashrc/.zshrc/.profile)",
+        obfuscation: false,
+    },
+    ScriptRule {
+        needles: &["apt ", "apt-get ", "dnf ", "pacman ", "zypper ", "flatpak "],
+        description: "invokes a system package manager",
+        obfuscation: false,
+    },
+    ScriptRule {
+        needles: &["rm -rf", "rm -r "],
+        description: "recursively deletes files or directories (rm -rf)",
+        obfuscation: false,
+    },
+    ScriptRule {
+        needles: &["chmod +x", "chmod 7", "chown "],
+        description: "changes file permissions or ownership (chmod/chown)",
+        obfuscation: false,
+    },
+    ScriptRule {
+        needles: &[
+            "base64 -d",
+            "base64 --decode",
+            "eval ",
+            "xxd -r",
+            "openssl enc",
+        ],
+        description: "contains obfuscated/encoded commands (eval/base64 — exact actions hidden)",
+        obfuscation: true,
+    },
+];
+
+/// Statically analyze a `.run` / `.sh` installer script (first 128 KiB) without executing it.
+pub fn analyze_shell_script(bytes: &[u8]) -> ScriptReport {
+    let sample_len = bytes.len().min(128 * 1024);
+    let sample = &bytes[..sample_len];
+    let has_binary_payload = sample.contains(&0u8);
+    let text = String::from_utf8_lossy(sample).to_ascii_lowercase();
+
+    let mut actions = Vec::new();
+    let mut obfuscated = has_binary_payload;
+
+    for rule in SCRIPT_RULES {
+        if rule.needles.iter().any(|n| text.contains(n)) {
+            actions.push(rule.description.to_string());
+            if rule.obfuscation {
+                obfuscated = true;
+            }
+        }
+    }
+
+    if has_binary_payload {
+        actions.push(
+            "embeds a binary/compressed self-extracting payload (internal commands cannot be fully verified statically)"
+                .into(),
+        );
+    }
+    if actions.is_empty() {
+        actions.push("runs shell commands in your user environment".into());
+    }
+    ScriptReport {
+        actions,
+        obfuscated,
+    }
+}
+
+fn inspect_shell_installer(path: &Path) -> Result<PackageContents, EasiError> {
+    let mut file = File::open(path)?;
+    let meta = file.metadata()?;
+    let mut sample = vec![0u8; (meta.len() as usize).min(128 * 1024)];
+    let n = file.read(&mut sample)?;
+    let report = analyze_shell_script(&sample[..n]);
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "installer.sh".into());
+    Ok(PackageContents {
+        entries: vec![ArchiveEntry {
+            path: name,
+            size: meta.len(),
+            mode: 0o755,
+            is_dir: false,
+            is_symlink: false,
+            symlink_target: None,
+            is_elf: false,
+            is_script: true,
+        }],
+        script_report: Some(report),
         ..Default::default()
     })
 }

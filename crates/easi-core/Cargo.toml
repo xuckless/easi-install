@@ -18,6 +18,7 @@ xz2.workspace = true
 zstd.workspace = true
 bzip2.workspace = true
 zip.workspace = true
+sevenz-rust.workspace = true
 backhand.workspace = true
 tempfile.workspace = true
 xattr.workspace = true

@@ -18,12 +18,15 @@ pub const EASI_DESKTOP_ID: &str = "easi.desktop";
 pub const SUPPORTED_MIMES: &[&str] = &[
     "application/x-iso9660-appimage",
     "application/vnd.appimage",
+    "application/x-tar",
     "application/x-compressed-tar",
     "application/x-xz-compressed-tar",
     "application/x-zstd-compressed-tar",
     "application/x-bzip-compressed-tar",
     "application/x-bzip2-compressed-tar",
     "application/zip",
+    "application/x-7z-compressed",
+    "application/x-shellscript",
 ];
 
 const APPIMAGE_MIME_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -150,7 +153,8 @@ pub fn handoff_non_app(roots: &InstallRoots, path: &Path) -> Result<(), EasiErro
         }
     }
 
-    // Fallback: try common archive/file managers directly to avoid looping back into easi.
+    // Fallback: try common archive/file managers directly (GNOME, KDE, Mint, COSMIC)
+    // to avoid looping back into easi.
     for fallback in [
         "file-roller",
         "ark",
@@ -158,6 +162,10 @@ pub fn handoff_non_app(roots: &InstallRoots, path: &Path) -> Result<(), EasiErro
         "xarchiver",
         "nautilus",
         "dolphin",
+        "nemo",
+        "caja",
+        "thunar",
+        "cosmic-files",
     ] {
         if Command::new(fallback).arg(path).spawn().is_ok() {
             return Ok(());

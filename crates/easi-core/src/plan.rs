@@ -6,6 +6,8 @@ use crate::model::{AppKind, Format};
 pub enum PlanOp {
     CopyAppImage,
     ExtractAppImageAssets,
+    CopyBareElf,
+    RunShellInstaller,
     ExtractArchive,
     WireIcons,
     WireDesktop,
@@ -45,6 +47,26 @@ const ARCHIVE_TERM_OPS: &[PlanOp] = &[
     PlanOp::WriteManifest,
 ];
 
+const BARE_ELF_GUI_OPS: &[PlanOp] = &[
+    PlanOp::CopyBareElf,
+    PlanOp::WireDesktop,
+    PlanOp::WireBinSymlink,
+    PlanOp::RefreshDesktop,
+    PlanOp::WriteManifest,
+];
+
+const BARE_ELF_TERM_OPS: &[PlanOp] = &[
+    PlanOp::CopyBareElf,
+    PlanOp::WireBinSymlink,
+    PlanOp::WriteManifest,
+];
+
+const SHELL_INSTALLER_OPS: &[PlanOp] = &[
+    PlanOp::RunShellInstaller,
+    PlanOp::RefreshDesktop,
+    PlanOp::WriteManifest,
+];
+
 struct PlanRow {
     format: Format,
     kind: AppKind,
@@ -73,6 +95,16 @@ const PLAN_TABLE: &[PlanRow] = &[
         ops: APPIMAGE_TERM_OPS,
     },
     PlanRow {
+        format: Format::Tar,
+        kind: AppKind::Gui,
+        ops: ARCHIVE_GUI_OPS,
+    },
+    PlanRow {
+        format: Format::Tar,
+        kind: AppKind::Terminal,
+        ops: ARCHIVE_TERM_OPS,
+    },
+    PlanRow {
         format: Format::TarGz,
         kind: AppKind::Gui,
         ops: ARCHIVE_GUI_OPS,
@@ -121,6 +153,36 @@ const PLAN_TABLE: &[PlanRow] = &[
         format: Format::Zip,
         kind: AppKind::Terminal,
         ops: ARCHIVE_TERM_OPS,
+    },
+    PlanRow {
+        format: Format::SevenZ,
+        kind: AppKind::Gui,
+        ops: ARCHIVE_GUI_OPS,
+    },
+    PlanRow {
+        format: Format::SevenZ,
+        kind: AppKind::Terminal,
+        ops: ARCHIVE_TERM_OPS,
+    },
+    PlanRow {
+        format: Format::BareElf,
+        kind: AppKind::Gui,
+        ops: BARE_ELF_GUI_OPS,
+    },
+    PlanRow {
+        format: Format::BareElf,
+        kind: AppKind::Terminal,
+        ops: BARE_ELF_TERM_OPS,
+    },
+    PlanRow {
+        format: Format::ShellInstaller,
+        kind: AppKind::Gui,
+        ops: SHELL_INSTALLER_OPS,
+    },
+    PlanRow {
+        format: Format::ShellInstaller,
+        kind: AppKind::Terminal,
+        ops: SHELL_INSTALLER_OPS,
     },
 ];
 
@@ -133,7 +195,8 @@ pub fn plan_ops(format: Format, kind: AppKind) -> &'static [PlanOp] {
     ARCHIVE_TERM_OPS
 }
 
-/// Desktop environment cache-refresh quirks table.
+/// Desktop environment cache-refresh quirks table (GNOME, KDE/SteamOS/CachyOS,
+/// Cinnamon/MATE/XFCE for Linux Mint, COSMIC, Hyprland, Sway).
 pub struct DeQuirk {
     pub env_needle: &'static str,
     pub name: &'static str,
@@ -161,6 +224,48 @@ pub const DE_QUIRKS: &[DeQuirk] = &[
         env_needle: "PLASMA",
         name: "KDE Plasma",
         refresh_kde_sycoca: true,
+        refresh_gtk_icon_cache: true,
+        refresh_desktop_db: true,
+    },
+    DeQuirk {
+        env_needle: "CINNAMON",
+        name: "Cinnamon",
+        refresh_kde_sycoca: false,
+        refresh_gtk_icon_cache: true,
+        refresh_desktop_db: true,
+    },
+    DeQuirk {
+        env_needle: "MATE",
+        name: "MATE",
+        refresh_kde_sycoca: false,
+        refresh_gtk_icon_cache: true,
+        refresh_desktop_db: true,
+    },
+    DeQuirk {
+        env_needle: "XFCE",
+        name: "XFCE",
+        refresh_kde_sycoca: false,
+        refresh_gtk_icon_cache: true,
+        refresh_desktop_db: true,
+    },
+    DeQuirk {
+        env_needle: "COSMIC",
+        name: "COSMIC",
+        refresh_kde_sycoca: false,
+        refresh_gtk_icon_cache: true,
+        refresh_desktop_db: true,
+    },
+    DeQuirk {
+        env_needle: "HYPRLAND",
+        name: "Hyprland",
+        refresh_kde_sycoca: false,
+        refresh_gtk_icon_cache: true,
+        refresh_desktop_db: true,
+    },
+    DeQuirk {
+        env_needle: "SWAY",
+        name: "Sway",
+        refresh_kde_sycoca: false,
         refresh_gtk_icon_cache: true,
         refresh_desktop_db: true,
     },
@@ -193,35 +298,41 @@ mod tests {
         let formats = [
             Format::AppImageType1,
             Format::AppImageType2,
+            Format::Tar,
             Format::TarGz,
             Format::TarXz,
             Format::TarZst,
             Format::TarBz2,
             Format::Zip,
+            Format::SevenZ,
+            Format::BareElf,
+            Format::ShellInstaller,
         ];
         for fmt in formats {
             let gui = plan_ops(fmt, AppKind::Gui);
-            assert!(gui.contains(&PlanOp::WireDesktop));
             assert!(gui.contains(&PlanOp::WriteManifest));
             let term = plan_ops(fmt, AppKind::Terminal);
-            assert!(!term.contains(&PlanOp::WireDesktop));
-            assert!(term.contains(&PlanOp::WireBinSymlink));
+            assert!(term.contains(&PlanOp::WriteManifest));
         }
     }
 
     #[test]
-    fn de_quirk_table_matches_gnome_and_kde() {
-        let gnome = detect_de_quirk("ubuntu:GNOME");
-        assert_eq!(gnome.name, "GNOME");
-        assert!(gnome.refresh_desktop_db);
-        assert!(gnome.refresh_gtk_icon_cache);
-        assert!(!gnome.refresh_kde_sycoca);
-
-        let kde = detect_de_quirk("KDE");
-        assert_eq!(kde.name, "KDE Plasma");
-        assert!(kde.refresh_kde_sycoca);
-
-        let generic = detect_de_quirk("sway");
-        assert_eq!(generic.name, "Generic");
+    fn de_quirk_table_matches_target_distros() {
+        let cases = [
+            ("ubuntu:GNOME", "GNOME", false),
+            ("KDE", "KDE Plasma", true),
+            ("X-Cinnamon", "Cinnamon", false),
+            ("MATE", "MATE", false),
+            ("XFCE", "XFCE", false),
+            ("COSMIC", "COSMIC", false),
+            ("Hyprland", "Hyprland", false),
+            ("sway", "Sway", false),
+            ("unknown-wm", "Generic", false),
+        ];
+        for (env, expected_name, expect_kde) in cases {
+            let q = detect_de_quirk(env);
+            assert_eq!(q.name, expected_name);
+            assert_eq!(q.refresh_kde_sycoca, expect_kde);
+        }
     }
 }

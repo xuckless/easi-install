@@ -187,7 +187,29 @@ fn run_install_cmd(roots: &InstallRoots, path: PathBuf, yes: bool) -> ExitCode {
                 println!("  App ID: {}", plan.app_id);
                 println!("  Kind:   {:?}", plan.kind);
                 print_trust(trust);
-                if yes || prompt_yes_no("Install?", true) {
+                if !plan.planned_writes.is_empty() {
+                    println!("  Install changes:");
+                    for w in &plan.planned_writes {
+                        println!("    - {w}");
+                    }
+                }
+                if let Some(script) = &trust.script_report {
+                    println!("\n  WARNING! This package runs a shell script that:");
+                    for act in &script.actions {
+                        println!("    * {act}");
+                    }
+                    if script.obfuscated {
+                        println!(
+                            "    * Note: script is obfuscated or contains binary data — exact commands cannot be fully verified."
+                        );
+                    }
+                    if !yes && !prompt_yes_no("Allow easi to execute this installer script?", false)
+                    {
+                        Action::Cancel
+                    } else {
+                        Action::ConfirmInstall
+                    }
+                } else if yes || prompt_yes_no("Install?", true) {
                     Action::ConfirmInstall
                 } else {
                     Action::Cancel
@@ -313,7 +335,7 @@ fn run_install_cmd(roots: &InstallRoots, path: PathBuf, yes: bool) -> ExitCode {
                 }
                 return ExitCode::FAILURE;
             }
-            State::Idle
+            State::Idle { .. }
             | State::Inspecting { .. }
             | State::HandingOff { .. }
             | State::Installing { .. }

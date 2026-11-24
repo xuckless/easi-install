@@ -8,10 +8,11 @@ use crate::model::{
 };
 
 /// The one lifecycle value. Variants carry the data they own.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum State {
-    #[default]
-    Idle,
+    Idle {
+        installed: Vec<InstalledApp>,
+    },
     Inspecting {
         path: PathBuf,
     },
@@ -60,9 +61,23 @@ pub enum State {
     },
 }
 
+impl Default for State {
+    fn default() -> Self {
+        Self::Idle { installed: vec![] }
+    }
+}
+
 /// Everything that can happen: user intent and I/O results.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
+    LoadInstalled,
+    InstalledLoaded(Vec<InstalledApp>),
+    UninstallApp(String),
+    UninstallFinished {
+        app_id: String,
+        ok: bool,
+        error: Option<String>,
+    },
     OpenPath(PathBuf),
     Inspected(Box<Classified>),
     InspectFailed(String),
@@ -73,10 +88,15 @@ pub enum Action {
     ChooseIcon(Option<String>),
     ConfirmName(String),
     Cancel,
-    InstallProgress { step: InstallStep, progress: u8 },
+    InstallProgress {
+        step: InstallStep,
+        progress: u8,
+    },
     InstallFinished(InstallSummary),
     InstallFailed(String),
-    RollbackFinished { ok: bool },
+    RollbackFinished {
+        ok: bool,
+    },
     TrashSource,
     KeepSource,
     Trashed,
@@ -87,6 +107,10 @@ pub enum Action {
 /// I/O the effect runner must perform, then report back as an `Action`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
+    ListInstalled,
+    UninstallApp {
+        app_id: String,
+    },
     Inspect {
         path: PathBuf,
     },

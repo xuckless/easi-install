@@ -313,6 +313,7 @@ pub fn build_trust_summary(
         origin_url,
         signature,
         warnings,
+        script_report: contents.script_report.clone(),
     })
 }
 
@@ -378,8 +379,11 @@ where
     let desktop = contents.desktop_files.first();
 
     let desktop_exec_hint = desktop.and_then(|(_, text)| desktop_field(text, "Exec"));
-    let is_appimage = matches!(format, Format::AppImageType1 | Format::AppImageType2);
-    let exec_candidates = if is_appimage {
+    let is_single_file_app = matches!(
+        format,
+        Format::AppImageType1 | Format::AppImageType2 | Format::BareElf | Format::ShellInstaller
+    );
+    let exec_candidates = if is_single_file_app {
         vec![Candidate {
             path: source_name.clone(),
             score: 100,
@@ -428,6 +432,7 @@ where
         GUI_MARKERS.iter().any(|m| lower.contains(m))
     });
 
+    let is_appimage = matches!(format, Format::AppImageType1 | Format::AppImageType2);
     let kind = if is_appimage
         || (desktop.is_some() && !desktop_terminal)
         || !icon_candidates.is_empty()
@@ -483,6 +488,36 @@ where
         .and_then(|(_, text)| desktop_field(text, "StartupWMClass"))
         .or_else(|| guess_startup_wm_class(&main_exec));
 
+    let mut planned_writes = vec![format!("Install files to ~/Applications/{name}/")];
+    if format == Format::ShellInstaller {
+        planned_writes.push(
+            "Execute the installer script (with user consent) and record created files in manifest"
+                .into(),
+        );
+    } else {
+        if kind == AppKind::Gui {
+            planned_writes.push(format!(
+                "Create launcher ~/.local/share/applications/{app_id}.desktop"
+            ));
+            if icon_path.is_some() {
+                planned_writes.push(format!(
+                    "Install icon into ~/.local/share/icons/hicolor/ ({app_id})"
+                ));
+            }
+        }
+        let bin_name = app_id
+            .strip_prefix("easi.")
+            .unwrap_or(&app_id)
+            .split('.')
+            .next_back()
+            .unwrap_or(&app_id)
+            .to_ascii_lowercase();
+        planned_writes.push(format!("Create command symlink ~/.local/bin/{bin_name}"));
+    }
+    planned_writes.push(format!(
+        "Record manifest ~/.local/share/easi/installed/{app_id}.toml (for clean uninstall)"
+    ));
+
     let plan = InstallPlan {
         source_path: path.to_path_buf(),
         format,
@@ -496,6 +531,7 @@ where
         icon_bytes,
         desktop_entry: desktop.map(|(_, text)| text.clone()),
         startup_wm_class,
+        planned_writes,
     };
 
     if let Some(existing) = find_existing(&app_id) {

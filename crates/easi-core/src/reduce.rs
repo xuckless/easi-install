@@ -6,12 +6,34 @@ use crate::state::{Action, Effect, State};
 pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
     match (state, action) {
         // --- Idle ---
-        (State::Idle, Action::OpenPath(path)) => (
+        (State::Idle { .. }, Action::OpenPath(path)) => (
             State::Inspecting { path: path.clone() },
             vec![Effect::Inspect { path }],
         ),
+        (state @ State::Idle { .. }, Action::LoadInstalled) => (state, vec![Effect::ListInstalled]),
+        (State::Idle { .. }, Action::InstalledLoaded(installed)) => {
+            (State::Idle { installed }, vec![])
+        }
+        (state @ State::Idle { .. }, Action::UninstallApp(app_id)) => {
+            (state, vec![Effect::UninstallApp { app_id }])
+        }
+        (state @ State::Idle { .. }, Action::UninstallFinished { ok: true, .. }) => {
+            (state, vec![Effect::ListInstalled])
+        }
         (
-            state @ State::Idle,
+            State::Idle { .. },
+            Action::UninstallFinished {
+                ok: false, error, ..
+            },
+        ) => (
+            State::Failed {
+                error: error.unwrap_or_else(|| "uninstall failed".into()),
+                rolled_back: false,
+            },
+            vec![],
+        ),
+        (
+            state @ State::Idle { .. },
             Action::Inspected(_)
             | Action::InspectFailed(_)
             | Action::HandedOff
@@ -65,7 +87,11 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
         (State::Inspecting { .. }, Action::Cancel) => (State::Cancelled, vec![]),
         (
             state @ State::Inspecting { .. },
-            Action::OpenPath(_)
+            Action::LoadInstalled
+            | Action::InstalledLoaded(_)
+            | Action::UninstallApp(_)
+            | Action::UninstallFinished { .. }
+            | Action::OpenPath(_)
             | Action::HandedOff
             | Action::HandOffFailed(_)
             | Action::ConfirmInstall
@@ -99,7 +125,11 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
         ),
         (
             state @ State::HandingOff { .. },
-            Action::OpenPath(_)
+            Action::LoadInstalled
+            | Action::InstalledLoaded(_)
+            | Action::UninstallApp(_)
+            | Action::UninstallFinished { .. }
+            | Action::OpenPath(_)
             | Action::Inspected(_)
             | Action::InspectFailed(_)
             | Action::ConfirmInstall
@@ -131,10 +161,17 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
             }],
         ),
         (State::Ready { .. }, Action::Cancel) => (State::Cancelled, vec![]),
-        (State::Ready { .. }, Action::Reset) => (State::Idle, vec![]),
+        (State::Ready { .. }, Action::Reset) => (
+            State::Idle { installed: vec![] },
+            vec![Effect::ListInstalled],
+        ),
         (
             state @ State::Ready { .. },
-            Action::OpenPath(_)
+            Action::LoadInstalled
+            | Action::InstalledLoaded(_)
+            | Action::UninstallApp(_)
+            | Action::UninstallFinished { .. }
+            | Action::OpenPath(_)
             | Action::Inspected(_)
             | Action::InspectFailed(_)
             | Action::HandedOff
@@ -213,7 +250,10 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
             (State::Ready { plan, trust }, vec![])
         }
         (State::NeedsChoice { .. }, Action::Cancel) => (State::Cancelled, vec![]),
-        (State::NeedsChoice { .. }, Action::Reset) => (State::Idle, vec![]),
+        (State::NeedsChoice { .. }, Action::Reset) => (
+            State::Idle { installed: vec![] },
+            vec![Effect::ListInstalled],
+        ),
         // Wrong wizard action for current step or unrelated action → ignore explicitly.
         (
             state @ State::NeedsChoice {
@@ -238,7 +278,11 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
         )
         | (
             state @ State::NeedsChoice { .. },
-            Action::OpenPath(_)
+            Action::LoadInstalled
+            | Action::InstalledLoaded(_)
+            | Action::UninstallApp(_)
+            | Action::UninstallFinished { .. }
+            | Action::OpenPath(_)
             | Action::Inspected(_)
             | Action::InspectFailed(_)
             | Action::HandedOff
@@ -267,10 +311,17 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
             }],
         ),
         (State::Conflict { .. }, Action::Cancel) => (State::Cancelled, vec![]),
-        (State::Conflict { .. }, Action::Reset) => (State::Idle, vec![]),
+        (State::Conflict { .. }, Action::Reset) => (
+            State::Idle { installed: vec![] },
+            vec![Effect::ListInstalled],
+        ),
         (
             state @ State::Conflict { .. },
-            Action::OpenPath(_)
+            Action::LoadInstalled
+            | Action::InstalledLoaded(_)
+            | Action::UninstallApp(_)
+            | Action::UninstallFinished { .. }
+            | Action::OpenPath(_)
             | Action::Inspected(_)
             | Action::InspectFailed(_)
             | Action::HandedOff
@@ -315,7 +366,11 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
         }
         (
             state @ State::Installing { .. },
-            Action::OpenPath(_)
+            Action::LoadInstalled
+            | Action::InstalledLoaded(_)
+            | Action::UninstallApp(_)
+            | Action::UninstallFinished { .. }
+            | Action::OpenPath(_)
             | Action::Inspected(_)
             | Action::InspectFailed(_)
             | Action::HandedOff
@@ -359,6 +414,7 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
                 icon_bytes: None,
                 desktop_entry: None,
                 startup_wm_class: None,
+                planned_writes: vec![],
             };
             (
                 State::RollingBack {
@@ -370,7 +426,11 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
         }
         (
             state @ State::Cancelling { .. },
-            Action::OpenPath(_)
+            Action::LoadInstalled
+            | Action::InstalledLoaded(_)
+            | Action::UninstallApp(_)
+            | Action::UninstallFinished { .. }
+            | Action::OpenPath(_)
             | Action::Inspected(_)
             | Action::InspectFailed(_)
             | Action::HandedOff
@@ -401,7 +461,11 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
         },
         (
             state @ State::RollingBack { .. },
-            Action::OpenPath(_)
+            Action::LoadInstalled
+            | Action::InstalledLoaded(_)
+            | Action::UninstallApp(_)
+            | Action::UninstallFinished { .. }
+            | Action::OpenPath(_)
             | Action::Inspected(_)
             | Action::InspectFailed(_)
             | Action::HandedOff
@@ -440,7 +504,11 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
         ),
         (
             state @ State::OfferTrash { .. },
-            Action::OpenPath(_)
+            Action::LoadInstalled
+            | Action::InstalledLoaded(_)
+            | Action::UninstallApp(_)
+            | Action::UninstallFinished { .. }
+            | Action::OpenPath(_)
             | Action::Inspected(_)
             | Action::InspectFailed(_)
             | Action::HandedOff
@@ -480,7 +548,11 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
         ),
         (
             state @ State::Trashing { .. },
-            Action::OpenPath(_)
+            Action::LoadInstalled
+            | Action::InstalledLoaded(_)
+            | Action::UninstallApp(_)
+            | Action::UninstallFinished { .. }
+            | Action::OpenPath(_)
             | Action::Inspected(_)
             | Action::InspectFailed(_)
             | Action::HandedOff
@@ -500,16 +572,21 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
         ) => (state, vec![]),
 
         // --- Terminal states: Done / Cancelled / Failed ---
-        (State::Done { .. } | State::Cancelled | State::Failed { .. }, Action::Reset) => {
-            (State::Idle, vec![])
-        }
+        (State::Done { .. } | State::Cancelled | State::Failed { .. }, Action::Reset) => (
+            State::Idle { installed: vec![] },
+            vec![Effect::ListInstalled],
+        ),
         (State::Done { .. } | State::Cancelled | State::Failed { .. }, Action::OpenPath(path)) => (
             State::Inspecting { path: path.clone() },
             vec![Effect::Inspect { path }],
         ),
         (
             state @ (State::Done { .. } | State::Cancelled | State::Failed { .. }),
-            Action::Inspected(_)
+            Action::LoadInstalled
+            | Action::InstalledLoaded(_)
+            | Action::UninstallApp(_)
+            | Action::UninstallFinished { .. }
+            | Action::Inspected(_)
             | Action::InspectFailed(_)
             | Action::HandedOff
             | Action::HandOffFailed(_)
@@ -547,6 +624,7 @@ mod tests {
             origin_url: None,
             signature: SignatureStatus::None,
             warnings: vec![],
+            script_report: None,
         }
     }
 
@@ -564,6 +642,7 @@ mod tests {
             icon_bytes: None,
             desktop_entry: None,
             startup_wm_class: Some("foo".into()),
+            planned_writes: vec![],
         }
     }
 
@@ -653,16 +732,16 @@ mod tests {
         let rows = vec![
             Row {
                 name: "idle + open -> inspecting",
-                from: State::Idle,
+                from: State::Idle { installed: vec![] },
                 action: Action::OpenPath(p.clone()),
                 expected_state: State::Inspecting { path: p.clone() },
                 expected_effects: vec![Effect::Inspect { path: p.clone() }],
             },
             Row {
                 name: "idle + confirm -> ignored",
-                from: State::Idle,
+                from: State::Idle { installed: vec![] },
                 action: Action::ConfirmInstall,
-                expected_state: State::Idle,
+                expected_state: State::Idle { installed: vec![] },
                 expected_effects: vec![],
             },
             Row {
@@ -961,8 +1040,8 @@ mod tests {
                     outcome: DoneOutcome::HandedOff { path: p.clone() },
                 },
                 action: Action::Reset,
-                expected_state: State::Idle,
-                expected_effects: vec![],
+                expected_state: State::Idle { installed: vec![] },
+                expected_effects: vec![Effect::ListInstalled],
             },
             Row {
                 name: "failed + open_path -> inspecting",

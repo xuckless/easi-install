@@ -85,6 +85,10 @@ pub fn slug_and_version(raw: &str) -> (String, Option<String>) {
         ".AppImage",
         ".appimage",
         ".zip",
+        ".7z",
+        ".tar",
+        ".run",
+        ".sh",
         ".desktop",
     ] {
         if let Some(s) = stem.strip_suffix(ext) {

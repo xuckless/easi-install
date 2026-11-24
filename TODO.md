@@ -95,8 +95,10 @@ Every arrow is a row in the reducer match. Every unlisted `(state, action)` pair
 - [x] README / user docs
 
 ## Post-v1 backlog
-- [ ] Esoteric formats as encountered (`.run`/`.sh` self-extractors, 7z, bare binaries, …)
-- [ ] More DEs: XFCE, Cinnamon, MATE, tiling WMs (rofi/wofi/fuzzel launchers)
+- [x] Esoteric formats: plain `.tar`, `.7z`, bare ELF binaries, `.run`/`.sh` self-extractors (with static script permission report + explicit consent)
+- [x] More DEs: Cinnamon, MATE, XFCE (Linux Mint), COSMIC, Hyprland, Sway (CachyOS), plus SteamOS/KDE Plasma
+- [x] Standalone GUI App Manager (list & uninstall installed apps + install picker when opened directly)
+- [x] Pre-install permissions summary screen (planned writes + script capability warnings)
 - [ ] Optional system-wide installs (`/opt` via pkexec)
 - [ ] More app id / metadata sources as formats grow (snap-style `meta/`, AppImage update info, ELF `.note` / embedded version strings, icon-from-ELF resources)
 - [ ] Upstream update checks (AppImage zsync, GitHub releases)

@@ -253,3 +253,68 @@ fn detects_installs_and_uninstalls_all_seven_v1_formats() {
         assert!(!desktop.exists(), ".desktop left behind for {label}");
     }
 }
+
+#[test]
+fn detects_and_installs_tar_bare_elf_and_shell_installer_with_script_report() {
+    let tmp = TempDir::new().expect("tempdir");
+    let roots = InstallRoots::from_home(tmp.path());
+    let dl = tmp.path().join("Downloads");
+    fs::create_dir_all(&dl).expect("mkdir downloads");
+
+    // 1. Plain uncompressed .tar
+    let plain_tar = dl.join("plaintool-1.0.tar");
+    write_tar_entries(
+        File::create(&plain_tar).expect("tar"),
+        &[("plaintool/mybin", FAKE_ELF, 0o755)],
+    );
+    assert_eq!(detect_file_format(&plain_tar).expect("fmt"), Format::Tar);
+    let (tar_id, _) = run_full_store_install(&roots, &plain_tar);
+    uninstall_app(&roots, &tar_id).expect("uninstall tar");
+
+    // 2. Bare single-file ELF binary
+    let bare_elf = dl.join("fastcli-2.0-linux-amd64");
+    fs::write(&bare_elf, FAKE_ELF).expect("write elf");
+    assert_eq!(detect_file_format(&bare_elf).expect("fmt"), Format::BareElf);
+    let (elf_id, elf_dir) = run_full_store_install(&roots, &bare_elf);
+    assert!(elf_dir.join("fastcli-2.0-linux-amd64").exists());
+    uninstall_app(&roots, &elf_id).expect("uninstall elf");
+
+    // 3. Shell installer (.sh) — static script analyzer detects actions + records created files
+    let sh_pkg = dl.join("myinstaller-1.0.sh");
+    fs::write(
+        &sh_pkg,
+        "#!/bin/sh\n# curl https://example.com\nmkdir -p \"$EASI_INSTALL_DIR\"\necho hi > \"$EASI_INSTALL_DIR/installed.txt\"\n",
+    )
+    .expect("write sh");
+    assert_eq!(
+        detect_file_format(&sh_pkg).expect("fmt"),
+        Format::ShellInstaller
+    );
+    let runner = EffectRunner::new(roots.clone());
+    let mut store = Store::new();
+    store.dispatch_and_run(Action::OpenPath(sh_pkg.clone()), |e| runner.run(e), |_| {});
+    match store.state() {
+        State::Ready { plan, trust } => {
+            assert!(!plan.planned_writes.is_empty());
+            let report = trust
+                .script_report
+                .as_ref()
+                .expect("script report must be present");
+            assert!(
+                report.actions.iter().any(|a| a.contains("network")),
+                "expected network action in {:?}",
+                report.actions
+            );
+        }
+        other => panic!("expected Ready for shell installer, got {other:?}"),
+    }
+    store.dispatch_and_run(Action::ConfirmInstall, |e| runner.run(e), |_| {});
+    assert!(matches!(store.state(), State::OfferTrash { .. }));
+    let created_file = roots.applications_dir.join("Myinstaller/installed.txt");
+    assert!(created_file.exists(), "script output must exist");
+    uninstall_app(&roots, "easi.myinstaller").expect("uninstall sh app");
+    assert!(
+        !created_file.exists(),
+        "uninstall must remove files created by script"
+    );
+}

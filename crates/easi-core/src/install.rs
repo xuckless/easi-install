@@ -139,7 +139,7 @@ where
         check_cancelled(cancel_flag)?;
         let pct = ((idx + 1) * 90 / ops.len().max(1)) as u8;
         match op {
-            PlanOp::CopyAppImage => {
+            PlanOp::CopyAppImage | PlanOp::CopyBareElf => {
                 on_progress(InstallStep::Extracting, pct);
                 fs::create_dir_all(&app_dir)?;
                 tx.record_dir(app_dir.clone());
@@ -147,7 +147,7 @@ where
                     .source_path
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| format!("{}.AppImage", plan.app_id));
+                    .unwrap_or_else(|| plan.app_id.clone());
                 let dest = safe_join(&app_dir, Path::new(&fname))?;
                 fs::copy(&plan.source_path, &dest)?;
                 // Strip setuid/setgid, ensure executable.
@@ -156,6 +156,39 @@ where
                 fs::set_permissions(&dest, perms)?;
                 tx.record_file(dest.clone());
                 resolved_exec = Some(dest);
+            }
+            PlanOp::RunShellInstaller => {
+                on_progress(InstallStep::Extracting, pct);
+                fs::create_dir_all(&app_dir)?;
+                tx.record_dir(app_dir.clone());
+                // Snapshot allowed roots before and after so every file created by the script
+                // is recorded in the manifest for clean uninstall.
+                let watched = [
+                    app_dir.clone(),
+                    roots.desktop_dir.clone(),
+                    roots.icons_dir.clone(),
+                    roots.bin_dir.clone(),
+                ];
+                let before = snapshot_files(&watched);
+                let staging = TempDir::new()?;
+                let status = Command::new("sh")
+                    .arg(&plan.source_path)
+                    .current_dir(staging.path())
+                    .env("HOME", &roots.home_dir)
+                    .env("PREFIX", &app_dir)
+                    .env("EASI_INSTALL_DIR", &app_dir)
+                    .status()?;
+                if !status.success() {
+                    return Err(EasiError::Desktop(format!(
+                        "installer script exited with status {status}"
+                    )));
+                }
+                let after = snapshot_files(&watched);
+                for path in after {
+                    if !before.contains(&path) {
+                        tx.record_file(path);
+                    }
+                }
             }
             PlanOp::ExtractAppImageAssets => {
                 on_progress(InstallStep::Extracting, pct);
@@ -427,6 +460,7 @@ pub fn extract_archive_safe(
     dest_root: &Path,
 ) -> Result<(), EasiError> {
     match format {
+        Format::Tar => extract_tar_safe(BufReader::new(File::open(path)?), dest_root),
         Format::TarGz => {
             extract_tar_safe(GzDecoder::new(BufReader::new(File::open(path)?)), dest_root)
         }
@@ -442,7 +476,61 @@ pub fn extract_archive_safe(
             extract_tar_safe(BzDecoder::new(BufReader::new(File::open(path)?)), dest_root)
         }
         Format::Zip => extract_zip_safe(path, dest_root),
-        Format::AppImageType1 | Format::AppImageType2 => Ok(()),
+        Format::SevenZ => extract_sevenz_safe(path, dest_root),
+        Format::AppImageType1
+        | Format::AppImageType2
+        | Format::BareElf
+        | Format::ShellInstaller => Ok(()),
+    }
+}
+
+fn extract_sevenz_safe(path: &Path, dest_root: &Path) -> Result<(), EasiError> {
+    let mut reader = sevenz_rust::SevenZReader::open(path, sevenz_rust::Password::empty())
+        .map_err(|e| EasiError::Archive(e.to_string()))?;
+    reader
+        .for_each_entries(|entry, data| {
+            let rel = PathBuf::from(entry.name());
+            if rel.as_os_str().is_empty() || rel == Path::new(".") || rel == Path::new("./") {
+                return Ok(true);
+            }
+            let dest =
+                safe_join(dest_root, &rel).map_err(|e| sevenz_rust::Error::other(e.to_string()))?;
+            if entry.is_directory() {
+                fs::create_dir_all(&dest)?;
+            } else {
+                if let Some(parent) = dest.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                let mut out = File::create(&dest)?;
+                std::io::copy(data, &mut out)?;
+            }
+            Ok(true)
+        })
+        .map_err(|e| EasiError::Archive(e.to_string()))?;
+    Ok(())
+}
+
+fn snapshot_files(roots: &[PathBuf]) -> std::collections::HashSet<PathBuf> {
+    let mut out = std::collections::HashSet::new();
+    for root in roots {
+        collect_files_recursive(root, &mut out);
+    }
+    out
+}
+
+fn collect_files_recursive(dir: &Path, out: &mut std::collections::HashSet<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if let Ok(meta) = fs::symlink_metadata(&p) {
+            if meta.file_type().is_dir() {
+                collect_files_recursive(&p, out);
+            } else {
+                out.insert(p);
+            }
+        }
     }
 }
 

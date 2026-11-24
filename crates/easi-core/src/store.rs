@@ -12,7 +12,9 @@ pub struct Store {
 
 impl Store {
     pub fn new() -> Self {
-        Self { state: State::Idle }
+        Self {
+            state: State::Idle { installed: vec![] },
+        }
     }
 
     pub fn state(&self) -> &State {

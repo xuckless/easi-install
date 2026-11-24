@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::error::format_user_error;
 use crate::inspect::classify_package;
 use crate::install::{execute_install, move_to_trash, uninstall_app};
-use crate::manifest::find_manifest_by_id;
+use crate::manifest::{find_manifest_by_id, list_manifests};
 use crate::roots::InstallRoots;
 use crate::state::{Action, Effect};
 
@@ -30,6 +30,26 @@ impl EffectRunner {
 
     pub fn run(&self, effect: Effect) -> Vec<Action> {
         match effect {
+            Effect::ListInstalled => {
+                let apps = list_manifests(&self.roots)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|m| m.to_installed_app())
+                    .collect();
+                vec![Action::InstalledLoaded(apps)]
+            }
+            Effect::UninstallApp { app_id } => match uninstall_app(&self.roots, &app_id) {
+                Ok(_) => vec![Action::UninstallFinished {
+                    app_id,
+                    ok: true,
+                    error: None,
+                }],
+                Err(err) => vec![Action::UninstallFinished {
+                    app_id,
+                    ok: false,
+                    error: Some(format_user_error(&err)),
+                }],
+            },
             Effect::Inspect { path } => {
                 match classify_package(&path, |id| {
                     find_manifest_by_id(&self.roots, id).map(|m| m.to_installed_app())
