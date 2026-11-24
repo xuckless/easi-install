@@ -26,11 +26,12 @@ toml = "0.8"
 # sha2: SHA-256 digest for trust summary.
 sha2 = "0.10"
 # tar + compression crates: streaming archive inspection & safe extraction without shelling out.
+# static features prevent Ubuntu/Fedora/Arch SONAME mismatches (e.g. libbz2.so.1.0 vs libbz2.so.1).
 tar = "0.4"
 flate2 = "1"
-xz2 = "0.1"
+xz2 = { version = "0.1", features = ["static"] }
 zstd = "0.13"
-bzip2 = "0.5"
+bzip2 = { version = "0.5", features = ["static"] }
 lz4_flex = "0.11"
 # zip: pure-Rust zip inspection & safe extraction.
 zip = { version = "2", default-features = false, features = ["deflate", "bzip2", "zstd"] }
