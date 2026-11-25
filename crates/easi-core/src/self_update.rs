@@ -17,6 +17,7 @@ use tempfile::{NamedTempFile, TempDir};
 use crate::error::EasiError;
 use crate::install::extract_archive_safe;
 use crate::model::Format;
+use crate::oplog::{LockWait, StateLock};
 use crate::roots::InstallRoots;
 use crate::sandbox::{WaitOutcome, wait_or_kill};
 
@@ -93,7 +94,7 @@ pub fn load_config(roots: &InstallRoots) -> EasiConfig {
 }
 
 /// Load `config.toml`; a missing file gives first-run defaults. A file that does not parse is
-/// renamed to `config.toml.corrupt-<n>` (never deleted) and replaced by
+/// kept as `config.toml.corrupt-<n>` (never deleted) and replaced by
 /// [`EasiConfig::safe_fallback`]; the second value is where the bad file now is.
 pub fn load_config_checked(roots: &InstallRoots) -> (EasiConfig, Option<PathBuf>) {
     let path = roots.config_path();
@@ -108,14 +109,16 @@ pub fn load_config_checked(roots: &InstallRoots) -> (EasiConfig, Option<PathBuf>
     {
         return (cfg, None);
     }
+    // hard_link never replaces an existing file, so concurrent recoveries (no lock: callers may
+    // already hold it) cannot clobber an earlier corrupt-<n>; the atomic save then replaces
+    // config.toml so later loads do not flip checks back on.
     let fallback = EasiConfig::safe_fallback();
-    let aside = (1u32..)
+    let Some(aside) = (1..=1000)
         .map(|n| roots.easi_dir.join(format!("config.toml.corrupt-{n}")))
-        .find(|p| fs::symlink_metadata(p).is_err())
-        .unwrap_or_else(|| path.clone());
-    if fs::rename(&path, &aside).is_err() {
+        .find(|p| fs::hard_link(&path, p).is_ok())
+    else {
         return (fallback, Some(path));
-    }
+    };
     let _ = save_config(roots, &fallback);
     (fallback, Some(aside))
 }
@@ -151,7 +154,7 @@ pub fn check_for_easi_update(roots: &InstallRoots, current_version: &str) -> Opt
     if auto_update_disabled_by_env() {
         return None;
     }
-    let mut cfg = load_config(roots);
+    let cfg = load_config(roots);
     if !cfg.auto_check_updates {
         return None;
     }
@@ -170,9 +173,14 @@ pub fn check_for_easi_update(roots: &InstallRoots, current_version: &str) -> Opt
     let latest_tag = fetch_latest_tag_with_timeout(&repo, 2).ok()?;
     let latest_ver = latest_tag.trim_start_matches('v').to_string();
 
-    cfg.last_update_check_epoch = now;
-    cfg.latest_known_version = Some(latest_ver.clone());
-    let _ = save_config(roots, &cfg);
+    // Only a cache: skip it while another operation holds the lock, and re-read under the lock
+    // so a concurrent settings change (e.g. turning checks off) is never written back over.
+    if let Ok(_lock) = StateLock::acquire(roots, LockWait::Never) {
+        let mut fresh = load_config(roots);
+        fresh.last_update_check_epoch = now;
+        fresh.latest_known_version = Some(latest_ver.clone());
+        let _ = save_config(roots, &fresh);
+    }
 
     if is_newer_version(current_version, &latest_ver) {
         Some(latest_ver)

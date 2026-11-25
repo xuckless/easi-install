@@ -8,6 +8,7 @@ use crate::error::format_user_error;
 use crate::inspect::classify_package;
 use crate::install::{execute_install, move_to_trash, uninstall_app, uninstall_app_with_options};
 use crate::manifest::find_manifest_by_id;
+use crate::oplog::{LockWait, Op, StateLock, run_op, run_op_with_source};
 use crate::reconcile::reconcile_all;
 use crate::roots::InstallRoots;
 use crate::sandbox::Isolation;
@@ -20,6 +21,8 @@ pub struct EffectRunner {
     pub isolation: Isolation,
     pub cancel_flag: Arc<AtomicBool>,
     pub handoff_fn: HandoffFn,
+    /// How mutating effects wait for another easi operation (the CLI prints a notice).
+    pub lock_wait: LockWait,
 }
 
 impl EffectRunner {
@@ -29,6 +32,7 @@ impl EffectRunner {
             isolation,
             cancel_flag: Arc::new(AtomicBool::new(false)),
             handoff_fn: crate::desktop::handoff_non_app,
+            lock_wait: LockWait::Patiently(|| {}),
         }
     }
 
@@ -54,7 +58,9 @@ impl EffectRunner {
                 emit(Action::InstalledLoaded(apps));
             }
             Effect::UninstallApp { app_id, purge_data } => {
-                match uninstall_app_with_options(&self.roots, &app_id, purge_data) {
+                match run_op(&self.roots, self.lock_wait, Op::Uninstall, &app_id, || {
+                    uninstall_app_with_options(&self.roots, &app_id, purge_data)
+                }) {
                     Ok(m) => {
                         crate::desktop::notify("App uninstalled", &format!("Removed {}", m.name));
                         emit(Action::UninstallFinished {
@@ -85,16 +91,26 @@ impl EffectRunner {
                 replace_existing,
             } => {
                 self.cancel_flag.store(false, Ordering::Relaxed);
-                match execute_install(
+                let installed = run_op_with_source(
                     &self.roots,
-                    &self.isolation,
-                    &plan,
-                    replace_existing,
-                    &self.cancel_flag,
-                    |step, progress| {
-                        emit(Action::InstallProgress { step, progress });
+                    self.lock_wait,
+                    Op::Install,
+                    &plan.app_id,
+                    || {
+                        execute_install(
+                            &self.roots,
+                            &self.isolation,
+                            &plan,
+                            replace_existing,
+                            &self.cancel_flag,
+                            |step, progress| {
+                                emit(Action::InstallProgress { step, progress });
+                            },
+                        )
                     },
-                ) {
+                    |summary| Some(summary.source.clone()),
+                );
+                match installed {
                     Ok(summary) => {
                         let ver = summary
                             .version
@@ -114,7 +130,10 @@ impl EffectRunner {
                 self.cancel_flag.store(true, Ordering::Relaxed);
             }
             Effect::Rollback { app_id } => {
-                let ok = uninstall_app(&self.roots, &app_id).is_ok()
+                // Locked but not journaled: the failed or cancelled install it undoes already is.
+                let ok = StateLock::acquire(&self.roots, self.lock_wait)
+                    .and_then(|_lock| uninstall_app(&self.roots, &app_id))
+                    .is_ok()
                     || find_manifest_by_id(&self.roots, &app_id).is_none();
                 emit(Action::RollbackFinished { ok });
             }

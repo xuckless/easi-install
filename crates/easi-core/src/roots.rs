@@ -26,6 +26,8 @@ pub struct InstallRoots {
     pub icons_dir: PathBuf,
     pub bin_dir: PathBuf,
     pub easi_dir: PathBuf,
+    /// `$XDG_STATE_HOME/easi` (default `~/.local/state/easi`): the operation journal.
+    pub state_dir: PathBuf,
     pub trash_dir: PathBuf,
 }
 
@@ -39,6 +41,7 @@ impl InstallRoots {
             icons_dir: local_share.join("icons/hicolor"),
             bin_dir: home.join(".local/bin"),
             easi_dir: local_share.join("easi"),
+            state_dir: home.join(".local/state/easi"),
             trash_dir: local_share.join("Trash"),
         }
     }
@@ -47,7 +50,17 @@ impl InstallRoots {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .ok_or_else(|| EasiError::Desktop("HOME environment variable is not set".into()))?;
-        Ok(Self::from_home(&home))
+        // The XDG base-dir spec says to ignore a relative XDG_STATE_HOME.
+        let state_home = std::env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute());
+        Ok(Self {
+            state_dir: state_home.map_or_else(
+                || home.join(".local/state/easi"),
+                |state| state.join("easi"),
+            ),
+            ..Self::from_home(&home)
+        })
     }
 
     /// Per-user settings/data bases (`~/.config`, `~/.local/share`) that apps and consented
@@ -83,6 +96,15 @@ impl InstallRoots {
         self.easi_dir.join("config.toml")
     }
 
+    /// Advisory lock every mutating easi operation holds (see `oplog::StateLock`).
+    pub fn lock_path(&self) -> PathBuf {
+        self.easi_dir.join(".lock")
+    }
+
+    pub fn journal_path(&self) -> PathBuf {
+        self.state_dir.join("journal.log")
+    }
+
     /// Check whether `path` is strictly inside one of easi's allowed per-user write roots
     /// without following symlinks on the leaf.
     pub fn is_within_allowed_write_roots(&self, path: &Path) -> bool {
@@ -102,6 +124,7 @@ impl InstallRoots {
             &self.icons_dir,
             &self.bin_dir,
             &self.easi_dir,
+            &self.state_dir,
         ];
         allowed.iter().any(|root| {
             if path.starts_with(root) && path != root.as_path() {

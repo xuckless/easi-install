@@ -248,6 +248,8 @@ pub struct InstallSummary {
     pub bin_on_path: bool,
     /// Sandbox a consented `.run`/`.sh` installer script actually ran under (None: no script).
     pub script_sandbox: Option<SandboxStatus>,
+    /// What was installed, for the operation journal.
+    pub source: crate::oplog::SourceRecord,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

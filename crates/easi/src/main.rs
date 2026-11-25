@@ -27,6 +27,7 @@ const CLI_SUBCOMMANDS: &[&str] = &[
     "forget",
     "set-source",
     "config",
+    "journal",
     "help",
 ];
 

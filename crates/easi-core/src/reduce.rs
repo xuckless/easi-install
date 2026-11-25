@@ -753,6 +753,11 @@ mod tests {
             kind: AppKind::Gui,
             bin_on_path: true,
             script_sandbox: None,
+            source: crate::oplog::SourceRecord {
+                filename: "foo.AppImage".into(),
+                sha256: "ab12".into(),
+                created_files: 3,
+            },
         }
     }
 

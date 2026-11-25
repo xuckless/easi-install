@@ -8,6 +8,7 @@ use clap::{Parser, Subcommand};
 use easi_core::desktop::{restore_handlers, run_setup_with_options, self_uninstall};
 use easi_core::install::{add_bin_to_shell_rc, find_app_data_dirs, uninstall_app_with_options};
 use easi_core::manifest::resolve_installed;
+use easi_core::oplog::{LockWait, Op, run_op, run_op_with_source};
 use easi_core::reconcile::{probe_active_wm_class, reconcile_all, set_startup_wm_class};
 use easi_core::roots::InstallRoots;
 use easi_core::runner::EffectRunner;
@@ -133,6 +134,12 @@ pub enum Command {
     },
     /// Cleanly uninstall easi itself and restore previous MIME handlers (keeps installed apps).
     SelfUninstall,
+    /// Print the most recent entries of easi's operation journal.
+    Journal {
+        /// How many entries to show.
+        #[arg(short = 'n', long = "lines", default_value_t = 20)]
+        lines: usize,
+    },
     /// View or change easi settings (e.g. --auto-update true|false).
     Config {
         /// Enable or disable automatic easi update checks on use.
@@ -225,9 +232,28 @@ pub fn run(cli: Cli) -> ExitCode {
         Some(Command::SetSource { app, url, clear }) => {
             run_set_source_cmd(&roots, &app, url.as_deref(), clear)
         }
-        Some(Command::SelfUpdate { rollback }) => run_self_update_cmd(rollback),
+        Some(Command::SelfUpdate { rollback }) => run_self_update_cmd(&roots, rollback),
         Some(Command::SelfUninstall) => run_self_uninstall_cmd(&roots, cli.yes),
         Some(Command::Config { auto_update }) => run_config_cmd(&roots, auto_update),
+        Some(Command::Journal { lines }) => match easi_core::oplog::journal_tail(&roots, lines) {
+            Ok(entries) if entries.is_empty() => {
+                println!(
+                    "No operations recorded yet ({}).",
+                    roots.journal_path().display()
+                );
+                ExitCode::SUCCESS
+            }
+            Ok(entries) => {
+                for line in entries {
+                    println!("{line}");
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("easi: {}", format_user_error(&e));
+                ExitCode::FAILURE
+            }
+        },
         None => {
             eprintln!(
                 "easi: pass a subcommand (`install`, `uninstall`, `list`, `update`, `check-updates`, `config`, `self-uninstall`) or `--setup` / `--restore-handlers`"
@@ -236,6 +262,13 @@ pub fn run(cli: Cli) -> ExitCode {
         }
     }
 }
+
+fn announce_lock_wait() {
+    eprintln!("easi: waiting for another easi operation to finish…");
+}
+
+/// CLI operations queue behind a running GUI/timer/CLI operation, saying so once.
+const CLI_LOCK_WAIT: LockWait = LockWait::Patiently(announce_lock_wait);
 
 fn maybe_notify_update(roots: &InstallRoots) {
     let current = env!("CARGO_PKG_VERSION");
@@ -252,7 +285,9 @@ fn maybe_notify_update(roots: &InstallRoots) {
 
 fn run_config_cmd(roots: &InstallRoots, auto_update: Option<bool>) -> ExitCode {
     match auto_update {
-        Some(enabled) => match easi_core::self_update::set_auto_check_updates(roots, enabled) {
+        Some(enabled) => match run_op(roots, CLI_LOCK_WAIT, Op::Config, "easi", || {
+            easi_core::self_update::set_auto_check_updates(roots, enabled)
+        }) {
             Ok(cfg) => {
                 println!("auto_check_updates = {}", cfg.auto_check_updates);
                 ExitCode::SUCCESS
@@ -321,7 +356,7 @@ fn run_check_updates_cmd(roots: &InstallRoots) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn run_self_update_cmd(rollback: bool) -> ExitCode {
+fn run_self_update_cmd(roots: &InstallRoots, rollback: bool) -> ExitCode {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
@@ -330,7 +365,9 @@ fn run_self_update_cmd(rollback: bool) -> ExitCode {
         }
     };
     if rollback {
-        return match easi_core::self_update::rollback_self_update(&exe) {
+        return match run_op(roots, CLI_LOCK_WAIT, Op::SelfRollback, "easi", || {
+            easi_core::self_update::rollback_self_update(&exe)
+        }) {
             Ok(version) => {
                 println!("Restored the previous easi {version} ({}).", exe.display());
                 ExitCode::SUCCESS
@@ -342,7 +379,9 @@ fn run_self_update_cmd(rollback: bool) -> ExitCode {
         };
     }
     let current = env!("CARGO_PKG_VERSION");
-    match easi_core::self_update::run_self_update(current, &exe) {
+    match run_op(roots, CLI_LOCK_WAIT, Op::SelfUpdate, "easi", || {
+        easi_core::self_update::run_self_update(current, &exe)
+    }) {
         Ok(easi_core::self_update::UpdateOutcome::AlreadyUpToDate { version }) => {
             println!("easi {version} is already up to date.");
             ExitCode::SUCCESS
@@ -370,7 +409,9 @@ fn run_setup_cmd(roots: &InstallRoots, claim_archives: bool) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match run_setup_with_options(roots, &exe, claim_archives) {
+    match run_op(roots, CLI_LOCK_WAIT, Op::Setup, "easi", || {
+        run_setup_with_options(roots, &exe, claim_archives)
+    }) {
         Ok(saved) => {
             if claim_archives {
                 println!(
@@ -449,7 +490,9 @@ fn run_list_cmd(roots: &InstallRoots) -> ExitCode {
 }
 
 fn run_restore_handlers_cmd(roots: &InstallRoots) -> ExitCode {
-    match restore_handlers(roots) {
+    match run_op(roots, CLI_LOCK_WAIT, Op::RestoreHandlers, "easi", || {
+        restore_handlers(roots)
+    }) {
         Ok(n) => {
             println!("Restored {n} previous MIME handler(s) and removed easi.desktop.");
             ExitCode::SUCCESS
@@ -471,7 +514,9 @@ fn run_self_uninstall_cmd(roots: &InstallRoots, yes: bool) -> ExitCode {
         println!("Cancelled.");
         return ExitCode::SUCCESS;
     }
-    match self_uninstall(roots) {
+    match run_op(roots, CLI_LOCK_WAIT, Op::SelfUninstall, "easi", || {
+        self_uninstall(roots)
+    }) {
         Ok(restored) => {
             println!("Uninstalled easi and restored {restored} previous MIME handler(s).");
             println!("Your installed apps in ~/Applications remain intact.");
@@ -528,7 +573,21 @@ fn run_update_cmd(
     let mut failed = false;
     for m in &targets {
         println!("Updating {}…", m.name);
-        match easi_core::upstream::download_and_update_app(roots, isolation, m, trust) {
+        // Re-read the manifest under the lock: another operation may have changed it since
+        // the targets were chosen.
+        let updated = run_op_with_source(
+            roots,
+            CLI_LOCK_WAIT,
+            Op::Update,
+            &m.app_id,
+            || {
+                resolve_installed(roots, &m.app_id).and_then(|fresh| {
+                    easi_core::upstream::download_and_update_app(roots, isolation, &fresh, trust)
+                })
+            },
+            |outcome| Some(outcome.summary.source.clone()),
+        );
+        match updated {
             Ok(easi_core::upstream::UpdateOutcome { summary, integrity }) => {
                 println!(
                     "Updated {} to {} ({}).",
@@ -567,7 +626,9 @@ fn run_learn_wmclass_cmd(roots: &InstallRoots, app: &str, wm_class: Option<&str>
             }
         },
     };
-    match set_startup_wm_class(roots, app, &class) {
+    match run_op(roots, CLI_LOCK_WAIT, Op::LearnWmClass, app, || {
+        set_startup_wm_class(roots, app, &class)
+    }) {
         Ok(desktop) => {
             println!("Set StartupWMClass={class} in {}", desktop.display());
             ExitCode::SUCCESS
@@ -624,7 +685,9 @@ fn run_adopt_cmd(
     repair: bool,
 ) -> ExitCode {
     if all {
-        return match easi_core::adopt::adopt_all(roots, isolation, repair) {
+        return match run_op(roots, CLI_LOCK_WAIT, Op::Adopt, "all", || {
+            easi_core::adopt::adopt_all(roots, isolation, repair)
+        }) {
             Ok(list) if list.is_empty() => {
                 println!("No unmanaged user apps to adopt.");
                 ExitCode::SUCCESS
@@ -651,7 +714,9 @@ fn run_adopt_cmd(
     };
     let candidate_path = PathBuf::from(query);
     if candidate_path.exists() {
-        return match easi_core::adopt::adopt_path(roots, isolation, &candidate_path, repair) {
+        return match run_op(roots, CLI_LOCK_WAIT, Op::Adopt, query, || {
+            easi_core::adopt::adopt_path(roots, isolation, &candidate_path, repair)
+        }) {
             Ok(m) => {
                 println!("Adopted {} ({}).", m.name, m.app_id);
                 ExitCode::SUCCESS
@@ -678,7 +743,9 @@ fn run_adopt_cmd(
         return ExitCode::FAILURE;
     };
 
-    match easi_core::adopt::adopt_app(roots, isolation, target, repair) {
+    match run_op(roots, CLI_LOCK_WAIT, Op::Adopt, &target.app_id, || {
+        easi_core::adopt::adopt_app(roots, isolation, target, repair)
+    }) {
         Ok(m) => {
             println!("Adopted {} ({}).", m.name, m.app_id);
             ExitCode::SUCCESS
@@ -691,7 +758,9 @@ fn run_adopt_cmd(
 }
 
 fn run_repair_cmd(roots: &InstallRoots, isolation: &Isolation, app: &str) -> ExitCode {
-    match easi_core::adopt::repair_app(roots, isolation, app) {
+    match run_op(roots, CLI_LOCK_WAIT, Op::Repair, app, || {
+        easi_core::adopt::repair_app(roots, isolation, app)
+    }) {
         Ok(fixes) if fixes.is_empty() => {
             println!("No issues found for '{app}' — icon and launcher look good.");
             ExitCode::SUCCESS
@@ -711,7 +780,9 @@ fn run_repair_cmd(roots: &InstallRoots, isolation: &Isolation, app: &str) -> Exi
 }
 
 fn run_organize_cmd(roots: &InstallRoots, app: &str) -> ExitCode {
-    match easi_core::adopt::organize_app_into_applications(roots, app) {
+    match run_op(roots, CLI_LOCK_WAIT, Op::Organize, app, || {
+        easi_core::adopt::organize_app_into_applications(roots, app)
+    }) {
         Ok(m) => {
             println!("Organized {} into {}.", m.name, m.install_dir.display());
             ExitCode::SUCCESS
@@ -724,7 +795,9 @@ fn run_organize_cmd(roots: &InstallRoots, app: &str) -> ExitCode {
 }
 
 fn run_forget_cmd(roots: &InstallRoots, app: &str) -> ExitCode {
-    match easi_core::adopt::forget_app(roots, app) {
+    match run_op(roots, CLI_LOCK_WAIT, Op::Forget, app, || {
+        easi_core::adopt::forget_app(roots, app)
+    }) {
         Ok(m) => {
             println!(
                 "Stopped managing {} ({}). App files on disk were not modified.",
@@ -741,7 +814,9 @@ fn run_forget_cmd(roots: &InstallRoots, app: &str) -> ExitCode {
 
 fn run_set_source_cmd(roots: &InstallRoots, app: &str, url: Option<&str>, clear: bool) -> ExitCode {
     if clear {
-        return match easi_core::upstream::set_app_update_source(roots, app, None) {
+        return match run_op(roots, CLI_LOCK_WAIT, Op::SetSource, app, || {
+            easi_core::upstream::set_app_update_source(roots, app, None)
+        }) {
             Ok(m) => {
                 println!("Cleared update source for {} ({}).", m.name, m.app_id);
                 ExitCode::SUCCESS
@@ -787,7 +862,9 @@ fn run_set_source_cmd(roots: &InstallRoots, app: &str, url: Option<&str>, clear:
     };
 
     let label = source.display_label();
-    match easi_core::upstream::set_app_update_source(roots, app, Some(source)) {
+    match run_op(roots, CLI_LOCK_WAIT, Op::SetSource, app, || {
+        easi_core::upstream::set_app_update_source(roots, app, Some(source))
+    }) {
         Ok(m) => {
             println!("Set update source for {} ({}) -> {label}", m.name, m.app_id);
             ExitCode::SUCCESS
@@ -885,7 +962,13 @@ fn run_import_cmd(roots: &InstallRoots, isolation: &Isolation, file: &std::path:
             return ExitCode::FAILURE;
         }
     };
-    match easi_core::upstream::import_apps_from_toml(roots, isolation, &text) {
+    match run_op(
+        roots,
+        CLI_LOCK_WAIT,
+        Op::Import,
+        &file.to_string_lossy(),
+        || easi_core::upstream::import_apps_from_toml(roots, isolation, &text),
+    ) {
         Ok(outcomes) => {
             let mut failed = false;
             for o in outcomes {
@@ -940,7 +1023,9 @@ fn run_uninstall_cmd(roots: &InstallRoots, app: &str, purge_data: bool, yes: boo
             should_purge = prompt_yes_no("Also remove these app settings & cache?", false);
         }
     }
-    match uninstall_app_with_options(roots, app, should_purge) {
+    match run_op(roots, CLI_LOCK_WAIT, Op::Uninstall, app, || {
+        uninstall_app_with_options(roots, app, should_purge)
+    }) {
         Ok(m) => {
             easi_core::desktop::notify("App uninstalled", &format!("Removed {}", m.name));
             if should_purge {
@@ -969,7 +1054,10 @@ fn run_install_cmd(
     opt_in_add_to_path: bool,
     allow_script: bool,
 ) -> ExitCode {
-    let runner = EffectRunner::new(roots.clone(), isolation.clone());
+    let runner = EffectRunner {
+        lock_wait: CLI_LOCK_WAIT,
+        ..EffectRunner::new(roots.clone(), isolation.clone())
+    };
     let mut store = Store::new();
 
     store.dispatch_and_run(

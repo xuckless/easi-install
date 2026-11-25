@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
+use sha2::Sha256;
 use tar::Archive;
 use tempfile::TempDir;
 use xz2::read::XzDecoder;
@@ -22,11 +23,13 @@ use crate::manifest::{
     Manifest, delete_manifest, find_manifest_by_id, resolve_installed, save_manifest,
 };
 use crate::model::{Format, InstallPlan, InstallStep, InstallSummary};
+use crate::oplog::SourceRecord;
 use crate::plan::{PlanOp, detect_de_quirk, plan_ops};
 use crate::roots::{InstallRoots, safe_join};
 use crate::sandbox::{
     Confined, Isolation, SandboxStatus, WaitOutcome, inspect_package, wait_or_kill,
 };
+use crate::self_update::file_digest_hex;
 
 /// Records every created file/symlink/dir in order so failure or cancel rolls back cleanly.
 #[derive(Debug, Default)]
@@ -593,6 +596,17 @@ where
         kind: plan.kind,
         bin_on_path: is_bin_dir_on_path(&roots.bin_dir),
         script_sandbox,
+        source: SourceRecord {
+            filename: plan
+                .source_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            // Hashed again here (inspection hashed it too) so the journal names the bytes
+            // actually copied; a vanished source only blanks the digest, never fails the install.
+            sha256: file_digest_hex::<Sha256>(&plan.source_path).unwrap_or_default(),
+            created_files: tx.created_files.len(),
+        },
     })
 }
 

@@ -11,6 +11,7 @@ pub mod install;
 pub mod limits;
 pub mod manifest;
 pub mod model;
+pub mod oplog;
 pub mod plan;
 pub mod reconcile;
 pub mod reduce;

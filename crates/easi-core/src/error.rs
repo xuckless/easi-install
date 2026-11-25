@@ -96,6 +96,9 @@ pub enum EasiError {
     #[error("package inspection failed: {reason}")]
     InspectionFailed { reason: String },
 
+    #[error("another easi operation is still running (lock {0}); try again when it finishes")]
+    Busy(PathBuf),
+
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
 }

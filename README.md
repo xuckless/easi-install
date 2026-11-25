@@ -105,7 +105,8 @@ easi records every file it writes, so uninstalling removes exactly those. The CL
 | `easi learn-wmclass <app>` | Fix duplicate dock icons |
 | `easi export [file]` / `import <file>` | Reinstall your apps on another machine |
 | `easi config --auto-update <bool>` | Turn easi's own update checks on or off |
-| `easi self-update` | Update easi |
+| `easi self-update` / `--rollback` | Update easi, or put back the version it replaced |
+| `easi journal [-n N]` | Show the last operations easi performed |
 | `easi self-uninstall` | Remove easi, keep your apps |
 | `easi --setup` / `--restore-handlers` | Register easi with your desktop, or undo it |
 
@@ -121,6 +122,7 @@ Only inside your home folder:
 - `~/.local/share/icons/hicolor/`: icon
 - `~/.local/bin/`: command link
 - `~/.local/share/easi/`: install records and settings
+- `~/.local/state/easi/journal.log` (or `$XDG_STATE_HOME/easi/`): a log of every install, update and removal
 
 Each install is all-or-nothing: if anything fails, easi rolls back. Files that try to escape their folder are blocked and setuid bits are stripped.
 

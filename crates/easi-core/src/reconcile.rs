@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::appid::slug_and_version;
 use crate::error::EasiError;
 use crate::manifest::{Manifest, list_manifests, save_manifest};
+use crate::oplog::{LockWait, StateLock};
 use crate::roots::InstallRoots;
 use crate::self_update::extract_json_string_field;
 
@@ -156,10 +157,15 @@ pub fn probe_active_wm_class() -> Option<String> {
 }
 
 /// Reconcile every installed manifest and return the refreshed list.
+/// Reconciling rewrites manifests and launchers, so while another operation holds the state
+/// lock (perhaps an installer script under the persistence guard) the recorded list is returned
+/// as is.
 pub fn reconcile_all(roots: &InstallRoots) -> Result<Vec<Manifest>, EasiError> {
     let mut manifests = list_manifests(roots)?;
-    for m in &mut manifests {
-        let _ = reconcile_manifest(roots, m);
+    if let Ok(_lock) = StateLock::acquire(roots, LockWait::Never) {
+        for m in &mut manifests {
+            let _ = reconcile_manifest(roots, m);
+        }
     }
     Ok(manifests)
 }

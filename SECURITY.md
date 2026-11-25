@@ -11,7 +11,7 @@
 
 `easi` treats every downloaded package as untrusted input:
 
-1. **Per-user sandbox roots only**: `easi` never elevates to root and only writes inside `$HOME` (`~/Applications`, `~/.local/share/applications`, `~/.local/share/icons/hicolor`, `~/.local/bin`, `~/.local/share/easi`, and opt-in `~/.config/systemd/user`).
+1. **Per-user sandbox roots only**: `easi` never elevates to root and only writes inside `$HOME` (`~/Applications`, `~/.local/share/applications`, `~/.local/share/icons/hicolor`, `~/.local/bin`, `~/.local/share/easi`, the operation journal in `$XDG_STATE_HOME/easi` (default `~/.local/state/easi`), and opt-in `~/.config/systemd/user`).
 2. **Path traversal & symlink escape prevention**: Every extracted path is canonicalized and verified via `safe_join` before writing. Archives containing `../` or symlink escapes are rejected.
 3. **Privilege & permission hygiene**: `setuid` and `setgid` bits are stripped from all extracted files.
 4. **No code execution during inspection**: AppImages (SquashFS), `.tar.*`, `.zip`, `.7z`, and `.jar` packages are inspected using pure-Rust parsers without executing anything inside the package.

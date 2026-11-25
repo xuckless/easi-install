@@ -15,7 +15,7 @@ user request, the request wins — then update this file.
     double-clicking a supported package.
   - Enforces single-instance handoff over a per-user Unix socket (`$XDG_RUNTIME_DIR/easi.sock`)
     and auto-closes on silent non-app hand-off.
-- **CLI**: `easi install|inspect|list|scan|adopt|repair|organize|forget|set-source|check-updates|update|export|import|uninstall|learn-wmclass|config|self-update|self-uninstall`
+- **CLI**: `easi install|inspect|list|scan|adopt|repair|organize|forget|set-source|check-updates|update|export|import|uninstall|learn-wmclass|config|journal|self-update|self-uninstall`
   plus `--setup` / `--restore-handlers`. Y/N confirmations allowed; `-y/--yes` is non-interactive
   and safe (keeps downloads and leaves shell rc files untouched unless `--trash` / `--add-to-path`
   are explicitly passed).
@@ -25,6 +25,7 @@ user request, the request wins — then update this file.
   and discovery/adoption/repair of existing unmanaged `$HOME` apps.
 - Install locations (per-user only): `~/Applications/<App>/`, `~/.local/share/applications`,
   `~/.local/share/icons/hicolor`, `~/.local/bin`, manifests/config in `~/.local/share/easi/`,
+  the operation journal in `$XDG_STATE_HOME/easi/` (default `~/.local/state/easi/`),
   and optional daily `systemd --user` timer in `~/.config/systemd/user/`.
 - Locked product decisions live in `TODO.md` → "Decisions". Don't relitigate them in code.
 

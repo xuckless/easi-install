@@ -11,6 +11,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use easi_core::oplog::{LockWait, Op};
 use easi_core::roots::InstallRoots;
 use easi_core::runner::EffectRunner;
 use easi_core::{
@@ -18,6 +19,13 @@ use easi_core::{
     Store, TrustSummary, UiAction, UpdateActivity, WizardStep,
 };
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
+
+/// The event-loop thread never waits for another easi operation: it reports `Busy` instead.
+const UI_THREAD: LockWait = LockWait::Never;
+/// Worker threads queue behind the running operation (the view already shows them busy).
+const WORKER: LockWait = LockWait::Patiently(no_wait_notice);
+
+fn no_wait_notice() {}
 
 fn single_instance_socket_path() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
@@ -95,7 +103,11 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         );
     }
     // Only auto-heal easi.desktop/icon after onboarding has been completed.
-    if !needs_onboard && let Ok(exe) = std::env::current_exe() {
+    // Skipped while another operation runs (an installer script may be watching these dirs).
+    if !needs_onboard
+        && let Ok(exe) = std::env::current_exe()
+        && let Ok(_lock) = easi_core::oplog::StateLock::acquire(&runner.roots, UI_THREAD)
+    {
         easi_core::desktop::ensure_easi_desktop_and_icon(&runner.roots, &exe);
     }
     let store = Arc::new(Mutex::new(Store::new()));
@@ -281,17 +293,29 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                     )
                 })
                 .unwrap_or((true, true, false));
-            let _ = easi_core::self_update::set_auto_check_updates(&r.roots, auto_upd);
-            let _ = easi_core::self_update::complete_onboarding(&r.roots);
-            if let Ok(exe) = std::env::current_exe() {
-                if setup_handlers {
-                    let _ = easi_core::desktop::run_setup(&r.roots, &exe);
-                } else {
-                    easi_core::desktop::ensure_easi_desktop_and_icon(&r.roots, &exe);
+            let saved = easi_core::oplog::run_op(&r.roots, UI_THREAD, Op::Config, "easi", || {
+                easi_core::self_update::set_auto_check_updates(&r.roots, auto_upd)?;
+                easi_core::self_update::complete_onboarding(&r.roots)?;
+                if let Ok(exe) = std::env::current_exe() {
+                    if setup_handlers {
+                        let _ = easi_core::desktop::run_setup(&r.roots, &exe);
+                    } else {
+                        easi_core::desktop::ensure_easi_desktop_and_icon(&r.roots, &exe);
+                    }
+                    if bg_timer {
+                        let _ =
+                            easi_core::desktop::set_background_update_timer(&r.roots, &exe, true);
+                    }
                 }
-                if bg_timer {
-                    let _ = easi_core::desktop::set_background_update_timer(&r.roots, &exe, true);
-                }
+                Ok(())
+            });
+            // Stay on onboarding so the choices can be confirmed again once easi is free.
+            if let Err(e) = saved {
+                easi_core::desktop::notify(
+                    "easi settings not saved",
+                    &easi_core::format_user_error(&e),
+                );
+                return;
             }
             dispatch_ui(&w, &s, UiAction::SetAutoCheckUpdates(auto_upd));
             dispatch_ui(&w, &s, UiAction::SetBgUpdateTimer(bg_timer));
@@ -409,7 +433,13 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                 }
                 let picked = dialog.pick_folder();
                 if let Some(folder) = picked {
-                    let _ = easi_core::adopt::adopt_path(&r.roots, &r.isolation, &folder, true);
+                    let _ = easi_core::oplog::run_op(
+                        &r.roots,
+                        WORKER,
+                        Op::Adopt,
+                        &folder.to_string_lossy(),
+                        || easi_core::adopt::adopt_path(&r.roots, &r.isolation, &folder, true),
+                    );
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(win) = w.upgrade() {
                             win.set_busy_picker(false);
@@ -445,7 +475,9 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
             std::thread::spawn(move || {
                 let discovered = easi_core::adopt::scan_unmanaged_apps(&r.roots);
                 if let Some(app) = discovered.iter().find(|a| a.app_id == id) {
-                    let _ = easi_core::adopt::adopt_app(&r.roots, &r.isolation, app, true);
+                    let _ = easi_core::oplog::run_op(&r.roots, WORKER, Op::Adopt, &id, || {
+                        easi_core::adopt::adopt_app(&r.roots, &r.isolation, app, true)
+                    });
                 }
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(win) = w.upgrade() {
@@ -472,7 +504,9 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
             let s = Arc::clone(&s);
             let r = Arc::clone(&r);
             std::thread::spawn(move || {
-                let _ = easi_core::adopt::adopt_all(&r.roots, &r.isolation, true);
+                let _ = easi_core::oplog::run_op(&r.roots, WORKER, Op::Adopt, "all", || {
+                    easi_core::adopt::adopt_all(&r.roots, &r.isolation, true)
+                });
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(win) = w.upgrade() {
                         win.set_adopting_app_id("".into());
@@ -489,7 +523,9 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         let r = Arc::clone(&runner);
         window.on_repair_app(move |app_id| {
             let id: String = app_id.into();
-            let msg = match easi_core::adopt::repair_app(&r.roots, &r.isolation, &id) {
+            let msg = match easi_core::oplog::run_op(&r.roots, UI_THREAD, Op::Repair, &id, || {
+                easi_core::adopt::repair_app(&r.roots, &r.isolation, &id)
+            }) {
                 Ok(fixes) if fixes.is_empty() => "Icon and launcher already look good.".into(),
                 Ok(fixes) => format!("Repaired: {}.", fixes.join(", ")),
                 Err(e) => format!("Repair failed: {}", easi_core::format_user_error(&e)),
@@ -506,7 +542,9 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         let r = Arc::clone(&runner);
         window.on_organize_app(move |app_id| {
             let id: String = app_id.into();
-            let msg = match easi_core::adopt::organize_app_into_applications(&r.roots, &id) {
+            let msg = match easi_core::oplog::run_op(&r.roots, UI_THREAD, Op::Organize, &id, || {
+                easi_core::adopt::organize_app_into_applications(&r.roots, &id)
+            }) {
                 Ok(m) => format!("Moved {} to {}.", m.name, m.install_dir.display()),
                 Err(e) => format!("Could not move app: {}", easi_core::format_user_error(&e)),
             };
@@ -521,7 +559,10 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         let s = Arc::clone(&store);
         let r = Arc::clone(&runner);
         window.on_forget_app(move |app_id| {
-            let _ = easi_core::adopt::forget_app(&r.roots, app_id.as_str());
+            let _ =
+                easi_core::oplog::run_op(&r.roots, UI_THREAD, Op::Forget, app_id.as_str(), || {
+                    easi_core::adopt::forget_app(&r.roots, app_id.as_str())
+                });
             dispatch_action(&w, &s, &r, Action::LoadInstalled);
             refresh_detected_async(&w, &r.roots);
         });
@@ -536,7 +577,9 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
             let msg = match easi_core::upstream::parse_user_update_url(&raw) {
                 Some(src) => {
                     let label = src.display_label();
-                    match easi_core::upstream::set_app_update_source(&r.roots, &id, Some(src)) {
+                    match easi_core::oplog::run_op(&r.roots, UI_THREAD, Op::SetSource, &id, || {
+                        easi_core::upstream::set_app_update_source(&r.roots, &id, Some(src))
+                    }) {
                         Ok(_) => format!("Saved update source: {label}."),
                         Err(e) => format!(
                             "Failed to save source: {}",
@@ -567,8 +610,15 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                         .or_else(|| easi_core::upstream::lookup_known_app_source(&m.app_id));
                     if let Some(src) = detected {
                         let label = src.display_label();
-                        let _ = easi_core::upstream::set_app_update_source(&r.roots, &id, Some(src));
-                        format!("Detected update source: {label}.")
+                        match easi_core::oplog::run_op(&r.roots, UI_THREAD, Op::SetSource, &id, || {
+                            easi_core::upstream::set_app_update_source(&r.roots, &id, Some(src))
+                        }) {
+                            Ok(_) => format!("Detected update source: {label}."),
+                            Err(e) => format!(
+                                "Failed to save source: {}",
+                                easi_core::format_user_error(&e)
+                            ),
+                        }
                     } else {
                         "No embedded update config found in this app folder — paste a URL below instead.".into()
                     }
@@ -628,7 +678,11 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         window.on_run_setup_handlers(move || {
             let msg = match std::env::current_exe()
                 .map_err(easi_core::EasiError::Io)
-                .and_then(|exe| easi_core::desktop::run_setup(&r.roots, &exe))
+                .and_then(|exe| {
+                    easi_core::oplog::run_op(&r.roots, UI_THREAD, Op::Setup, "easi", || {
+                        easi_core::desktop::run_setup(&r.roots, &exe)
+                    })
+                })
             {
                 Ok(_) => "Registered easi as default for AppImages and added Right-Click → Open With for archives (restored your archive manager for .zip/.tar.*).".into(),
                 Err(e) => format!("Setup failed: {}", easi_core::format_user_error(&e)),
@@ -642,7 +696,13 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         let w = window.as_weak();
         let r = Arc::clone(&runner);
         window.on_run_restore_handlers(move || {
-            let msg = match easi_core::desktop::restore_handlers(&r.roots) {
+            let msg = match easi_core::oplog::run_op(
+                &r.roots,
+                UI_THREAD,
+                Op::RestoreHandlers,
+                "easi",
+                || easi_core::desktop::restore_handlers(&r.roots),
+            ) {
                 Ok(n) => format!("Restored {n} previous handler(s) and removed easi.desktop."),
                 Err(e) => format!("Restore failed: {}", easi_core::format_user_error(&e)),
             };
@@ -688,14 +748,23 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
             let s = Arc::clone(&s);
             let r = Arc::clone(&r);
             std::thread::spawn(move || {
-                let outcome = easi_core::manifest::resolve_installed(&r.roots, &id).and_then(|m| {
-                    easi_core::upstream::download_and_update_app(
-                        &r.roots,
-                        &r.isolation,
-                        &m,
-                        easi_core::upstream::PublisherTrust::Recorded,
-                    )
-                });
+                let outcome = easi_core::oplog::run_op_with_source(
+                    &r.roots,
+                    WORKER,
+                    Op::Update,
+                    &id,
+                    || {
+                        easi_core::manifest::resolve_installed(&r.roots, &id).and_then(|m| {
+                            easi_core::upstream::download_and_update_app(
+                                &r.roots,
+                                &r.isolation,
+                                &m,
+                                easi_core::upstream::PublisherTrust::Recorded,
+                            )
+                        })
+                    },
+                    |outcome| Some(outcome.summary.source.clone()),
+                );
                 let _ = slint::invoke_from_event_loop(move || {
                     match outcome {
                         Ok(easi_core::upstream::UpdateOutcome { summary, integrity }) => {
@@ -949,12 +1018,26 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                 for m in &manifests {
                     match easi_core::upstream::check_app_update(m) {
                         easi_core::upstream::AppUpdateStatus::UpdateAvailable { .. } => {
-                            match easi_core::upstream::download_and_update_app(
+                            // Re-read under the lock: the list was taken before queueing.
+                            let updated = easi_core::oplog::run_op_with_source(
                                 &r.roots,
-                                &r.isolation,
-                                m,
-                                easi_core::upstream::PublisherTrust::Recorded,
-                            ) {
+                                WORKER,
+                                Op::Update,
+                                &m.app_id,
+                                || {
+                                    easi_core::manifest::resolve_installed(&r.roots, &m.app_id)
+                                        .and_then(|fresh| {
+                                            easi_core::upstream::download_and_update_app(
+                                                &r.roots,
+                                                &r.isolation,
+                                                &fresh,
+                                                easi_core::upstream::PublisherTrust::Recorded,
+                                            )
+                                        })
+                                },
+                                |outcome| Some(outcome.summary.source.clone()),
+                            );
+                            match updated {
                                 Ok(easi_core::upstream::UpdateOutcome { summary, .. }) => {
                                     let ver = summary.version.as_deref().unwrap_or("latest");
                                     status_map.insert(
@@ -995,8 +1078,20 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         let s = Arc::clone(&store);
         let r = Arc::clone(&runner);
         window.on_toggle_auto_update(move |enabled| {
-            let _ = easi_core::self_update::set_auto_check_updates(&r.roots, enabled);
-            dispatch_ui(&w, &s, UiAction::SetAutoCheckUpdates(enabled));
+            let saved = easi_core::oplog::run_op(&r.roots, UI_THREAD, Op::Config, "easi", || {
+                easi_core::self_update::set_auto_check_updates(&r.roots, enabled)
+            });
+            // On failure the switch flips back to the setting still on disk.
+            let shown = match saved {
+                Ok(cfg) => cfg.auto_check_updates,
+                Err(e) => {
+                    if let Some(win) = w.upgrade() {
+                        win.set_settings_feedback(easi_core::format_user_error(&e).into());
+                    }
+                    !enabled
+                }
+            };
+            dispatch_ui(&w, &s, UiAction::SetAutoCheckUpdates(shown));
         });
     }
     {
@@ -1026,6 +1121,7 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
     }
     {
         let w = window.as_weak();
+        let r = Arc::clone(&runner);
         window.on_run_self_update(move || {
             if let Some(win) = w.upgrade() {
                 if win.get_self_update_state() == "updating"
@@ -1037,11 +1133,14 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                 win.set_self_update_message("Downloading and verifying update…".into());
             }
             let w = w.clone();
+            let r = Arc::clone(&r);
             std::thread::spawn(move || {
                 let (state_str, msg) = match std::env::current_exe()
                     .map_err(easi_core::EasiError::Io)
                     .and_then(|exe| {
-                        easi_core::self_update::run_self_update(env!("CARGO_PKG_VERSION"), &exe)
+                        easi_core::oplog::run_op(&r.roots, WORKER, Op::SelfUpdate, "easi", || {
+                            easi_core::self_update::run_self_update(env!("CARGO_PKG_VERSION"), &exe)
+                        })
                     }) {
                     Ok(easi_core::self_update::UpdateOutcome::Updated { to, .. }) => {
                         easi_core::desktop::notify(
@@ -1096,9 +1195,17 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         let w = window.as_weak();
         let r = Arc::clone(&runner);
         window.on_run_self_uninstall(move || {
-            let _ = easi_core::desktop::self_uninstall(&r.roots);
+            let removed =
+                easi_core::oplog::run_op(&r.roots, UI_THREAD, Op::SelfUninstall, "easi", || {
+                    easi_core::desktop::self_uninstall(&r.roots)
+                });
             if let Some(win) = w.upgrade() {
-                let _ = win.hide();
+                match removed {
+                    Ok(_) => {
+                        let _ = win.hide();
+                    }
+                    Err(e) => win.set_settings_feedback(easi_core::format_user_error(&e).into()),
+                }
             }
         });
     }
