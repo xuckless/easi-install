@@ -52,6 +52,14 @@ impl InstallRoots {
     /// Check whether `path` is strictly inside one of easi's allowed per-user write roots
     /// without following symlinks on the leaf.
     pub fn is_within_allowed_write_roots(&self, path: &Path) -> bool {
+        // `Path::starts_with` treats `..` as an ordinary component, so `root/../.bashrc` would
+        // pass the prefix test below; refuse anything that is not plain names under `/`.
+        if !path
+            .components()
+            .all(|c| matches!(c, Component::RootDir | Component::Normal(_)))
+        {
+            return false;
+        }
         let allowed = [
             &self.applications_dir,
             &self.desktop_dir,
@@ -161,5 +169,34 @@ mod tests {
         assert!(validate_app_id("../../.bashrc").is_err());
         assert!(validate_app_id(".hidden").is_err());
         assert!(validate_app_id("foo/bar").is_err());
+    }
+
+    #[test]
+    fn write_root_guard_rejects_traversal_components() {
+        let tmp = TempDir::new().expect("tempdir");
+        let roots = InstallRoots::from_home(tmp.path());
+        let apps = roots.applications_dir.to_string_lossy().into_owned();
+        // (path, allowed)
+        let rows: &[(String, bool)] = &[
+            (format!("{apps}/App/bin/app"), true),
+            // `Path` drops interior `.` while parsing, so it cannot change where the path points.
+            (format!("{apps}/./App"), true),
+            (format!("{apps}/../.bashrc"), false),
+            (format!("{apps}/App/../../.bashrc"), false),
+            ("./Applications/App".to_string(), false),
+            ("../Applications/App".to_string(), false),
+            (apps.clone(), false),
+            (
+                tmp.path().join(".bashrc").to_string_lossy().into_owned(),
+                false,
+            ),
+        ];
+        for (path, allowed) in rows {
+            assert_eq!(
+                roots.is_within_allowed_write_roots(Path::new(path)),
+                *allowed,
+                "{path}"
+            );
+        }
     }
 }
