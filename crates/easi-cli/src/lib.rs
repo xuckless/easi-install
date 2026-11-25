@@ -84,6 +84,9 @@ pub enum Command {
         /// Update every installed app that has a newer upstream release.
         #[arg(long)]
         all: bool,
+        /// Accept and record a changed (or removed) publisher signing key for this one app.
+        #[arg(long, conflicts_with = "all", requires = "app")]
+        retrust: bool,
     },
     /// Record the real StartupWMClass for an installed app (prevents duplicate dock icons).
     LearnWmclass {
@@ -176,9 +179,14 @@ pub fn run(cli: Cli) -> ExitCode {
             maybe_notify_update(&roots);
             run_check_updates_cmd(&roots)
         }
-        Some(Command::Update { app, all }) => {
+        Some(Command::Update { app, all, retrust }) => {
             maybe_notify_update(&roots);
-            run_update_cmd(&roots, app.as_deref(), all)
+            let trust = if retrust {
+                easi_core::upstream::PublisherTrust::Retrust
+            } else {
+                easi_core::upstream::PublisherTrust::Recorded
+            };
+            run_update_cmd(&roots, app.as_deref(), all, trust)
         }
         Some(Command::LearnWmclass { app, wm_class }) => {
             run_learn_wmclass_cmd(&roots, &app, wm_class.as_deref())
@@ -431,7 +439,12 @@ fn run_self_uninstall_cmd(roots: &InstallRoots, yes: bool) -> ExitCode {
     }
 }
 
-fn run_update_cmd(roots: &InstallRoots, app: Option<&str>, all: bool) -> ExitCode {
+fn run_update_cmd(
+    roots: &InstallRoots,
+    app: Option<&str>,
+    all: bool,
+    trust: easi_core::upstream::PublisherTrust,
+) -> ExitCode {
     let targets = if all {
         match reconcile_all(roots) {
             Ok(list) => list
@@ -469,7 +482,7 @@ fn run_update_cmd(roots: &InstallRoots, app: Option<&str>, all: bool) -> ExitCod
     let mut failed = false;
     for m in &targets {
         println!("Updating {}…", m.name);
-        match easi_core::upstream::download_and_update_app(roots, m) {
+        match easi_core::upstream::download_and_update_app(roots, m, trust) {
             Ok(easi_core::upstream::UpdateOutcome { summary, integrity }) => {
                 println!(
                     "Updated {} to {} ({}).",

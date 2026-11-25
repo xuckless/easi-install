@@ -95,7 +95,7 @@ easi records every file it writes, so uninstalling removes exactly those. The CL
 | `easi uninstall <app>` | Remove an app. `--purge-data` also removes its settings and cache |
 | `easi list` | List installed apps and their sizes |
 | `easi check-updates` | Check for new versions |
-| `easi update <app>` / `--all` | Update one app or all of them |
+| `easi update <app>` / `--all` | Update one app or all of them. `--retrust` accepts a changed publisher signing key for one app |
 | `easi set-source <app> [url]` | Set or auto-detect where updates come from |
 | `easi scan` | Find apps you installed by hand |
 | `easi adopt <app>` / `--all` | Manage those apps with easi and fix their icons and menu entries |

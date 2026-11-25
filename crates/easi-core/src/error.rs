@@ -42,6 +42,15 @@ pub enum EasiError {
         found: String,
     },
 
+    #[error(
+        "update blocked: publisher signing key changed for {app} (recorded {expected}, update has {found})"
+    )]
+    PublisherChanged {
+        app: String,
+        expected: String,
+        found: String,
+    },
+
     #[error("update blocked: untrusted download host {url} for {update_source}")]
     UntrustedDownloadHost { url: String, update_source: String },
 
@@ -79,6 +88,10 @@ struct ErrorHelp {
 }
 
 const ERROR_HINTS: &[ErrorHelp] = &[
+    ErrorHelp {
+        prefix: "update blocked: publisher signing key changed",
+        hint: "Nothing was installed. Confirm the new signing key with the developer, then accept and record it with `easi update <app> --retrust`.",
+    },
     ErrorHelp {
         prefix: "update blocked: untrusted download host",
         hint: "The update source sent the download to a host it is not pinned to, which can mean a hijacked release; nothing was installed. If the publisher really moved its downloads, re-record the source with `easi set-source <app> <url>`.",

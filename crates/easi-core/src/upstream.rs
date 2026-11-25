@@ -11,7 +11,7 @@ use tempfile::TempDir;
 
 use crate::appid::slug_and_version;
 use crate::error::EasiError;
-use crate::inspect::classify_package;
+use crate::inspect::{DETACHED_SIGNATURE_EXTS, classify_package};
 use crate::install::execute_install;
 use crate::manifest::{Manifest, list_manifests, resolve_installed, save_manifest};
 use crate::model::{AppKind, Classified, InstallSummary, UpdateSource};
@@ -335,7 +335,7 @@ pub fn import_apps_from_toml(
             created_files: vec![],
             created_dirs: vec![],
         };
-        match download_and_update_app(roots, &synthetic) {
+        match download_and_update_app(roots, &synthetic, PublisherTrust::Recorded) {
             Ok(UpdateOutcome { summary, .. }) => outcomes.push(ImportOutcome::Installed {
                 name: summary.name,
                 version: summary.version,
@@ -1091,6 +1091,54 @@ pub fn verify_integrity(
     Ok(Integrity::Verified(expected.algo))
 }
 
+impl ParsedRelease {
+    /// A detached signature published next to `asset`, so gpg can check the same signer as at
+    /// install; returns the URL and the extension `check_signature` looks for.
+    pub fn detached_signature_url(&self, asset: &ReleaseAsset) -> Option<(String, &'static str)> {
+        DETACHED_SIGNATURE_EXTS.iter().find_map(|ext| {
+            let want = format!("{}{ext}", asset.url);
+            self.assets
+                .iter()
+                .any(|a| a.url == want)
+                .then_some((want, *ext))
+        })
+    }
+}
+
+/// Whether an update may replace the publisher identity recorded at install.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublisherTrust {
+    /// Block when the update's verified signer differs from the recorded one.
+    Recorded,
+    /// The user explicitly accepted whatever signer (or none) the update arrives with.
+    Retrust,
+}
+
+/// Trust-on-first-use continuity: once a verified signer is recorded, updates must carry a valid
+/// signature from the same primary key unless the user explicitly re-trusts.
+pub fn check_publisher_continuity(
+    app: &str,
+    recorded: Option<&str>,
+    found: Option<&str>,
+    trust: PublisherTrust,
+) -> Result<(), EasiError> {
+    match (recorded, trust) {
+        (None, PublisherTrust::Recorded | PublisherTrust::Retrust)
+        | (Some(_), PublisherTrust::Retrust) => Ok(()),
+        (Some(expected), PublisherTrust::Recorded) => {
+            if found.is_some_and(|f| f.eq_ignore_ascii_case(expected)) {
+                Ok(())
+            } else {
+                Err(EasiError::PublisherChanged {
+                    app: app.to_string(),
+                    expected: expected.to_string(),
+                    found: found.unwrap_or("no valid signature").to_string(),
+                })
+            }
+        }
+    }
+}
+
 /// The outcome of a successful update, with how its bytes were verified.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateOutcome {
@@ -1232,10 +1280,20 @@ pub fn select_best_github_asset<'a>(
     best.map(|(_, a)| a)
 }
 
+/// What a source's release metadata says to fetch for an update.
+struct ResolvedDownload {
+    url: String,
+    version: Option<String>,
+    digest: Option<PublishedDigest>,
+    /// Detached signature URL and the extension `check_signature` looks for.
+    detached_sig: Option<(String, &'static str)>,
+}
+
 /// Download the latest release for `manifest` into a temp dir and run a transactional replace.
 pub fn download_and_update_app(
     roots: &InstallRoots,
     manifest: &Manifest,
+    trust: PublisherTrust,
 ) -> Result<UpdateOutcome, EasiError> {
     let source = manifest.update_source.as_ref().ok_or_else(|| {
         EasiError::Desktop(format!(
@@ -1244,12 +1302,9 @@ pub fn download_and_update_app(
         ))
     })?;
 
-    // Each source names its download URL, release version, and where its published digest lives.
-    let (download_url, known_latest_version, published_digest): (
-        String,
-        Option<String>,
-        Option<PublishedDigest>,
-    ) = match source {
+    // Each source names its download URL, release version, where its published digest lives,
+    // and any detached signature published next to the asset.
+    let resolved = match source {
         UpdateSource::GitHubRelease { owner, repo, .. } => {
             if !is_safe_repo_segment(owner) || !is_safe_repo_segment(repo) {
                 return Err(EasiError::Desktop(format!(
@@ -1274,11 +1329,12 @@ pub fn download_and_update_app(
                     std::env::consts::ARCH
                 ))
             })?;
-            (
-                asset.url.clone(),
-                Some(release.version.clone()),
-                asset.digest.clone(),
-            )
+            ResolvedDownload {
+                url: asset.url.clone(),
+                version: Some(release.version.clone()),
+                digest: asset.digest.clone(),
+                detached_sig: release.detached_signature_url(asset),
+            }
         }
         UpdateSource::ForgeRelease {
             host,
@@ -1312,11 +1368,12 @@ pub fn download_and_update_app(
                     manifest.name
                 ))
             })?;
-            (
-                asset.url.clone(),
-                Some(release.version.clone()),
-                asset.digest.clone(),
-            )
+            ResolvedDownload {
+                url: asset.url.clone(),
+                version: Some(release.version.clone()),
+                digest: asset.digest.clone(),
+                detached_sig: release.detached_signature_url(asset),
+            }
         }
         UpdateSource::ZsyncUrl { url } => {
             let header = curl_text(url, &["-fsSL", "--max-time", "10", "-r", "0-4095"])
@@ -1325,7 +1382,12 @@ pub fn download_and_update_app(
             let dl = resolve_zsync_download_url(url, &header).ok_or_else(|| {
                 EasiError::Desktop(format!("could not resolve download URL from {url}"))
             })?;
-            (dl, ver, parse_zsync_sha1(&header))
+            ResolvedDownload {
+                url: dl,
+                version: ver,
+                digest: parse_zsync_sha1(&header),
+                detached_sig: None,
+            }
         }
         UpdateSource::ElectronYaml { url } => {
             let yml_url = electron_yaml_url(url, std::env::consts::ARCH);
@@ -1348,7 +1410,12 @@ pub fn download_and_update_app(
             } else {
                 rel
             };
-            (dl, Some(release.version), release.digest)
+            ResolvedDownload {
+                url: dl,
+                version: Some(release.version),
+                digest: release.digest,
+                detached_sig: None,
+            }
         }
         UpdateSource::JetBrains { product_code } => {
             if !is_safe_product_code(product_code) {
@@ -1372,49 +1439,80 @@ pub fn download_and_update_app(
                     "no Linux download found on JetBrains CDN for {product_code}"
                 ))
             })?;
-            (dl, Some(ver), None)
+            ResolvedDownload {
+                url: dl,
+                version: Some(ver),
+                digest: None,
+                detached_sig: None,
+            }
         }
         UpdateSource::HttpRedirect { url } => {
             let final_url = resolve_redirect_url(url).unwrap_or_else(|_| url.clone());
             let fname = final_url.rsplit('/').next().unwrap_or(&final_url);
             let ver = slug_and_version(fname).1;
-            (final_url, ver, None)
+            ResolvedDownload {
+                url: final_url,
+                version: ver,
+                digest: None,
+                detached_sig: None,
+            }
         }
     };
 
     let tmp = TempDir::new()?;
-    let raw_fname = download_url
+    let raw_fname = resolved
+        .url
         .split('?')
         .next()
-        .unwrap_or(&download_url)
+        .unwrap_or(&resolved.url)
         .rsplit('/')
         .next()
         .filter(|s| !s.is_empty() && *s != "." && *s != "..")
         .unwrap_or("update.pkg");
     let dest = crate::roots::safe_join(tmp.path(), Path::new(raw_fname))?;
-    let untrusted = |url: &str| EasiError::UntrustedDownloadHost {
-        url: url.to_string(),
-        update_source: source.display_label(),
+    // Check the host before downloading and again on curl's final URL after redirects.
+    let pinned = |url: &str| -> Result<(), EasiError> {
+        if download_host_allowed(source, url) {
+            Ok(())
+        } else {
+            Err(EasiError::UntrustedDownloadHost {
+                url: url.to_string(),
+                update_source: source.display_label(),
+            })
+        }
     };
-    if !download_host_allowed(source, &download_url) {
-        return Err(untrusted(&download_url));
+    let fetch_pinned = |url: &str, to: &Path| -> Result<(), EasiError> {
+        pinned(url)?;
+        pinned(&download_to_file(url, to)?)
+    };
+    fetch_pinned(&resolved.url, &dest)?;
+    let integrity = verify_integrity(&dest, resolved.digest.as_ref())?;
+    if let Some((sig_url, ext)) = &resolved.detached_sig {
+        let mut sig_path = dest.clone().into_os_string();
+        sig_path.push(ext);
+        fetch_pinned(sig_url, Path::new(&sig_path))?;
     }
-    let final_url = download_to_file(&download_url, &dest)?;
-    if !download_host_allowed(source, &final_url) {
-        return Err(untrusted(&final_url));
-    }
-    let integrity = verify_integrity(&dest, published_digest.as_ref())?;
 
     let classified = classify_package(&dest, |_| Some(manifest.to_installed_app()))?;
-    let mut plan = match classified {
-        Classified::Ready { plan, .. } | Classified::Conflict { plan, .. } => plan,
-        Classified::NeedsChoice { draft, .. } => draft.into_plan(),
+    let (mut plan, signature) = match classified {
+        Classified::Ready { plan, trust } | Classified::Conflict { plan, trust, .. } => {
+            (plan, trust.signature)
+        }
+        Classified::NeedsChoice { draft, trust, .. } => (draft.into_plan(), trust.signature),
         Classified::NotAnApp { reason, .. } => {
             return Err(EasiError::Desktop(format!(
                 "downloaded asset is not an installable app: {reason}"
             )));
         }
     };
+    check_publisher_continuity(
+        &manifest.name,
+        manifest.signer_fingerprint.as_deref(),
+        signature.fingerprint(),
+        trust,
+    )?;
+    // Record the new signer (first update, same key, or an explicit re-trust).
+    plan.signer_fingerprint = signature.fingerprint().map(str::to_string);
     // Security guard: NEVER auto-execute an untrusted shell script during an automated update!
     if plan.format == crate::model::Format::ShellInstaller {
         return Err(EasiError::Desktop(
@@ -1425,8 +1523,8 @@ pub fn download_and_update_app(
     // Preserve original app_id and update_source across updates, and stamp the authoritative
     // upstream release version when the downloaded asset filename omits it (e.g. zed-linux-x86_64.tar.gz).
     plan.app_id = manifest.app_id.clone();
-    if known_latest_version.is_some() {
-        plan.version = known_latest_version;
+    if resolved.version.is_some() {
+        plan.version = resolved.version;
     }
     if plan.update_source.is_none() {
         plan.update_source = manifest.update_source.clone();
@@ -1622,6 +1720,106 @@ mod tests {
         ];
         for (name, header, want) in zsync_rows {
             assert_eq!(&parse_zsync_sha1(header), want, "{name}");
+        }
+    }
+
+    #[test]
+    fn publisher_continuity_blocks_key_changes_unless_retrusted() {
+        const OLD: &str = "0123456789ABCDEF0123456789ABCDEF01234567";
+        const NEW: &str = "FEDCBA9876543210FEDCBA9876543210FEDCBA98";
+        let lower_old = OLD.to_ascii_lowercase();
+        use PublisherTrust::{Recorded, Retrust};
+        type Row<'a> = (
+            &'a str,
+            Option<&'a str>,
+            Option<&'a str>,
+            PublisherTrust,
+            bool,
+        );
+        let rows: &[Row] = &[
+            ("never signed, unsigned update", None, None, Recorded, true),
+            (
+                "never signed, first signed update",
+                None,
+                Some(NEW),
+                Recorded,
+                true,
+            ),
+            ("same key", Some(OLD), Some(OLD), Recorded, true),
+            (
+                "same key, different case",
+                Some(OLD),
+                Some(&lower_old),
+                Recorded,
+                true,
+            ),
+            ("key changed", Some(OLD), Some(NEW), Recorded, false),
+            (
+                "signed app arrives unsigned",
+                Some(OLD),
+                None,
+                Recorded,
+                false,
+            ),
+            (
+                "key changed, re-trusted",
+                Some(OLD),
+                Some(NEW),
+                Retrust,
+                true,
+            ),
+            ("unsigned, re-trusted", Some(OLD), None, Retrust, true),
+            ("never signed, re-trusted", None, None, Retrust, true),
+        ];
+        for (name, recorded, found, trust, ok) in rows {
+            let got = check_publisher_continuity("App", *recorded, *found, *trust);
+            match (got, ok) {
+                (Ok(()), true) => {}
+                (
+                    Err(EasiError::PublisherChanged {
+                        expected, found: f, ..
+                    }),
+                    false,
+                ) => {
+                    assert_eq!(Some(expected.as_str()), *recorded, "{name}");
+                    assert_eq!(f, found.unwrap_or("no valid signature"), "{name}");
+                }
+                (got, _) => panic!("{name}: unexpected {got:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn detached_signature_is_found_next_to_the_asset() {
+        let asset = |url: &str| ReleaseAsset {
+            url: url.into(),
+            digest: None,
+        };
+        let release = |urls: &[&str]| ParsedRelease {
+            version: "1".into(),
+            assets: urls.iter().map(|u| asset(u)).collect(),
+        };
+        let app = "https://github.com/o/r/releases/download/v1/App.AppImage";
+        type Row = (&'static str, ParsedRelease, Option<(String, &'static str)>);
+        let rows: &[Row] = &[
+            (
+                ".sig preferred",
+                release(&[app, &format!("{app}.asc"), &format!("{app}.sig")]),
+                Some((format!("{app}.sig"), ".sig")),
+            ),
+            (
+                ".asc",
+                release(&[app, &format!("{app}.asc")]),
+                Some((format!("{app}.asc"), ".asc")),
+            ),
+            (
+                "other asset's signature ignored",
+                release(&[app, "https://github.com/o/r/releases/download/v1/Other.sig"]),
+                None,
+            ),
+        ];
+        for (name, rel, want) in rows {
+            assert_eq!(&rel.detached_signature_url(&asset(app)), want, "{name}");
         }
     }
 

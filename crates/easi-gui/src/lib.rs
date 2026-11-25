@@ -671,8 +671,13 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
             let s = Arc::clone(&s);
             let r = Arc::clone(&r);
             std::thread::spawn(move || {
-                let outcome = easi_core::manifest::resolve_installed(&r.roots, &id)
-                    .and_then(|m| easi_core::upstream::download_and_update_app(&r.roots, &m));
+                let outcome = easi_core::manifest::resolve_installed(&r.roots, &id).and_then(|m| {
+                    easi_core::upstream::download_and_update_app(
+                        &r.roots,
+                        &m,
+                        easi_core::upstream::PublisherTrust::Recorded,
+                    )
+                });
                 let _ = slint::invoke_from_event_loop(move || {
                     match outcome {
                         Ok(easi_core::upstream::UpdateOutcome { summary, integrity }) => {
@@ -926,7 +931,11 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                 for m in &manifests {
                     match easi_core::upstream::check_app_update(m) {
                         easi_core::upstream::AppUpdateStatus::UpdateAvailable { .. } => {
-                            match easi_core::upstream::download_and_update_app(&r.roots, m) {
+                            match easi_core::upstream::download_and_update_app(
+                                &r.roots,
+                                m,
+                                easi_core::upstream::PublisherTrust::Recorded,
+                            ) {
                                 Ok(easi_core::upstream::UpdateOutcome { summary, .. }) => {
                                     let ver = summary.version.as_deref().unwrap_or("latest");
                                     status_map.insert(

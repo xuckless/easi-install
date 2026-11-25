@@ -497,12 +497,15 @@ pub fn build_trust_summary(
     })
 }
 
+/// Detached signature suffixes checked next to a package, in preference order.
+pub const DETACHED_SIGNATURE_EXTS: &[&str] = &[".sig", ".asc"];
+
 fn check_signature(
     path: &Path,
     has_appimage_sig_section: bool,
     appimage_sig_section: Option<&(u64, u64, Vec<u8>)>,
 ) -> SignatureStatus {
-    for ext in [".sig", ".asc"] {
+    for ext in DETACHED_SIGNATURE_EXTS {
         let mut sig_os = path.as_os_str().to_os_string();
         sig_os.push(ext);
         let sig_path = std::path::PathBuf::from(sig_os);
