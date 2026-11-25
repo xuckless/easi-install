@@ -10,6 +10,7 @@ GitHub Releases; this file tracks only locked decisions and remaining work.
 | Install root | Per-user `~/Applications/<App>/`, `~/.local/share/applications`, `~/.local/share/icons/hicolor`, `~/.local/bin`, `~/.local/share/easi/`, journal in `$XDG_STATE_HOME/easi/`. No root required. |
 | AppImage | Kept as single file in install root; `.desktop` + icon read via pure-Rust SquashFS (never executed during inspection). |
 | Lifecycle | Transactional manifest of every written file + atomic replace rollback + self-updated app reconciliation. |
+| Durability | Persistent files are replaced atomically (temp + fsync + rename). Mutating operations hold an exclusive lock on `~/.local/share/easi/.lock` and are journaled to `$XDG_STATE_HOME/easi/journal.log`. An unreadable `config.toml` is kept as `config.toml.corrupt-<n>` and falls back to update checks off; unreadable manifests are reported, never deleted. |
 | Missing metadata | Score candidates → clear winner: DragStage + confirm. Ambiguous: step wizard (executable / icon / name). |
 | Terminal apps | Symlink into `~/.local/bin` only (no `.desktop`); offer PATH update interactively or via `--add-to-path`. |
 | File association | `easi` is default double-click handler for AppImages only; `.tar.*`/`.zip`/`.7z`/`.jar`/`.sh` are registered under Right-Click → Open With by default (opt-in `--claim-archives`). Previous defaults remembered and restorable; non-app archives hand off silently and close `easi`. |
