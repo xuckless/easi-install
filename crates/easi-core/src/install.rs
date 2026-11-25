@@ -456,6 +456,7 @@ where
                     developer: plan.developer.clone(),
                     origin_url: plan.origin_url.clone(),
                     signature_summary: plan.signature_summary.clone(),
+                    signer_fingerprint: plan.signer_fingerprint.clone(),
                     update_source: plan.update_source.clone(),
                     adopted: false,
                     created_files: tx.created_files.clone(),
@@ -1715,6 +1716,7 @@ Exec=/bin/sh -c 'pwned'
             developer: None,
             origin_url: None,
             signature_summary: None,
+            signer_fingerprint: None,
             update_source: None,
             planned_writes: vec![],
         };

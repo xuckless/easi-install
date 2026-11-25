@@ -23,6 +23,9 @@ pub struct Manifest {
     pub origin_url: Option<String>,
     #[serde(default)]
     pub signature_summary: Option<String>,
+    /// Primary-key fingerprint of the verified signer at install/last trusted update.
+    #[serde(default)]
+    pub signer_fingerprint: Option<String>,
     #[serde(default)]
     pub update_source: Option<UpdateSource>,
     #[serde(default)]
@@ -212,4 +215,26 @@ pub fn delete_manifest(roots: &InstallRoots, app_id: &str) -> Result<(), EasiErr
         fs::remove_file(path)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifests_without_trust_fields_still_load() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("easi.legacy.toml");
+        fs::write(
+            &path,
+            "app_id = \"easi.legacy\"\nname = \"Legacy\"\nsource_filename = \"l.AppImage\"\n\
+             kind = \"Gui\"\ninstall_dir = \"/home/u/Applications/Legacy\"\n\
+             created_files = []\ncreated_dirs = []\n",
+        )
+        .unwrap();
+        let m = load_manifest(&path).unwrap();
+        assert_eq!(m.signer_fingerprint, None);
+        assert_eq!(m.update_source, None);
+    }
 }

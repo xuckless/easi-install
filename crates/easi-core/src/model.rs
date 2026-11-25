@@ -29,10 +29,37 @@ pub enum AppKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SignatureStatus {
-    Verified(String),
+    /// Cryptographically valid signature; `fingerprint` is the signer's primary key, shown to the
+    /// user because gpg accepts any key in the local keyring regardless of who owns it.
+    Verified {
+        detail: String,
+        fingerprint: String,
+    },
     PresentUnverified(String),
     Invalid(String),
     None,
+}
+
+impl SignatureStatus {
+    pub fn fingerprint(&self) -> Option<&str> {
+        match self {
+            Self::Verified { fingerprint, .. } => Some(fingerprint),
+            Self::PresentUnverified(_) | Self::Invalid(_) | Self::None => None,
+        }
+    }
+
+    /// One-line summary shared by the GUI trust panel and the recorded manifest.
+    pub fn summary(&self) -> String {
+        match self {
+            Self::Verified {
+                detail,
+                fingerprint,
+            } => format!("Verified ({detail}; signer {fingerprint})"),
+            Self::PresentUnverified(m) => format!("Unverified ({m})"),
+            Self::Invalid(m) => format!("Invalid ({m})"),
+            Self::None => "None".into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,6 +145,8 @@ pub struct InstallPlan {
     pub developer: Option<String>,
     pub origin_url: Option<String>,
     pub signature_summary: Option<String>,
+    /// Verified signer fingerprint, recorded so updates can detect a publisher key change.
+    pub signer_fingerprint: Option<String>,
     pub update_source: Option<UpdateSource>,
     pub planned_writes: Vec<String>,
 }
@@ -161,6 +190,7 @@ impl ChoiceDraft {
             developer: None,
             origin_url: None,
             signature_summary: None,
+            signer_fingerprint: None,
             update_source: None,
             planned_writes: vec![],
         }

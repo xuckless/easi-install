@@ -1120,7 +1120,10 @@ fn print_trust(trust: &TrustSummary) {
         println!("  Origin: {url}");
     }
     match &trust.signature {
-        SignatureStatus::Verified(m) => println!("  Sig:    OK ({m})"),
+        SignatureStatus::Verified {
+            detail,
+            fingerprint,
+        } => println!("  Sig:    OK ({detail})\n  Signer: {fingerprint}"),
         SignatureStatus::PresentUnverified(m) => println!("  Sig:    Unverified ({m})"),
         SignatureStatus::Invalid(m) => println!("  Sig:    INVALID ({m})"),
         SignatureStatus::None => println!("  Sig:    None"),

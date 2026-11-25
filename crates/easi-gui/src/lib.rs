@@ -14,8 +14,8 @@ use std::sync::{Arc, Mutex};
 use easi_core::roots::InstallRoots;
 use easi_core::runner::EffectRunner;
 use easi_core::{
-    Action, AppKind, ConfirmPrompt, DoneOutcome, Effect, FilterKind, ManagerPage, ManagerUi,
-    SignatureStatus, State, Store, TrustSummary, UiAction, UpdateActivity, WizardStep,
+    Action, AppKind, ConfirmPrompt, DoneOutcome, Effect, FilterKind, ManagerPage, ManagerUi, State,
+    Store, TrustSummary, UiAction, UpdateActivity, WizardStep,
 };
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
 
@@ -1290,13 +1290,7 @@ fn project_trust(win: &ui::AppWindow, trust: &TrustSummary) {
     let short_sha: String = trust.sha256.chars().take(16).collect();
     win.set_trust_sha256(format!("{short_sha}…").into());
     win.set_trust_origin(trust.origin_url.clone().unwrap_or_default().into());
-    let sig = match &trust.signature {
-        SignatureStatus::Verified(m) => format!("Verified ({m})"),
-        SignatureStatus::PresentUnverified(m) => format!("Unverified ({m})"),
-        SignatureStatus::Invalid(m) => format!("Invalid ({m})"),
-        SignatureStatus::None => "None".into(),
-    };
-    win.set_trust_signature(sig.into());
+    win.set_trust_signature(trust.signature.summary().into());
     win.set_trust_warnings(trust.warnings.join("; ").into());
 }
 

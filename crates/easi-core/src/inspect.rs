@@ -507,26 +507,7 @@ fn check_signature(
         sig_os.push(ext);
         let sig_path = std::path::PathBuf::from(sig_os);
         if sig_path.exists() {
-            match Command::new("gpg")
-                .args(["--batch", "--verify"])
-                .arg(&sig_path)
-                .arg(path)
-                .output()
-            {
-                Ok(out) if out.status.success() => {
-                    return SignatureStatus::Verified(format!("detached {ext} verified via gpg"));
-                }
-                Ok(_) => {
-                    return SignatureStatus::Invalid(format!(
-                        "detached {ext} failed gpg verification (key missing or bad sig)"
-                    ));
-                }
-                Err(_) => {
-                    return SignatureStatus::PresentUnverified(format!(
-                        "detached {ext} present (gpg unavailable)"
-                    ));
-                }
-            }
+            return gpg_verify(&sig_path, path, &format!("detached {ext}"));
         }
     }
 
@@ -595,31 +576,76 @@ fn verify_appimage_embedded_sig(
         return SignatureStatus::PresentUnverified("AppImage embedded .sha256_sig present".into());
     }
 
+    gpg_verify(&sig_path, &digest_path, "AppImage embedded .sha256_sig")
+}
+
+/// Outcome of one `gpg --verify` run, derived only from its machine-readable status lines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GpgVerdict {
+    /// Cryptographically valid; carries the primary-key fingerprint (stable publisher identity).
+    Valid(String),
+    NoPublicKey,
+    Rejected(&'static str),
+}
+
+/// gpg status keywords that override any `VALIDSIG`, in precedence order. gpg exits 0 for a
+/// valid signature from *any* key in the keyring and still prints `VALIDSIG` next to
+/// `EXPKEYSIG`/`REVKEYSIG`, so exit status alone must never mean "verified".
+const GPG_STATUS_OVERRIDES: &[(&str, GpgVerdict)] = &[
+    ("BADSIG", GpgVerdict::Rejected("bad signature")),
+    ("REVKEYSIG", GpgVerdict::Rejected("signing key revoked")),
+    ("EXPKEYSIG", GpgVerdict::Rejected("signing key expired")),
+    ("EXPSIG", GpgVerdict::Rejected("signature expired")),
+    ("NO_PUBKEY", GpgVerdict::NoPublicKey),
+    (
+        "ERRSIG",
+        GpgVerdict::Rejected("signature could not be checked"),
+    ),
+];
+
+/// Parse `gpg --status-fd 1` output. `VALIDSIG <fpr> <date> <ts> <exp> <ver> <res> <pk> <hash>
+/// <class> [<primary-fpr>]`: prefer the primary fingerprint so subkey rotation keeps identity.
+fn parse_gpg_status(status: &str) -> GpgVerdict {
+    let lines: Vec<Vec<&str>> = status
+        .lines()
+        .filter_map(|l| l.strip_prefix("[GNUPG:] "))
+        .map(|l| l.split_whitespace().collect())
+        .collect();
+    for (keyword, verdict) in GPG_STATUS_OVERRIDES {
+        if lines.iter().any(|f| f.first() == Some(keyword)) {
+            return verdict.clone();
+        }
+    }
+    lines
+        .iter()
+        .find(|f| f.first() == Some(&"VALIDSIG"))
+        .and_then(|f| f.get(10).or_else(|| f.get(1)))
+        .filter(|fpr| fpr.len() >= 32 && fpr.chars().all(|c| c.is_ascii_hexdigit()))
+        .map_or(GpgVerdict::Rejected("no valid signature"), |fpr| {
+            GpgVerdict::Valid(fpr.to_ascii_uppercase())
+        })
+}
+
+fn gpg_verify(sig_path: &Path, data_path: &Path, label: &str) -> SignatureStatus {
     match Command::new("gpg")
-        .args(["--batch", "--verify"])
-        .arg(&sig_path)
-        .arg(&digest_path)
+        .args(["--batch", "--status-fd", "1", "--verify"])
+        .arg(sig_path)
+        .arg(data_path)
         .output()
     {
-        Ok(out) if out.status.success() => {
-            SignatureStatus::Verified("AppImage embedded .sha256_sig verified via gpg".into())
-        }
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            if stderr.contains("No public key") || stderr.contains("public key not found") {
-                SignatureStatus::PresentUnverified(
-                    "AppImage embedded .sha256_sig present (signing key not in local gpg keyring)"
-                        .into(),
-                )
-            } else {
-                SignatureStatus::Invalid(
-                    "AppImage embedded .sha256_sig failed gpg verification".into(),
-                )
+        Ok(out) => match parse_gpg_status(&String::from_utf8_lossy(&out.stdout)) {
+            GpgVerdict::Valid(fingerprint) => SignatureStatus::Verified {
+                detail: format!("{label} verified via gpg"),
+                fingerprint,
+            },
+            GpgVerdict::NoPublicKey => SignatureStatus::PresentUnverified(format!(
+                "{label} present (signing key not in local gpg keyring)"
+            )),
+            GpgVerdict::Rejected(reason) => {
+                SignatureStatus::Invalid(format!("{label} failed gpg verification ({reason})"))
             }
-        }
-        Err(_) => SignatureStatus::PresentUnverified(
-            "AppImage embedded .sha256_sig present (gpg unavailable)".into(),
-        ),
+        },
+        Err(_) => SignatureStatus::PresentUnverified(format!("{label} present (gpg unavailable)")),
     }
 }
 
@@ -860,13 +886,6 @@ where
                 | crate::model::UpdateSource::HttpRedirect { .. } => None,
             })
         });
-    let signature_summary = match &trust.signature {
-        SignatureStatus::Verified(m) => Some(format!("Verified ({m})")),
-        SignatureStatus::PresentUnverified(m) => Some(format!("Unverified ({m})")),
-        SignatureStatus::Invalid(m) => Some(format!("Invalid ({m})")),
-        SignatureStatus::None => Some("None".into()),
-    };
-
     let plan = InstallPlan {
         source_path: path.to_path_buf(),
         format,
@@ -882,7 +901,8 @@ where
         startup_wm_class,
         developer,
         origin_url: trust.origin_url.clone(),
-        signature_summary,
+        signature_summary: Some(trust.signature.summary()),
+        signer_fingerprint: trust.signature.fingerprint().map(str::to_string),
         update_source,
         planned_writes,
     };
@@ -926,6 +946,65 @@ mod tests {
         let enc = builder.into_inner().expect("finish tar");
         enc.finish().expect("finish gzip");
         path
+    }
+
+    #[test]
+    fn gpg_status_lines_decide_verdict_not_exit_code() {
+        const FPR: &str = "0123456789ABCDEF0123456789ABCDEF01234567";
+        const SUBKEY: &str = "89ABCDEF0123456789ABCDEF0123456789ABCDEF";
+        let validsig_primary =
+            format!("[GNUPG:] VALIDSIG {SUBKEY} 2026-01-01 1767225600 0 4 0 1 10 00 {FPR}\n");
+        let validsig_bare = format!("[GNUPG:] VALIDSIG {}\n", FPR.to_ascii_lowercase());
+        let rows: &[(&str, String, GpgVerdict)] = &[
+            (
+                "valid subkey sig -> primary fingerprint",
+                format!("[GNUPG:] GOODSIG ABCD Dev\n{validsig_primary}[GNUPG:] TRUST_UNDEFINED\n"),
+                GpgVerdict::Valid(FPR.into()),
+            ),
+            (
+                "valid sig without primary field -> uppercased fingerprint",
+                validsig_bare,
+                GpgVerdict::Valid(FPR.into()),
+            ),
+            (
+                "expired key still prints VALIDSIG",
+                format!("[GNUPG:] EXPKEYSIG ABCD Dev\n{validsig_primary}"),
+                GpgVerdict::Rejected("signing key expired"),
+            ),
+            (
+                "revoked key",
+                format!("[GNUPG:] REVKEYSIG ABCD Dev\n{validsig_primary}"),
+                GpgVerdict::Rejected("signing key revoked"),
+            ),
+            (
+                "bad signature",
+                "[GNUPG:] BADSIG ABCD Dev\n".into(),
+                GpgVerdict::Rejected("bad signature"),
+            ),
+            (
+                "missing public key",
+                "[GNUPG:] ERRSIG ABCD 1 10 00 1767225600 9 -\n[GNUPG:] NO_PUBKEY ABCD\n".into(),
+                GpgVerdict::NoPublicKey,
+            ),
+            (
+                "error without missing key",
+                "[GNUPG:] ERRSIG ABCD 1 10 00 1767225600 4 -\n".into(),
+                GpgVerdict::Rejected("signature could not be checked"),
+            ),
+            (
+                "no status lines",
+                "gpg: Good signature from \"Dev\"\n".into(),
+                GpgVerdict::Rejected("no valid signature"),
+            ),
+            (
+                "malformed fingerprint",
+                "[GNUPG:] VALIDSIG nothex\n".into(),
+                GpgVerdict::Rejected("no valid signature"),
+            ),
+        ];
+        for (name, status, want) in rows {
+            assert_eq!(&parse_gpg_status(status), want, "{name}");
+        }
     }
 
     #[test]
