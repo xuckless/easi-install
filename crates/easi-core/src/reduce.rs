@@ -697,6 +697,7 @@ mod tests {
             signature: SignatureStatus::None,
             warnings: vec![],
             script_report: None,
+            sandbox: crate::sandbox::SandboxStatus::NotEnforced,
         }
     }
 

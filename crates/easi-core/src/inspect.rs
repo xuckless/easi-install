@@ -12,12 +12,13 @@ use crate::appid::{
     IdInputs, display_name_from_raw, display_name_from_slug, guess_startup_wm_class,
     resolve_app_id, slug_and_version,
 };
-use crate::detect::{ArchiveEntry, PackageContents, detect_file_format, inspect_contents};
+use crate::detect::{ArchiveEntry, PackageContents, detect_file_format};
 use crate::error::EasiError;
 use crate::model::{
     AppKind, Candidate, ChoiceDraft, Classified, Format, InstallPlan, InstalledApp,
     SignatureStatus, TrustSummary, WizardStep,
 };
+use crate::sandbox::{Isolation, SandboxStatus, inspect_package};
 
 struct ScoreRule {
     needle: &'static str,
@@ -367,6 +368,7 @@ pub fn build_trust_summary(
     path: &Path,
     format: Format,
     contents: &PackageContents,
+    sandbox: SandboxStatus,
 ) -> Result<TrustSummary, EasiError> {
     let meta = std::fs::metadata(path)?;
     let size_bytes = meta.len();
@@ -494,6 +496,7 @@ pub fn build_trust_summary(
         signature,
         warnings,
         script_report: contents.script_report.clone(),
+        sandbox,
     })
 }
 
@@ -659,14 +662,20 @@ pub fn has_path_escape(rel_path: &str) -> bool {
     rel_path.split('/').any(|part| part == "..")
 }
 
-/// Full read-only inspection pipeline: detect → list → trust → score → classify.
-pub fn classify_package<F>(path: &Path, find_existing: F) -> Result<Classified, EasiError>
+/// Full read-only inspection pipeline: detect → list (sandboxed helper) → trust → score → classify.
+/// Only the magic-byte detection and the signature/digest checks (which need `gpg` and the
+/// user's keyring) run in this process; parsing package internals goes through `isolation`.
+pub fn classify_package<F>(
+    path: &Path,
+    isolation: &Isolation,
+    find_existing: F,
+) -> Result<Classified, EasiError>
 where
     F: Fn(&str) -> Option<InstalledApp>,
 {
     let format = detect_file_format(path)?;
-    let contents = inspect_contents(path, format)?;
-    let trust = build_trust_summary(path, format, &contents)?;
+    let (contents, sandbox) = inspect_package(isolation, path, format)?;
+    let trust = build_trust_summary(path, format, &contents, sandbox)?;
 
     // Guard against Arch Linux pacman packages (`.pkg.tar.zst` / `.PKGINFO`).
     let is_distro_pkg = contents.entries.iter().any(|e| {
@@ -1029,7 +1038,8 @@ mod tests {
                 ("CoolApp/icons/256x256/coolapp.png", b"\x89PNG\r\n", 0o644),
             ],
         );
-        let res = classify_package(&gui_pkg, |_| None).expect("classify gui");
+        let res =
+            classify_package(&gui_pkg, &Isolation::InProcess, |_| None).expect("classify gui");
         match res {
             Classified::Ready { plan, trust } => {
                 assert_eq!(plan.kind, AppKind::Gui);
@@ -1051,7 +1061,8 @@ mod tests {
                 ("ripgrep-14.1.0/README.md", b"hello", 0o644),
             ],
         );
-        let res = classify_package(&cli_pkg, |_| None).expect("classify cli");
+        let res =
+            classify_package(&cli_pkg, &Isolation::InProcess, |_| None).expect("classify cli");
         match res {
             Classified::Ready { plan, .. } => {
                 assert_eq!(plan.kind, AppKind::Terminal);
@@ -1071,7 +1082,8 @@ mod tests {
                 ("suite/bin/beta", b"\x7fELF\x02\x01\x01\x00", 0o755),
             ],
         );
-        let res = classify_package(&amb_pkg, |_| None).expect("classify ambiguous");
+        let res = classify_package(&amb_pkg, &Isolation::InProcess, |_| None)
+            .expect("classify ambiguous");
         assert!(matches!(
             res,
             Classified::NeedsChoice {
@@ -1089,7 +1101,8 @@ mod tests {
                 ("myproject/main.c", b"int main() { return 0; }", 0o644),
             ],
         );
-        let res = classify_package(&src_pkg, |_| None).expect("classify src");
+        let res =
+            classify_package(&src_pkg, &Isolation::InProcess, |_| None).expect("classify src");
         assert!(matches!(res, Classified::NotAnApp { .. }));
 
         // 5. Zip with path escape rejected
@@ -1102,7 +1115,8 @@ mod tests {
             z.write_all(b"nope").expect("write");
             z.finish().expect("finish zip");
         }
-        let err = classify_package(&bad_zip, |_| None).expect_err("must reject path escape");
+        let err = classify_package(&bad_zip, &Isolation::InProcess, |_| None)
+            .expect_err("must reject path escape");
         assert!(matches!(err, EasiError::PathEscape(_)));
 
         // 6. CLI SDK with bundled runtime ELF + vendored doc PNGs -> Terminal, top-level bin/ wins
@@ -1127,7 +1141,7 @@ mod tests {
                 ),
             ],
         );
-        match classify_package(&sdk_pkg, |_| None).expect("classify sdk") {
+        match classify_package(&sdk_pkg, &Isolation::InProcess, |_| None).expect("classify sdk") {
             Classified::Ready { plan, .. } => {
                 assert_eq!(plan.kind, AppKind::Terminal);
                 assert_eq!(plan.main_exec, "google-cloud-sdk/bin/gcloud");

@@ -16,6 +16,7 @@ use crate::install::execute_install;
 use crate::manifest::{Manifest, list_manifests, resolve_installed, save_manifest};
 use crate::model::{AppKind, Classified, InstallSummary, SignatureStatus, UpdateSource};
 use crate::roots::InstallRoots;
+use crate::sandbox::Isolation;
 use crate::self_update::{extract_json_string_field, file_digest_hex, is_newer_version};
 
 enum KnownSourceKind {
@@ -281,6 +282,7 @@ pub fn export_apps_toml(roots: &InstallRoots) -> Result<String, EasiError> {
 /// Reinstall apps from an exported TOML file using their recorded `UpdateSource`.
 pub fn import_apps_from_toml(
     roots: &InstallRoots,
+    isolation: &Isolation,
     toml_text: &str,
 ) -> Result<Vec<ImportOutcome>, EasiError> {
     let parsed: AppExportFile =
@@ -336,7 +338,7 @@ pub fn import_apps_from_toml(
             created_files: vec![],
             created_dirs: vec![],
         };
-        match download_and_update_app(roots, &synthetic, PublisherTrust::Recorded) {
+        match download_and_update_app(roots, isolation, &synthetic, PublisherTrust::Recorded) {
             Ok(UpdateOutcome { summary, .. }) => outcomes.push(ImportOutcome::Installed {
                 name: summary.name,
                 version: summary.version,
@@ -1308,6 +1310,7 @@ struct ResolvedDownload {
 /// Download the latest release for `manifest` into a temp dir and run a transactional replace.
 pub fn download_and_update_app(
     roots: &InstallRoots,
+    isolation: &Isolation,
     manifest: &Manifest,
     trust: PublisherTrust,
 ) -> Result<UpdateOutcome, EasiError> {
@@ -1503,7 +1506,7 @@ pub fn download_and_update_app(
         fetch_pinned(sig_url, Path::new(&sig_path))?;
     }
 
-    let classified = classify_package(&dest, |_| Some(manifest.to_installed_app()))?;
+    let classified = classify_package(&dest, isolation, |_| Some(manifest.to_installed_app()))?;
     let (mut plan, signature) = match classified {
         Classified::Ready { plan, trust } | Classified::Conflict { plan, trust, .. } => {
             (plan, trust.signature)
@@ -1541,7 +1544,14 @@ pub fn download_and_update_app(
         plan.update_source = manifest.update_source.clone();
     }
 
-    let summary = execute_install(roots, &plan, true, &AtomicBool::new(false), |_, _| {})?;
+    let summary = execute_install(
+        roots,
+        isolation,
+        &plan,
+        true,
+        &AtomicBool::new(false),
+        |_, _| {},
+    )?;
     crate::desktop::notify(
         "App updated",
         &format!(

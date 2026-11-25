@@ -10,20 +10,23 @@ use crate::install::{execute_install, move_to_trash, uninstall_app, uninstall_ap
 use crate::manifest::find_manifest_by_id;
 use crate::reconcile::reconcile_all;
 use crate::roots::InstallRoots;
+use crate::sandbox::Isolation;
 use crate::state::{Action, Effect};
 
 pub type HandoffFn = fn(&InstallRoots, &std::path::Path) -> Result<(), crate::EasiError>;
 
 pub struct EffectRunner {
     pub roots: InstallRoots,
+    pub isolation: Isolation,
     pub cancel_flag: Arc<AtomicBool>,
     pub handoff_fn: HandoffFn,
 }
 
 impl EffectRunner {
-    pub fn new(roots: InstallRoots) -> Self {
+    pub fn new(roots: InstallRoots, isolation: Isolation) -> Self {
         Self {
             roots,
+            isolation,
             cancel_flag: Arc::new(AtomicBool::new(false)),
             handoff_fn: crate::desktop::handoff_non_app,
         }
@@ -66,7 +69,7 @@ impl EffectRunner {
                 }
             }
             Effect::Inspect { path } => {
-                match classify_package(&path, |id| {
+                match classify_package(&path, &self.isolation, |id| {
                     find_manifest_by_id(&self.roots, id).map(|m| m.to_installed_app())
                 }) {
                     Ok(classified) => emit(Action::Inspected(Box::new(classified))),
@@ -84,6 +87,7 @@ impl EffectRunner {
                 self.cancel_flag.store(false, Ordering::Relaxed);
                 match execute_install(
                     &self.roots,
+                    &self.isolation,
                     &plan,
                     replace_existing,
                     &self.cancel_flag,

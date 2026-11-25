@@ -11,6 +11,7 @@ use easi_core::manifest::resolve_installed;
 use easi_core::reconcile::{probe_active_wm_class, reconcile_all, set_startup_wm_class};
 use easi_core::roots::InstallRoots;
 use easi_core::runner::EffectRunner;
+use easi_core::sandbox::{Isolation, resolve_current_exe};
 use easi_core::{
     Action, AppKind, DoneOutcome, SignatureStatus, State, Store, TrustSummary, WizardStep,
     format_user_error,
@@ -144,6 +145,8 @@ pub fn run(cli: Cli) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // Untrusted package parsing and installer scripts run in re-exec'd sandboxed helpers.
+    let isolation = Isolation::Helper(resolve_current_exe(&roots));
 
     if cli.setup {
         return run_setup_cmd(&roots, cli.claim_archives);
@@ -162,14 +165,22 @@ pub fn run(cli: Cli) -> ExitCode {
         }) => {
             maybe_notify_update(&roots);
             if dry_run {
-                run_inspect_cmd(&roots, path)
+                run_inspect_cmd(&roots, &isolation, path)
             } else {
-                run_install_cmd(&roots, path, cli.yes, trash, add_to_path, allow_script)
+                run_install_cmd(
+                    &roots,
+                    &isolation,
+                    path,
+                    cli.yes,
+                    trash,
+                    add_to_path,
+                    allow_script,
+                )
             }
         }
-        Some(Command::Inspect { path }) => run_inspect_cmd(&roots, path),
+        Some(Command::Inspect { path }) => run_inspect_cmd(&roots, &isolation, path),
         Some(Command::Export { file }) => run_export_cmd(&roots, file.as_deref()),
-        Some(Command::Import { file }) => run_import_cmd(&roots, &file),
+        Some(Command::Import { file }) => run_import_cmd(&roots, &isolation, &file),
         Some(Command::Uninstall { app, purge_data }) => {
             maybe_notify_update(&roots);
             run_uninstall_cmd(&roots, &app, purge_data, cli.yes)
@@ -189,16 +200,16 @@ pub fn run(cli: Cli) -> ExitCode {
             } else {
                 easi_core::upstream::PublisherTrust::Recorded
             };
-            run_update_cmd(&roots, app.as_deref(), all, trust)
+            run_update_cmd(&roots, &isolation, app.as_deref(), all, trust)
         }
         Some(Command::LearnWmclass { app, wm_class }) => {
             run_learn_wmclass_cmd(&roots, &app, wm_class.as_deref())
         }
         Some(Command::Scan) => run_scan_cmd(&roots),
         Some(Command::Adopt { app, all, no_fix }) => {
-            run_adopt_cmd(&roots, app.as_deref(), all, !no_fix)
+            run_adopt_cmd(&roots, &isolation, app.as_deref(), all, !no_fix)
         }
-        Some(Command::Repair { app }) => run_repair_cmd(&roots, &app),
+        Some(Command::Repair { app }) => run_repair_cmd(&roots, &isolation, &app),
         Some(Command::Organize { app }) => run_organize_cmd(&roots, &app),
         Some(Command::Forget { app }) => run_forget_cmd(&roots, &app),
         Some(Command::SetSource { app, url, clear }) => {
@@ -444,6 +455,7 @@ fn run_self_uninstall_cmd(roots: &InstallRoots, yes: bool) -> ExitCode {
 
 fn run_update_cmd(
     roots: &InstallRoots,
+    isolation: &Isolation,
     app: Option<&str>,
     all: bool,
     trust: easi_core::upstream::PublisherTrust,
@@ -485,7 +497,7 @@ fn run_update_cmd(
     let mut failed = false;
     for m in &targets {
         println!("Updating {}…", m.name);
-        match easi_core::upstream::download_and_update_app(roots, m, trust) {
+        match easi_core::upstream::download_and_update_app(roots, isolation, m, trust) {
             Ok(easi_core::upstream::UpdateOutcome { summary, integrity }) => {
                 println!(
                     "Updated {} to {} ({}).",
@@ -573,9 +585,15 @@ fn run_scan_cmd(roots: &InstallRoots) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn run_adopt_cmd(roots: &InstallRoots, app: Option<&str>, all: bool, repair: bool) -> ExitCode {
+fn run_adopt_cmd(
+    roots: &InstallRoots,
+    isolation: &Isolation,
+    app: Option<&str>,
+    all: bool,
+    repair: bool,
+) -> ExitCode {
     if all {
-        return match easi_core::adopt::adopt_all(roots, repair) {
+        return match easi_core::adopt::adopt_all(roots, isolation, repair) {
             Ok(list) if list.is_empty() => {
                 println!("No unmanaged user apps to adopt.");
                 ExitCode::SUCCESS
@@ -602,7 +620,7 @@ fn run_adopt_cmd(roots: &InstallRoots, app: Option<&str>, all: bool, repair: boo
     };
     let candidate_path = PathBuf::from(query);
     if candidate_path.exists() {
-        return match easi_core::adopt::adopt_path(roots, &candidate_path, repair) {
+        return match easi_core::adopt::adopt_path(roots, isolation, &candidate_path, repair) {
             Ok(m) => {
                 println!("Adopted {} ({}).", m.name, m.app_id);
                 ExitCode::SUCCESS
@@ -629,7 +647,7 @@ fn run_adopt_cmd(roots: &InstallRoots, app: Option<&str>, all: bool, repair: boo
         return ExitCode::FAILURE;
     };
 
-    match easi_core::adopt::adopt_app(roots, target, repair) {
+    match easi_core::adopt::adopt_app(roots, isolation, target, repair) {
         Ok(m) => {
             println!("Adopted {} ({}).", m.name, m.app_id);
             ExitCode::SUCCESS
@@ -641,8 +659,8 @@ fn run_adopt_cmd(roots: &InstallRoots, app: Option<&str>, all: bool, repair: boo
     }
 }
 
-fn run_repair_cmd(roots: &InstallRoots, app: &str) -> ExitCode {
-    match easi_core::adopt::repair_app(roots, app) {
+fn run_repair_cmd(roots: &InstallRoots, isolation: &Isolation, app: &str) -> ExitCode {
+    match easi_core::adopt::repair_app(roots, isolation, app) {
         Ok(fixes) if fixes.is_empty() => {
             println!("No issues found for '{app}' — icon and launcher look good.");
             ExitCode::SUCCESS
@@ -750,9 +768,9 @@ fn run_set_source_cmd(roots: &InstallRoots, app: &str, url: Option<&str>, clear:
     }
 }
 
-fn run_inspect_cmd(roots: &InstallRoots, path: PathBuf) -> ExitCode {
+fn run_inspect_cmd(roots: &InstallRoots, isolation: &Isolation, path: PathBuf) -> ExitCode {
     let existing = easi_core::manifest::list_manifests(roots).unwrap_or_default();
-    match easi_core::inspect::classify_package(&path, |id| {
+    match easi_core::inspect::classify_package(&path, isolation, |id| {
         existing
             .iter()
             .find(|m| m.app_id == id)
@@ -828,7 +846,7 @@ fn run_export_cmd(roots: &InstallRoots, file: Option<&std::path::Path>) -> ExitC
     }
 }
 
-fn run_import_cmd(roots: &InstallRoots, file: &std::path::Path) -> ExitCode {
+fn run_import_cmd(roots: &InstallRoots, isolation: &Isolation, file: &std::path::Path) -> ExitCode {
     let text = match std::fs::read_to_string(file) {
         Ok(t) => t,
         Err(e) => {
@@ -836,7 +854,7 @@ fn run_import_cmd(roots: &InstallRoots, file: &std::path::Path) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match easi_core::upstream::import_apps_from_toml(roots, &text) {
+    match easi_core::upstream::import_apps_from_toml(roots, isolation, &text) {
         Ok(outcomes) => {
             let mut failed = false;
             for o in outcomes {
@@ -913,13 +931,14 @@ fn run_uninstall_cmd(roots: &InstallRoots, app: &str, purge_data: bool, yes: boo
 
 fn run_install_cmd(
     roots: &InstallRoots,
+    isolation: &Isolation,
     path: PathBuf,
     yes: bool,
     opt_in_trash: bool,
     opt_in_add_to_path: bool,
     allow_script: bool,
 ) -> ExitCode {
-    let runner = EffectRunner::new(roots.clone());
+    let runner = EffectRunner::new(roots.clone(), isolation.clone());
     let mut store = Store::new();
 
     store.dispatch_and_run(
@@ -1145,6 +1164,7 @@ fn print_trust(trust: &TrustSummary) {
         SignatureStatus::Invalid(m) => println!("  Sig:    INVALID ({m})"),
         SignatureStatus::None => println!("  Sig:    None"),
     }
+    println!("  Parsed: {}", trust.sandbox.label());
     for w in &trust.warnings {
         println!("  Warn:   {w}");
     }

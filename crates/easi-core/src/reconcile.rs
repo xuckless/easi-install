@@ -372,6 +372,7 @@ mod tests {
     use crate::install::execute_install;
     use crate::manifest::find_manifest_by_id;
     use crate::model::Classified;
+    use crate::sandbox::Isolation;
 
     #[test]
     fn reconciles_self_updated_app_files_version_perms_and_renamed_appimage() {
@@ -389,12 +390,20 @@ mod tests {
         let pkg = dl.join("MyApp-1.0.0.AppImage");
         fs::write(&pkg, header).expect("write appimage");
 
-        let Classified::Ready { plan, .. } = classify_package(&pkg, |_| None).expect("classify")
+        let Classified::Ready { plan, .. } =
+            classify_package(&pkg, &Isolation::InProcess, |_| None).expect("classify")
         else {
             panic!("expected Ready");
         };
-        let summary = execute_install(&roots, &plan, false, &AtomicBool::new(false), |_, _| {})
-            .expect("install");
+        let summary = execute_install(
+            &roots,
+            &Isolation::InProcess,
+            &plan,
+            false,
+            &AtomicBool::new(false),
+            |_, _| {},
+        )
+        .expect("install");
 
         // Simulate the app's own self-updater replacing files inside ~/Applications/Myapp/:
         // 1. Rename AppImage to 2.0.0

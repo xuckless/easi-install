@@ -108,7 +108,7 @@ fn make_zip(dir: &Path, filename: &str, files: &[(&str, &[u8], u32)]) -> PathBuf
 }
 
 fn run_full_store_install(roots: &InstallRoots, pkg: &Path) -> (String, PathBuf) {
-    let runner = EffectRunner::new(roots.clone());
+    let runner = EffectRunner::new(roots.clone(), easi_core::sandbox::Isolation::InProcess);
     let mut store = Store::new();
 
     store.dispatch_and_run(
@@ -290,7 +290,7 @@ fn detects_and_installs_tar_bare_elf_and_shell_installer_with_script_report() {
         detect_file_format(&sh_pkg).expect("fmt"),
         Format::ShellInstaller
     );
-    let runner = EffectRunner::new(roots.clone());
+    let runner = EffectRunner::new(roots.clone(), easi_core::sandbox::Isolation::InProcess);
     let mut store = Store::new();
     store.dispatch_and_run(Action::OpenPath(sh_pkg.clone()), |e| runner.run(e), |_| {});
     match store.state() {
@@ -358,7 +358,7 @@ fn detects_jar_tar_lz4_metadata_and_blocks_distro_pkginfo() {
     .finish()
     .expect("finish lz4");
     assert_eq!(detect_file_format(&tlz4).expect("fmt"), Format::TarLz4);
-    let runner = EffectRunner::new(roots.clone());
+    let runner = EffectRunner::new(roots.clone(), easi_core::sandbox::Isolation::InProcess);
     let mut store = Store::new();
     store.dispatch_and_run(Action::OpenPath(tlz4), |e| runner.run(e), |_| {});
     match store.state() {
@@ -381,6 +381,11 @@ fn detects_jar_tar_lz4_metadata_and_blocks_distro_pkginfo() {
     )
     .finish()
     .expect("finish arch pkg");
-    let res = easi_core::inspect::classify_package(&arch_pkg, |_| None).expect("classify");
+    let res = easi_core::inspect::classify_package(
+        &arch_pkg,
+        &easi_core::sandbox::Isolation::InProcess,
+        |_| None,
+    )
+    .expect("classify");
     assert!(matches!(res, easi_core::Classified::NotAnApp { .. }));
 }

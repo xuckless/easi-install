@@ -215,6 +215,7 @@ export component AppWindow inherits Window {
     in property <string> trust-sha256: "";
     in property <string> trust-origin: "";
     in property <string> trust-signature: "";
+    in property <string> trust-sandbox: "";
     in property <string> trust-warnings: "";
     in property <string> permissions-text: "";
     in property <bool> has-script-warning: false;
@@ -1655,6 +1656,11 @@ export component AppWindow inherits Window {
                             spacing: Theme.s2;
                             Text { text: "Signature"; width: 72px; font-size: Theme.font-caption; color: Theme.ink-3; }
                             Text { text: root.trust-signature; font-size: Theme.font-caption; color: Theme.ink; horizontal-stretch: 1; }
+                        }
+                        HorizontalLayout {
+                            spacing: Theme.s2;
+                            Text { text: "Parsed"; width: 72px; font-size: Theme.font-caption; color: Theme.ink-3; }
+                            Text { text: root.trust-sandbox; font-size: Theme.font-caption; color: Theme.ink; wrap: word-wrap; horizontal-stretch: 1; }
                         }
                         if root.trust-warnings != "": HorizontalLayout {
                             spacing: Theme.s2;

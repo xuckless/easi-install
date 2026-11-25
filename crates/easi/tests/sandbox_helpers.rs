@@ -4,7 +4,11 @@
 
 use std::process::Command;
 
-use easi_core::sandbox::{INSPECT, INSPECT_PROTOCOL, InspectReply, SANDBOX_EXEC, SandboxStatus};
+use easi_core::Classified;
+use easi_core::inspect::classify_package;
+use easi_core::sandbox::{
+    INSPECT, INSPECT_PROTOCOL, InspectReply, Isolation, SANDBOX_EXEC, SandboxStatus,
+};
 use tempfile::TempDir;
 
 const EASI: &str = env!("CARGO_BIN_EXE_easi");
@@ -63,4 +67,18 @@ fn sandbox_exec_confines_writes_to_granted_paths() {
     if enforced(status, "sandbox-exec") {
         assert!(!denied.join("f").exists());
     }
+}
+
+#[test]
+fn classify_parses_packages_through_the_helper() {
+    let tmp = TempDir::new().unwrap();
+    let pkg = tmp.path().join("setup.sh");
+    std::fs::write(&pkg, "#!/bin/sh\necho hi\n").unwrap();
+    let isolation = Isolation::Helper(EASI.into());
+    let classified = classify_package(&pkg, &isolation, |_| None).unwrap();
+    let Classified::Ready { trust, .. } = classified else {
+        panic!("expected a ready plan: {classified:?}");
+    };
+    assert!(trust.script_report.is_some());
+    eprintln!("classify sandbox: {}", trust.sandbox.label());
 }

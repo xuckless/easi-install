@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::sandbox::SandboxStatus;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Format {
     AppImageType1,
@@ -76,6 +78,8 @@ pub struct TrustSummary {
     pub signature: SignatureStatus,
     pub warnings: Vec<String>,
     pub script_report: Option<ScriptReport>,
+    /// Kernel sandbox the package internals were parsed under.
+    pub sandbox: SandboxStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -73,7 +73,10 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         Some(listener)
     });
 
-    let runner = Arc::new(EffectRunner::new(roots));
+    // Untrusted package parsing and installer scripts run in re-exec'd sandboxed helpers.
+    let isolation =
+        easi_core::sandbox::Isolation::Helper(easi_core::sandbox::resolve_current_exe(&roots));
+    let runner = Arc::new(EffectRunner::new(roots, isolation));
     let needs_onboard =
         initial_path.is_none() && easi_core::self_update::needs_onboarding(&runner.roots);
     // Only auto-heal easi.desktop/icon after onboarding has been completed.
@@ -392,7 +395,7 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                 }
                 let picked = dialog.pick_folder();
                 if let Some(folder) = picked {
-                    let _ = easi_core::adopt::adopt_path(&r.roots, &folder, true);
+                    let _ = easi_core::adopt::adopt_path(&r.roots, &r.isolation, &folder, true);
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(win) = w.upgrade() {
                             win.set_busy_picker(false);
@@ -428,7 +431,7 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
             std::thread::spawn(move || {
                 let discovered = easi_core::adopt::scan_unmanaged_apps(&r.roots);
                 if let Some(app) = discovered.iter().find(|a| a.app_id == id) {
-                    let _ = easi_core::adopt::adopt_app(&r.roots, app, true);
+                    let _ = easi_core::adopt::adopt_app(&r.roots, &r.isolation, app, true);
                 }
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(win) = w.upgrade() {
@@ -455,7 +458,7 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
             let s = Arc::clone(&s);
             let r = Arc::clone(&r);
             std::thread::spawn(move || {
-                let _ = easi_core::adopt::adopt_all(&r.roots, true);
+                let _ = easi_core::adopt::adopt_all(&r.roots, &r.isolation, true);
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(win) = w.upgrade() {
                         win.set_adopting_app_id("".into());
@@ -472,7 +475,7 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         let r = Arc::clone(&runner);
         window.on_repair_app(move |app_id| {
             let id: String = app_id.into();
-            let msg = match easi_core::adopt::repair_app(&r.roots, &id) {
+            let msg = match easi_core::adopt::repair_app(&r.roots, &r.isolation, &id) {
                 Ok(fixes) if fixes.is_empty() => "Icon and launcher already look good.".into(),
                 Ok(fixes) => format!("Repaired: {}.", fixes.join(", ")),
                 Err(e) => format!("Repair failed: {}", easi_core::format_user_error(&e)),
@@ -674,6 +677,7 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                 let outcome = easi_core::manifest::resolve_installed(&r.roots, &id).and_then(|m| {
                     easi_core::upstream::download_and_update_app(
                         &r.roots,
+                        &r.isolation,
                         &m,
                         easi_core::upstream::PublisherTrust::Recorded,
                     )
@@ -933,6 +937,7 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                         easi_core::upstream::AppUpdateStatus::UpdateAvailable { .. } => {
                             match easi_core::upstream::download_and_update_app(
                                 &r.roots,
+                                &r.isolation,
                                 m,
                                 easi_core::upstream::PublisherTrust::Recorded,
                             ) {
@@ -1304,6 +1309,7 @@ fn project_trust(win: &ui::AppWindow, trust: &TrustSummary) {
     win.set_trust_sha256(format!("{short_sha}…").into());
     win.set_trust_origin(trust.origin_url.clone().unwrap_or_default().into());
     win.set_trust_signature(trust.signature.summary().into());
+    win.set_trust_sandbox(trust.sandbox.label().into());
     win.set_trust_warnings(trust.warnings.join("; ").into());
 }
 

@@ -16,7 +16,6 @@ use tempfile::TempDir;
 use xz2::read::XzDecoder;
 use zip::ZipArchive;
 
-use crate::detect::inspect_contents;
 use crate::error::EasiError;
 use crate::limits::LIMITS;
 use crate::manifest::{
@@ -25,6 +24,7 @@ use crate::manifest::{
 use crate::model::{Format, InstallPlan, InstallStep, InstallSummary};
 use crate::plan::{PlanOp, detect_de_quirk, plan_ops};
 use crate::roots::{InstallRoots, safe_join};
+use crate::sandbox::{Isolation, inspect_package};
 
 /// Records every created file/symlink/dir in order so failure or cancel rolls back cleanly.
 #[derive(Debug, Default)]
@@ -69,6 +69,7 @@ fn check_cancelled(cancel_flag: &AtomicBool) -> Result<(), EasiError> {
 /// On any error, rolls back all created paths before returning `Err`.
 pub fn execute_install<P>(
     roots: &InstallRoots,
+    isolation: &Isolation,
     plan: &InstallPlan,
     replace_existing: bool,
     cancel_flag: &AtomicBool,
@@ -124,6 +125,7 @@ where
     let mut tx = Transaction::default();
     let result = run_install_ops(
         roots,
+        isolation,
         plan,
         old_manifest.as_ref(),
         &mut tx,
@@ -160,6 +162,7 @@ where
 
 fn run_install_ops<P>(
     roots: &InstallRoots,
+    isolation: &Isolation,
     plan: &InstallPlan,
     old_manifest: Option<&Manifest>,
     tx: &mut Transaction,
@@ -331,7 +334,8 @@ where
             }
             PlanOp::ExtractAppImageAssets => {
                 on_progress(InstallStep::Extracting, pct);
-                if let Ok(contents) = inspect_contents(&plan.source_path, plan.format)
+                if let Ok((contents, _)) =
+                    inspect_package(isolation, &plan.source_path, plan.format)
                     && let Some(icon_rel) = &plan.icon_path
                     && let Some((name, bytes)) = contents
                         .embedded_icons
@@ -1522,11 +1526,18 @@ mod tests {
             let roots = InstallRoots::from_home(tmp.path());
             let pkg = make_gui_tarball(tmp.path(), "CoolApp-1.0.0.tar.gz", &[*link]);
             let Classified::Ready { plan, .. } =
-                classify_package(&pkg, |_| None).expect("classify")
+                classify_package(&pkg, &Isolation::InProcess, |_| None).expect("classify")
             else {
                 panic!("expected Ready");
             };
-            let result = execute_install(&roots, &plan, false, &AtomicBool::new(false), |_, _| {});
+            let result = execute_install(
+                &roots,
+                &Isolation::InProcess,
+                &plan,
+                false,
+                &AtomicBool::new(false),
+                |_, _| {},
+            );
             if *installs {
                 assert!(result.is_ok(), "{link:?}: {result:?}");
             } else {
@@ -1553,13 +1564,22 @@ mod tests {
         fs::create_dir_all(&dl_dir).expect("mkdir downloads");
 
         let pkg_v1 = make_gui_tarball(&dl_dir, "CoolApp-1.0.0.tar.gz", &[]);
-        let Classified::Ready { plan, .. } = classify_package(&pkg_v1, |_| None).expect("classify")
+        let Classified::Ready { plan, .. } =
+            classify_package(&pkg_v1, &Isolation::InProcess, |_| None).expect("classify")
         else {
             panic!("expected Ready");
         };
 
         let cancel = AtomicBool::new(false);
-        let summary = execute_install(&roots, &plan, false, &cancel, |_, _| {}).expect("install");
+        let summary = execute_install(
+            &roots,
+            &Isolation::InProcess,
+            &plan,
+            false,
+            &cancel,
+            |_, _| {},
+        )
+        .expect("install");
         assert_eq!(summary.app_id, "coolapp");
 
         // Verify installed binary has setuid stripped and single top-level dir was stripped!
@@ -1579,7 +1599,7 @@ mod tests {
 
         // Re-drop detects conflict and replace succeeds.
         let pkg_v2 = make_gui_tarball(&dl_dir, "CoolApp-2.0.0.tar.gz", &[]);
-        let classified_v2 = classify_package(&pkg_v2, |id| {
+        let classified_v2 = classify_package(&pkg_v2, &Isolation::InProcess, |id| {
             find_manifest_by_id(&roots, id).map(|m| m.to_installed_app())
         })
         .expect("classify v2");
@@ -1592,8 +1612,15 @@ mod tests {
             panic!("expected Conflict");
         };
         assert_eq!(existing.version.as_deref(), Some("1.0.0"));
-        let summary_v2 =
-            execute_install(&roots, &plan_v2, true, &cancel, |_, _| {}).expect("replace");
+        let summary_v2 = execute_install(
+            &roots,
+            &Isolation::InProcess,
+            &plan_v2,
+            true,
+            &cancel,
+            |_, _| {},
+        )
+        .expect("replace");
         assert_eq!(summary_v2.version.as_deref(), Some("2.0.0"));
 
         // Move source to Trash.
@@ -1635,25 +1662,45 @@ mod tests {
 
         let pkg_v1 = make_gui_tarball(&dl_dir, "CoolApp-1.0.0.tar.gz", &[]);
         let Classified::Ready { plan: plan_v1, .. } =
-            classify_package(&pkg_v1, |_| None).expect("classify v1")
+            classify_package(&pkg_v1, &Isolation::InProcess, |_| None).expect("classify v1")
         else {
             panic!("expected Ready");
         };
         let cancel = AtomicBool::new(false);
-        let s1 = execute_install(&roots, &plan_v1, false, &cancel, |_, _| {}).expect("install v1");
+        let s1 = execute_install(
+            &roots,
+            &Isolation::InProcess,
+            &plan_v1,
+            false,
+            &cancel,
+            |_, _| {},
+        )
+        .expect("install v1");
         let marker = s1.install_dir.join("v1_marker.txt");
         fs::write(&marker, "still-here").expect("write marker");
 
         // Attempt replace with cancel already set -> must fail AND restore v1 cleanly!
         let pkg_v2 = make_gui_tarball(&dl_dir, "CoolApp-2.0.0.tar.gz", &[]);
-        let Classified::Conflict { plan: plan_v2, .. } = classify_package(&pkg_v2, |id| {
-            find_manifest_by_id(&roots, id).map(|m| m.to_installed_app())
-        })
-        .expect("classify v2") else {
+        let Classified::Conflict { plan: plan_v2, .. } =
+            classify_package(&pkg_v2, &Isolation::InProcess, |id| {
+                find_manifest_by_id(&roots, id).map(|m| m.to_installed_app())
+            })
+            .expect("classify v2")
+        else {
             panic!("expected Conflict");
         };
         let cancelled = AtomicBool::new(true);
-        assert!(execute_install(&roots, &plan_v2, true, &cancelled, |_, _| {}).is_err());
+        assert!(
+            execute_install(
+                &roots,
+                &Isolation::InProcess,
+                &plan_v2,
+                true,
+                &cancelled,
+                |_, _| {}
+            )
+            .is_err()
+        );
 
         assert!(
             marker.exists(),

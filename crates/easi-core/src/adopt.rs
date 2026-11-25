@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::appid::{
     display_name_from_raw, display_name_from_slug, guess_startup_wm_class, slug_and_version,
 };
-use crate::detect::{ArchiveEntry, detect_file_format, inspect_contents};
+use crate::detect::{ArchiveEntry, detect_file_format};
 use crate::error::EasiError;
 use crate::inspect::{desktop_field, score_icons};
 use crate::install::refresh_desktop_caches;
@@ -18,6 +18,7 @@ use crate::manifest::{
 };
 use crate::model::{AppKind, Format};
 use crate::roots::{InstallRoots, safe_join};
+use crate::sandbox::{Isolation, inspect_package};
 use crate::self_update::extract_json_string_field;
 
 /// `Exec=` substrings that indicate a system, distro, Flatpak, Snap, Nix, Steam, or Wine app
@@ -361,6 +362,7 @@ pub fn scan_unmanaged_apps(roots: &InstallRoots) -> Vec<DiscoveredApp> {
 /// If `repair` is true, automatically fixes detected issues (missing icons, StartupWMClass, etc.).
 pub fn adopt_app(
     roots: &InstallRoots,
+    isolation: &Isolation,
     app: &DiscoveredApp,
     repair: bool,
 ) -> Result<Manifest, EasiError> {
@@ -384,7 +386,7 @@ pub fn adopt_app(
     let update_source = if app.exec_path.is_file()
         && let Ok(fmt) = detect_file_format(&app.exec_path)
         && fmt == Format::AppImageType2
-        && let Ok(contents) = inspect_contents(&app.exec_path, fmt)
+        && let Ok((contents, _)) = inspect_package(isolation, &app.exec_path, fmt)
     {
         crate::upstream::detect_update_source(contents.appimage_upd_info.as_deref(), None, None)
     } else if app.install_dir.is_dir() {
@@ -420,18 +422,22 @@ pub fn adopt_app(
     save_manifest(roots, &manifest)?;
 
     if repair {
-        let _ = repair_app(roots, &manifest.app_id);
+        let _ = repair_app(roots, isolation, &manifest.app_id);
         return resolve_installed(roots, &manifest.app_id);
     }
     Ok(manifest)
 }
 
 /// Adopt all discovered unmanaged apps in one go.
-pub fn adopt_all(roots: &InstallRoots, repair: bool) -> Result<Vec<Manifest>, EasiError> {
+pub fn adopt_all(
+    roots: &InstallRoots,
+    isolation: &Isolation,
+    repair: bool,
+) -> Result<Vec<Manifest>, EasiError> {
     let discovered = scan_unmanaged_apps(roots);
     let mut adopted = Vec::new();
     for app in &discovered {
-        if let Ok(m) = adopt_app(roots, app, repair) {
+        if let Ok(m) = adopt_app(roots, isolation, app, repair) {
             adopted.push(m);
         }
     }
@@ -440,7 +446,11 @@ pub fn adopt_all(roots: &InstallRoots, repair: bool) -> Result<Vec<Manifest>, Ea
 
 /// Repair broken/missing icon, `.desktop`, `StartupWMClass`, and `~/.local/bin` symlink
 /// for any managed (or newly adopted) app. Returns a list of actions performed.
-pub fn repair_app(roots: &InstallRoots, query: &str) -> Result<Vec<String>, EasiError> {
+pub fn repair_app(
+    roots: &InstallRoots,
+    isolation: &Isolation,
+    query: &str,
+) -> Result<Vec<String>, EasiError> {
     let mut manifest = resolve_installed(roots, query)?;
     let mut fixes = Vec::new();
 
@@ -464,7 +474,7 @@ pub fn repair_app(roots: &InstallRoots, query: &str) -> Result<Vec<String>, Easi
             .as_deref()
             .and_then(|t| desktop_field(t, "Icon"));
         if !is_icon_valid(roots, current_icon.as_deref())
-            && let Some((ext, bytes)) = find_best_icon_bytes(&manifest)
+            && let Some((ext, bytes)) = find_best_icon_bytes(isolation, &manifest)
         {
             let subdir = if ext == "svg" {
                 "scalable/apps"
@@ -695,7 +705,12 @@ pub fn organize_app_into_applications(
 
 /// Manually adopt an existing app directory or standalone AppImage/ELF chosen by the user.
 /// Refuses system directories outside `$HOME`, `$HOME` itself, or package-manager directories.
-pub fn adopt_path(roots: &InstallRoots, path: &Path, repair: bool) -> Result<Manifest, EasiError> {
+pub fn adopt_path(
+    roots: &InstallRoots,
+    isolation: &Isolation,
+    path: &Path,
+    repair: bool,
+) -> Result<Manifest, EasiError> {
     if !path.exists() {
         return Err(EasiError::NotFound(path.to_path_buf()));
     }
@@ -733,7 +748,7 @@ pub fn adopt_path(roots: &InstallRoots, path: &Path, repair: bool) -> Result<Man
         ));
     };
 
-    adopt_app(roots, &discovered, repair)
+    adopt_app(roots, isolation, &discovered, repair)
 }
 
 fn is_excluded_home_path(path: &Path) -> bool {
@@ -879,12 +894,15 @@ fn find_best_exec_in_dir(dir: &Path, slug: &str) -> Option<PathBuf> {
     best.map(|(_, p)| p)
 }
 
-fn find_best_icon_bytes(manifest: &Manifest) -> Option<(&'static str, Vec<u8>)> {
+fn find_best_icon_bytes(
+    isolation: &Isolation,
+    manifest: &Manifest,
+) -> Option<(&'static str, Vec<u8>)> {
     // Case A: Single-file AppImage Type 2 -> read embedded SquashFS icons.
     if manifest.install_dir.is_file()
         && let Ok(fmt) = detect_file_format(&manifest.install_dir)
         && fmt == Format::AppImageType2
-        && let Ok(contents) = inspect_contents(&manifest.install_dir, fmt)
+        && let Ok((contents, _)) = inspect_package(isolation, &manifest.install_dir, fmt)
     {
         let slug = bin_slug_for_id(&manifest.app_id);
         let scored = score_icons(&contents.entries, &slug);
@@ -1283,7 +1301,8 @@ mod tests {
         assert!(found[0].issues.contains(&AppIssue::MissingIcon));
 
         // Adopt & Fix -> installs hicolor icon, rewrites Icon=zen-browser + StartupWMClass!
-        let manifest = adopt_app(&roots, &found[0], true).expect("adopt zen");
+        let manifest =
+            adopt_app(&roots, &Isolation::InProcess, &found[0], true).expect("adopt zen");
         assert!(manifest.adopted);
         assert!(
             roots
@@ -1339,10 +1358,11 @@ mod tests {
         assert!(scan_unmanaged_apps(&roots).is_empty());
 
         // Refuses adopting $HOME itself.
-        assert!(adopt_path(&roots, tmp.path(), true).is_err());
+        assert!(adopt_path(&roots, &Isolation::InProcess, tmp.path(), true).is_err());
 
         // Manual adopt of ~/Tools/my-editor succeeds and wires launcher + icon + bin symlink!
-        let m = adopt_path(&roots, &custom_dir, true).expect("manual adopt folder");
+        let m = adopt_path(&roots, &Isolation::InProcess, &custom_dir, true)
+            .expect("manual adopt folder");
         assert_eq!(m.app_id, "easi.my-editor");
         assert!(m.adopted);
         assert!(roots.desktop_dir.join("easi.my-editor.desktop").exists());
