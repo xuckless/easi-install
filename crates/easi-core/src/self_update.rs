@@ -385,6 +385,12 @@ fn current_arch() -> Result<&'static str, EasiError> {
     }
 }
 
+/// The one field easi reads from GitHub's `releases/latest` response.
+#[derive(Deserialize)]
+struct LatestRelease {
+    tag_name: String,
+}
+
 fn fetch_latest_tag(repo: &str) -> Result<String, EasiError> {
     fetch_latest_tag_with_timeout(repo, 15)
 }
@@ -422,10 +428,13 @@ fn fetch_latest_tag_with_timeout(repo: &str, timeout_secs: u32) -> Result<String
             "failed to query GitHub releases for {repo}"
         )));
     }
-    let body = String::from_utf8_lossy(&out.stdout);
-    let tag = extract_json_string_field(&body, "tag_name").ok_or_else(|| {
-        EasiError::Desktop("could not parse tag_name from GitHub API response".into())
-    })?;
+    let tag = serde_json::from_slice::<LatestRelease>(&out.stdout)
+        .map_err(|e| {
+            EasiError::Desktop(format!(
+                "could not parse tag_name from GitHub API response: {e}"
+            ))
+        })?
+        .tag_name;
     if tag.contains('/') || tag.contains('\\') || tag.contains("..") {
         return Err(EasiError::Desktop(format!("invalid release tag: {tag}")));
     }
