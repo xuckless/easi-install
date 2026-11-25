@@ -653,6 +653,8 @@ fn parse_forge_or_known_url(raw: &str) -> Option<UpdateSource> {
 }
 
 /// Persist or clear a custom/auto-detected `UpdateSource` on an installed app's manifest.
+/// A new source is a new trust root, so the pinned signer and download host are cleared and the
+/// next update pins them again (trust on first use).
 pub fn set_app_update_source(
     roots: &InstallRoots,
     query: &str,
@@ -660,6 +662,8 @@ pub fn set_app_update_source(
 ) -> Result<Manifest, EasiError> {
     let mut manifest = resolve_installed(roots, query)?;
     manifest.update_source = source;
+    manifest.signer_fingerprint = None;
+    manifest.pinned_download_host = None;
     save_manifest(roots, &manifest)?;
     Ok(manifest)
 }
@@ -2227,6 +2231,20 @@ mod tests {
         assert!(exported.contains("zen-browser"));
         assert!(
             exported.contains("zen-browser/desktop") || exported.contains("repo = \"desktop\"")
+        );
+
+        // 6b. set-source resets the pinned publisher identity (new source = new trust root).
+        let pinned = Manifest {
+            signer_fingerprint: Some("0123456789ABCDEF0123456789ABCDEF01234567".into()),
+            pinned_download_host: Some("dl.example.com".into()),
+            ..sample.clone()
+        };
+        save_manifest(&roots, &pinned).unwrap();
+        let reset =
+            set_app_update_source(&roots, "zen-browser", parse_user_update_url("o/r")).unwrap();
+        assert_eq!(
+            (reset.signer_fingerprint, reset.pinned_download_host),
+            (None, None)
         );
 
         // 7. Security: plain HTTP and flag-injection strings are refused

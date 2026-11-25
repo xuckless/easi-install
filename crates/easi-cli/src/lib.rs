@@ -113,6 +113,9 @@ pub enum Command {
     /// Stop managing an app in easi without deleting any of its files on disk.
     Forget { app: String },
     /// Set or auto-detect the upstream update source (GitHub, GitLab, Codeberg, CDN YAML, JetBrains, or direct URL).
+    ///
+    /// Changing the source also forgets the pinned publisher signing key and download host;
+    /// the next update pins them again from what it receives.
     SetSource {
         app: String,
         /// Repository, CDN, or latest-download URL (omit to auto-detect from app config files).
