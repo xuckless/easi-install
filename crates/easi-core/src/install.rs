@@ -1653,6 +1653,8 @@ pub fn add_bin_to_shell_rc(home: &Path) -> Result<PathBuf, EasiError> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use std::os::unix::ffi::OsStrExt;
+
     use flate2::Compression;
     use flate2::write::GzEncoder;
 
@@ -2111,76 +2113,389 @@ Exec=/bin/sh -c 'pwned'
         ));
     }
 
-    /// Hostile tars that pass the per-entry lexical check but must fail the on-disk pass.
+    /// One entry of a generated hostile archive; names are raw bytes so rows can hold `..`,
+    /// absolute and non-UTF-8 names that the archive builders' own path checks would refuse.
+    #[derive(Clone)]
+    enum Hostile {
+        File(Vec<u8>, &'static [u8], u32),
+        Dir(Vec<u8>),
+        Symlink(Vec<u8>, &'static str),
+        HardLink(Vec<u8>, &'static str),
+        Fifo(Vec<u8>),
+        CharDev(Vec<u8>),
+    }
+
+    /// What extracting a row must produce: the exact resulting tree (`dir/`,
+    /// `file <mode> <len>`, `link -> target`, sorted) or an error matching the predicate.
+    enum Outcome {
+        Tree(fn() -> Vec<String>),
+        Fails(fn(&EasiError) -> bool),
+    }
+
     #[test]
-    fn extracted_symlinks_are_resolved_against_the_real_tree() {
-        // (name, entries as (path, Some(link target) | None for a dir), must extract)
-        type Row = (
-            &'static str,
-            &'static [(&'static str, Option<&'static str>)],
-            bool,
-        );
-        let rows: &[Row] = &[
+    fn hostile_archives_extract_safely_or_fail_typed() {
+        fn file(name: &str, data: &'static [u8], mode: u32) -> Hostile {
+            Hostile::File(name.as_bytes().to_vec(), data, mode)
+        }
+        fn link(name: &str, target: &'static str) -> Hostile {
+            Hostile::Symlink(name.as_bytes().to_vec(), target)
+        }
+        fn dir(name: &str) -> Hostile {
+            Hostile::Dir(name.as_bytes().to_vec())
+        }
+        fn tree(lines: &[&str]) -> Vec<String> {
+            lines.iter().map(|l| l.to_string()).collect()
+        }
+        let escape: fn(&EasiError) -> bool = |e| matches!(e, EasiError::PathEscape(_));
+        // 7z errors come back through the reader's callback, so they arrive as `Archive`.
+        let sevenz_escape: fn(&EasiError) -> bool =
+            |e| matches!(e, EasiError::Archive(m) if m.contains("unsafe path"));
+        let entry_cap: fn(&EasiError) -> bool =
+            |e| matches!(e, EasiError::Archive(m) if m.contains("entry limit"));
+        const DEPTH: usize = 1000;
+        type Row = (&'static str, Format, fn() -> Vec<Hostile>, Outcome);
+        let rows: Vec<Row> = vec![
             (
-                "chained links climb above root",
-                &[
-                    ("a/b/c/l1", Some("../..")),
-                    ("a/b/c/l1/x/y", None),
-                    ("a/b/c/l1/x/y/l2", Some("../../../..")),
-                ],
-                false,
+                "tar zip-slip",
+                Format::Tar,
+                || vec![file("../x", b"x", 0o644)],
+                Outcome::Fails(escape),
             ),
             (
-                "target traverses another link",
-                &[("d/e/s", Some("..")), ("d/e/l", Some("s/../.."))],
-                false,
+                "zip zip-slip",
+                Format::Zip,
+                || vec![file("../x", b"x", 0o644)],
+                Outcome::Fails(escape),
+            ),
+            (
+                "7z zip-slip",
+                Format::SevenZ,
+                || vec![file("../x", b"x", 0o644)],
+                Outcome::Fails(sevenz_escape),
+            ),
+            (
+                "tar absolute path",
+                Format::Tar,
+                || vec![file("/etc/easi-hostile", b"x", 0o644)],
+                Outcome::Fails(escape),
+            ),
+            (
+                "zip absolute path",
+                Format::Zip,
+                || vec![file("/etc/easi-hostile", b"x", 0o644)],
+                Outcome::Fails(escape),
+            ),
+            (
+                "7z absolute path",
+                Format::SevenZ,
+                || vec![file("/etc/easi-hostile", b"x", 0o644)],
+                Outcome::Fails(sevenz_escape),
+            ),
+            // Hard links are never created, whatever they point at.
+            (
+                "tar hard links to outside are skipped",
+                Format::Tar,
+                || {
+                    vec![
+                        Hostile::HardLink(b"passwd".to_vec(), "/etc/passwd"),
+                        Hostile::HardLink(b"up".to_vec(), "../outside"),
+                        file("ok", b"ok", 0o644),
+                    ]
+                },
+                Outcome::Tree(|| tree(&["ok 644 2"])),
+            ),
+            (
+                "tar device and fifo entries are skipped",
+                Format::Tar,
+                || {
+                    vec![
+                        Hostile::Fifo(b"pipe".to_vec()),
+                        Hostile::CharDev(b"null".to_vec()),
+                        file("ok", b"ok", 0o644),
+                    ]
+                },
+                Outcome::Tree(|| tree(&["ok 644 2"])),
+            ),
+            (
+                "tar setuid/setgid stripped",
+                Format::Tar,
+                || vec![dir("bin"), file("bin/app", b"\x7fELF", 0o6755)],
+                Outcome::Tree(|| tree(&["bin/", "bin/app 755 4"])),
+            ),
+            (
+                "zip setuid/setgid stripped",
+                Format::Zip,
+                || vec![dir("bin"), file("bin/app", b"\x7fELF", 0o6755)],
+                Outcome::Tree(|| tree(&["bin/", "bin/app 755 4"])),
+            ),
+            (
+                "tar file then symlink at the same path",
+                Format::Tar,
+                || {
+                    vec![
+                        file("real", b"real", 0o644),
+                        file("dup", b"dup!!", 0o644),
+                        link("dup", "real"),
+                    ]
+                },
+                Outcome::Tree(|| tree(&["dup -> real", "real 644 4"])),
+            ),
+            // The later file replaces the link itself; it must not write through it.
+            (
+                "tar symlink then file at the same path",
+                Format::Tar,
+                || {
+                    vec![
+                        file("real", b"real", 0o644),
+                        link("dup", "real"),
+                        file("dup", b"dup!!", 0o600),
+                    ]
+                },
+                Outcome::Tree(|| tree(&["dup 600 5", "real 644 4"])),
+            ),
+            (
+                "tar dangling symlink then file at the same path",
+                Format::Tar,
+                || vec![link("dup", "missing"), file("dup", b"dup!!", 0o644)],
+                Outcome::Fails(escape),
+            ),
+            (
+                "tar deep nesting",
+                Format::Tar,
+                || vec![file(&format!("{}f", "d/".repeat(DEPTH)), b"x", 0o644)],
+                Outcome::Tree(|| {
+                    let mut lines: Vec<String> = (1..=DEPTH).map(|n| "d/".repeat(n)).collect();
+                    lines.push(format!("{}f 644 1", "d/".repeat(DEPTH)));
+                    lines
+                }),
+            ),
+            (
+                "tar name longer than NAME_MAX",
+                Format::Tar,
+                || vec![file(&"n".repeat(300), b"x", 0o644)],
+                Outcome::Fails(
+                    |e| matches!(e, EasiError::Io(err) if err.kind() == std::io::ErrorKind::InvalidFilename),
+                ),
+            ),
+            (
+                "tar non-UTF-8 name kept as raw bytes",
+                Format::Tar,
+                || vec![Hostile::File(b"caf\xe9".to_vec(), b"x", 0o644)],
+                Outcome::Tree(|| tree(&["caf\u{fffd} 644 1"])),
+            ),
+            (
+                "tar entry count over the cap",
+                Format::Tar,
+                || vec![Hostile::Fifo(b"p".to_vec()); LIMITS.archive_entries + 1],
+                Outcome::Fails(entry_cap),
+            ),
+            (
+                "zip entry count over the cap",
+                Format::Zip,
+                || {
+                    (0..=LIMITS.archive_entries)
+                        .map(|i| dir(&i.to_string()))
+                        .collect()
+                },
+                Outcome::Fails(entry_cap),
+            ),
+            // Links that pass the per-entry lexical check but escape on disk.
+            (
+                "chained links climb above root",
+                Format::Tar,
+                || {
+                    vec![
+                        link("a/b/c/l1", "../.."),
+                        dir("a/b/c/l1/x/y"),
+                        link("a/b/c/l1/x/y/l2", "../../../.."),
+                    ]
+                },
+                Outcome::Fails(escape),
+            ),
+            (
+                "link target traverses another link",
+                Format::Tar,
+                || vec![link("d/e/s", ".."), link("d/e/l", "s/../..")],
+                Outcome::Fails(escape),
             ),
             (
                 "symlink loop",
-                &[("a/l1", Some("l2")), ("a/l2", Some("l1"))],
-                false,
+                Format::Tar,
+                || vec![link("a/l1", "l2"), link("a/l2", "l1")],
+                Outcome::Fails(escape),
             ),
             (
                 "internal relative link",
-                &[
-                    ("app/lib/tool", None),
-                    ("app/bin/tool", Some("../lib/tool")),
-                ],
-                true,
+                Format::Tar,
+                || vec![dir("app/lib/tool"), link("app/bin/tool", "../lib/tool")],
+                Outcome::Tree(|| {
+                    tree(&[
+                        "app/",
+                        "app/bin/",
+                        "app/bin/tool -> ../lib/tool",
+                        "app/lib/",
+                        "app/lib/tool/",
+                    ])
+                }),
             ),
         ];
-        for (name, entries, ok) in rows {
+        for (name, format, entries, outcome) in rows {
             let tmp = TempDir::new().expect("tempdir");
-            let tar_path = tmp.path().join("hostile.tar");
-            let mut builder = tar::Builder::new(File::create(&tar_path).expect("create tar"));
-            for (path, target) in *entries {
-                let mut header = tar::Header::new_gnu();
-                header.set_size(0);
-                header.set_mode(0o755);
-                match target {
-                    Some(t) => {
-                        header.set_entry_type(tar::EntryType::Symlink);
-                        builder.append_link(&mut header, path, t).expect("link");
+            let archive = tmp.path().join("archive");
+            let entries = entries();
+            let file = File::create(&archive).expect("create archive");
+            match format {
+                Format::Tar => {
+                    let mut builder = tar::Builder::new(file);
+                    for entry in &entries {
+                        let (name, kind, data, mode, link): (&[u8], _, &[u8], u32, Option<&str>) =
+                            match entry {
+                                Hostile::File(n, d, m) => (n, tar::EntryType::Regular, d, *m, None),
+                                Hostile::Dir(n) => (n, tar::EntryType::Directory, b"", 0o755, None),
+                                Hostile::Symlink(n, t) => {
+                                    (n, tar::EntryType::Symlink, b"", 0o777, Some(*t))
+                                }
+                                Hostile::HardLink(n, t) => {
+                                    (n, tar::EntryType::Link, b"", 0o644, Some(*t))
+                                }
+                                Hostile::Fifo(n) => (n, tar::EntryType::Fifo, b"", 0o644, None),
+                                Hostile::CharDev(n) => (n, tar::EntryType::Char, b"", 0o666, None),
+                            };
+                        let mut header = tar::Header::new_gnu();
+                        header.set_entry_type(kind);
+                        header.set_mode(mode);
+                        header.set_size(data.len() as u64);
+                        if let Some(target) = link {
+                            header.set_link_name(target).expect("link name");
+                        }
+                        // Short names go in raw (the builder refuses `..` and absolute paths);
+                        // long ones need the builder's GNU long-name records.
+                        if name.len() < 100 {
+                            header.as_old_mut().name[..name.len()].copy_from_slice(name);
+                            header.set_cksum();
+                            builder.append(&header, data).expect("append");
+                        } else {
+                            let name = std::ffi::OsStr::from_bytes(name);
+                            builder
+                                .append_data(&mut header, name, data)
+                                .expect("append long");
+                        }
                     }
-                    None => {
-                        header.set_entry_type(tar::EntryType::Directory);
-                        builder
-                            .append_data(&mut header, path, std::io::empty())
-                            .expect("dir");
-                    }
+                    builder.finish().expect("finish tar");
                 }
+                Format::Zip => {
+                    let mut zip = zip::ZipWriter::new(file);
+                    let opts = |mode| {
+                        zip::write::SimpleFileOptions::default()
+                            .compression_method(zip::CompressionMethod::Stored)
+                            .unix_permissions(mode)
+                    };
+                    for entry in &entries {
+                        let utf8 =
+                            |n: &[u8]| String::from_utf8(n.to_vec()).expect("zip names are UTF-8");
+                        match entry {
+                            Hostile::File(n, d, m) => {
+                                zip.start_file(utf8(n), opts(*m)).expect("start");
+                                std::io::Write::write_all(&mut zip, d).expect("write");
+                            }
+                            Hostile::Dir(n) => {
+                                zip.add_directory(utf8(n), opts(0o755)).expect("dir")
+                            }
+                            Hostile::Symlink(n, t) => {
+                                zip.add_symlink(utf8(n), *t, opts(0o777)).expect("link");
+                            }
+                            Hostile::HardLink(..) | Hostile::Fifo(_) | Hostile::CharDev(_) => {
+                                panic!("zip has no such entry type")
+                            }
+                        }
+                    }
+                    zip.finish().expect("finish zip");
+                }
+                Format::SevenZ => {
+                    let mut sz = sevenz_rust::SevenZWriter::new(file).expect("7z writer");
+                    for entry in &entries {
+                        let Hostile::File(n, d, _) = entry else {
+                            panic!("7z rows only hold files");
+                        };
+                        let mut e = sevenz_rust::SevenZArchiveEntry::new();
+                        e.name = String::from_utf8(n.clone()).expect("7z names are UTF-8");
+                        e.has_stream = true;
+                        sz.push_archive_entry(e, Some(*d)).expect("push");
+                    }
+                    sz.finish().expect("finish 7z");
+                }
+                other => panic!("no hostile builder for {other:?}"),
             }
-            builder.finish().expect("finish");
             let dest = tmp.path().join("out");
             fs::create_dir_all(&dest).expect("mkdir");
-            let result = extract_archive_safe(&tar_path, Format::Tar, &dest);
-            if *ok {
-                assert!(result.is_ok(), "{name}: {result:?}");
-            } else {
-                assert!(
-                    matches!(result, Err(EasiError::PathEscape(_))),
-                    "{name}: {result:?}"
-                );
+            let result = extract_archive_safe(&archive, format, &dest);
+            let mut siblings: Vec<_> = fs::read_dir(tmp.path())
+                .expect("read tmp")
+                .map(|e| e.expect("entry").file_name())
+                .collect();
+            siblings.sort();
+            assert_eq!(siblings, ["archive", "out"], "{name}: wrote outside dest");
+            match (outcome, result) {
+                (Outcome::Fails(expected), Err(e)) => assert!(expected(&e), "{name}: {e:?}"),
+                (Outcome::Fails(_), Ok(())) => panic!("{name}: extracted"),
+                (Outcome::Tree(_), Err(e)) => panic!("{name}: {e:?}"),
+                (Outcome::Tree(expected), Ok(())) => {
+                    let mut lines = Vec::new();
+                    let mut stack = vec![dest.clone()];
+                    while let Some(dir) = stack.pop() {
+                        for entry in fs::read_dir(&dir).expect("read_dir") {
+                            let path = entry.expect("entry").path();
+                            let rel = path.strip_prefix(&dest).expect("rel").to_string_lossy();
+                            let meta = fs::symlink_metadata(&path).expect("meta");
+                            lines.push(if meta.file_type().is_symlink() {
+                                format!(
+                                    "{rel} -> {}",
+                                    fs::read_link(&path).expect("link").display()
+                                )
+                            } else if meta.is_dir() {
+                                stack.push(path.clone());
+                                format!("{rel}/")
+                            } else {
+                                format!(
+                                    "{rel} {:o} {}",
+                                    meta.permissions().mode() & 0o7777,
+                                    meta.len()
+                                )
+                            });
+                        }
+                    }
+                    lines.sort();
+                    assert_eq!(lines, expected(), "{name}");
+                }
+            }
+        }
+    }
+
+    /// Decompression bombs stop at the extracted-bytes cap: start the running total just under
+    /// it instead of inflating 16 GiB.
+    #[test]
+    fn copy_limited_stops_a_decompression_bomb_at_the_cap() {
+        let mut bomb = GzEncoder::new(Vec::new(), Compression::best());
+        std::io::Write::write_all(&mut bomb, &vec![0u8; 1 << 20]).expect("compress");
+        let bomb = bomb.finish().expect("finish");
+        // (bytes already extracted, fits)
+        let rows = [
+            (LIMITS.extract_bytes - (1 << 20), true),
+            (LIMITS.extract_bytes - (1 << 20) + 1, false),
+        ];
+        for (already, fits) in rows {
+            let tmp = TempDir::new().expect("tempdir");
+            let dest = tmp.path().join("bomb");
+            let mut total = already;
+            let result = copy_limited(&mut GzDecoder::new(bomb.as_slice()), &dest, &mut total);
+            assert_eq!(result.is_ok(), fits, "{already}: {result:?}");
+            assert_eq!(
+                dest.exists(),
+                fits,
+                "{already}: partial output must be removed"
+            );
+            if !fits {
+                assert!(matches!(result, Err(EasiError::Archive(_))), "{result:?}");
             }
         }
     }
