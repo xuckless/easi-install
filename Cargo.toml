@@ -64,6 +64,11 @@ landlock = "0.4"
 # time without `unsafe` libc calls.
 rlimit = "0.12"
 
+# proptest (dev-only): property tests for the path-escape guards (`safe_join`, the on-disk
+# symlink resolver, the write-root check) over generated component sequences and archive trees,
+# which hand-written rows cannot cover exhaustively. Default features off: no regex/fork/timeout.
+proptest = { version = "1", default-features = false, features = ["std"] }
+
 [workspace.lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"

@@ -29,3 +29,6 @@ xattr.workspace = true
 minisign-verify.workspace = true
 landlock.workspace = true
 rlimit.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
