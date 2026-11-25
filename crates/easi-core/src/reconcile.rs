@@ -336,12 +336,7 @@ fn repair_renamed_binary_wiring(
             && p.extension().and_then(|s| s.to_str()) == Some("desktop")
     }) && let Ok(text) = fs::read_to_string(desktop_path)
     {
-        let exec_str = new_exec.to_string_lossy();
-        let exec_quoted = if exec_str.contains(' ') {
-            format!("\"{exec_str}\"")
-        } else {
-            exec_str.into_owned()
-        };
+        let exec_quoted = crate::install::quote_desktop_exec(new_exec);
         let updated: String = text
             .lines()
             .map(|line| {

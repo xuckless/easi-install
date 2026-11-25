@@ -509,11 +509,7 @@ pub fn repair_app(
         )?;
         let exec_target = find_main_exec(&manifest);
         let exec_str = exec_target.to_string_lossy();
-        let exec_quoted = if exec_str.contains(' ') {
-            format!("\"{exec_str}\"")
-        } else {
-            exec_str.as_ref().to_string()
-        };
+        let exec_quoted = crate::install::quote_desktop_exec(&exec_target);
         let wm =
             guess_startup_wm_class(&exec_str).unwrap_or_else(|| bin_slug_for_id(&manifest.app_id));
         let content = format!(

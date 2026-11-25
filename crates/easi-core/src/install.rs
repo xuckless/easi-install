@@ -963,13 +963,31 @@ fn render_desktop_entry(plan: &InstallPlan, exec_path: &Path, icon_name: Option<
     lines.join("\n") + "\n"
 }
 
-fn quote_desktop_exec(path: &Path) -> String {
+/// How each special character of a program path is written inside the double-quoted `Exec=`
+/// argument. Desktop Entry spec ("The Exec key"): `"` `` ` `` `$` `\` take a backslash inside the
+/// quotes and `%` becomes `%%`; the string-value escape rule (`\\` for `\`) then applies on top,
+/// so every quoting backslash is doubled. GLib rejects a single `\"` or `\$` as an invalid
+/// escape and drops the whole value.
+const EXEC_ESCAPES: &[(char, &str)] = &[
+    ('"', r#"\\""#),
+    ('`', r"\\`"),
+    ('$', r"\\$"),
+    ('\\', r"\\\\"),
+    ('%', "%%"),
+];
+
+/// Render `path` as the always-quoted program argument of a `.desktop` `Exec=` line.
+pub(crate) fn quote_desktop_exec(path: &Path) -> String {
     let s = sanitize_desktop_value(&path.to_string_lossy());
-    if s.contains(' ') {
-        format!("\"{s}\"")
-    } else {
-        s
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match EXEC_ESCAPES.iter().find(|(special, _)| *special == c) {
+            Some((_, escaped)) => out.push_str(escaped),
+            None => out.push(c),
+        }
     }
+    out.push('"');
+    out
 }
 
 /// Extract archive safely into `dest_root`: canonicalized paths, no escapes, setuid stripped.
@@ -2146,5 +2164,26 @@ Exec=/bin/sh -c 'pwned'
         assert!(text.contains(".local/bin"), "{text}");
         let mode = fs::metadata(&real).expect("meta").permissions().mode() & 0o7777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn desktop_exec_is_always_quoted_and_escaped_twice() {
+        // (program path, Exec= value as written to the .desktop file)
+        let rows = [
+            (
+                "/home/u/Applications/App/app",
+                r#""/home/u/Applications/App/app""#,
+            ),
+            ("/home/u/My Apps/app", r#""/home/u/My Apps/app""#),
+            (r#"/home/u/a"b/app"#, r#""/home/u/a\\"b/app""#),
+            ("/home/u/$HOME/app", r#""/home/u/\\$HOME/app""#),
+            ("/home/u/`id`/app", r#""/home/u/\\`id\\`/app""#),
+            ("/home/u/100%/app", r#""/home/u/100%%/app""#),
+            (r"/home/u/back\slash/app", r#""/home/u/back\\\\slash/app""#),
+            ("/home/u/it's/app", r#""/home/u/it's/app""#),
+        ];
+        for (path, expected) in rows {
+            assert_eq!(quote_desktop_exec(Path::new(path)), expected, "{path}");
+        }
     }
 }
