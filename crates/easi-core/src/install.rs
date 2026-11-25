@@ -852,7 +852,7 @@ pub fn extract_archive_safe(
     format: Format,
     dest_root: &Path,
 ) -> Result<(), EasiError> {
-    match format {
+    let extracted = match format {
         Format::Tar => extract_tar_safe(BufReader::new(File::open(path)?), dest_root),
         Format::TarGz => {
             extract_tar_safe(GzDecoder::new(BufReader::new(File::open(path)?)), dest_root)
@@ -878,8 +878,80 @@ pub fn extract_archive_safe(
         | Format::AppImageType2
         | Format::BareElf
         | Format::Jar
-        | Format::ShellInstaller => Ok(()),
+        | Format::ShellInstaller => return Ok(()),
+    };
+    extracted?;
+    // The per-entry lexical check cannot see links that traverse other links (chains like
+    // `l1 -> ../..` then `l1/x/y/l2 -> ../../../..`), so re-resolve every link on disk.
+    let root = fs::canonicalize(dest_root)?;
+    reject_escaping_symlinks(&root, &root)
+}
+
+/// Symlinks followed while resolving one link before it counts as a loop (the kernel's ELOOP cap).
+const MAX_SYMLINK_HOPS: usize = 40;
+
+/// Walk `dir` without following links and resolve each symlink by hand against the real tree,
+/// rejecting absolute targets, loops, and any `..` that climbs above `root` (canonical).
+/// Missing components are taken lexically, so dangling links are judged by the same rule.
+fn reject_escaping_symlinks(root: &Path, dir: &Path) -> Result<(), EasiError> {
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        let meta = fs::symlink_metadata(&path)?;
+        if meta.is_dir() {
+            reject_escaping_symlinks(root, &path)?;
+            continue;
+        }
+        if !meta.file_type().is_symlink() {
+            continue;
+        }
+        let escape = || EasiError::PathEscape(path.to_string_lossy().into_owned());
+        let rel = path.strip_prefix(root).map_err(|_| escape())?;
+        // `resolved` only ever holds real directories or missing names, never a symlink.
+        let mut resolved = PathBuf::new();
+        let mut pending: Vec<std::ffi::OsString> = rel
+            .components()
+            .rev()
+            .map(|c| c.as_os_str().to_os_string())
+            .collect();
+        let mut hops = 0usize;
+        while let Some(comp) = pending.pop() {
+            match Path::new(&comp).components().next() {
+                Some(std::path::Component::Normal(name)) => {
+                    let candidate = root.join(&resolved).join(name);
+                    if !fs::symlink_metadata(&candidate).is_ok_and(|m| m.file_type().is_symlink()) {
+                        resolved.push(name);
+                        continue;
+                    }
+                    hops += 1;
+                    let target = fs::read_link(&candidate)?;
+                    if hops > MAX_SYMLINK_HOPS || target.has_root() {
+                        return Err(escape());
+                    }
+                    // Relative targets resolve from the link's real parent, which is `resolved`.
+                    pending.extend(
+                        target
+                            .components()
+                            .rev()
+                            .map(|c| c.as_os_str().to_os_string()),
+                    );
+                }
+                Some(std::path::Component::ParentDir) => {
+                    if !resolved.pop() {
+                        return Err(escape());
+                    }
+                }
+                Some(std::path::Component::CurDir) | None => {}
+                Some(std::path::Component::RootDir | std::path::Component::Prefix(_)) => {
+                    return Err(escape());
+                }
+            }
+        }
+        // Same rule as the per-entry check: a link to the extraction root itself is rejected.
+        if resolved.as_os_str().is_empty() {
+            return Err(escape());
+        }
     }
+    Ok(())
 }
 
 /// Hard cap on total bytes extracted from a single archive (guards against decompression bombs).
@@ -1633,5 +1705,79 @@ Exec=/bin/sh -c 'pwned'
             Path::new("app/link"),
             Path::new("/etc/passwd")
         ));
+    }
+
+    /// Hostile tars that pass the per-entry lexical check but must fail the on-disk pass.
+    #[test]
+    fn extracted_symlinks_are_resolved_against_the_real_tree() {
+        // (name, entries as (path, Some(link target) | None for a dir), must extract)
+        type Row = (
+            &'static str,
+            &'static [(&'static str, Option<&'static str>)],
+            bool,
+        );
+        let rows: &[Row] = &[
+            (
+                "chained links climb above root",
+                &[
+                    ("a/b/c/l1", Some("../..")),
+                    ("a/b/c/l1/x/y", None),
+                    ("a/b/c/l1/x/y/l2", Some("../../../..")),
+                ],
+                false,
+            ),
+            (
+                "target traverses another link",
+                &[("d/e/s", Some("..")), ("d/e/l", Some("s/../.."))],
+                false,
+            ),
+            (
+                "symlink loop",
+                &[("a/l1", Some("l2")), ("a/l2", Some("l1"))],
+                false,
+            ),
+            (
+                "internal relative link",
+                &[
+                    ("app/lib/tool", None),
+                    ("app/bin/tool", Some("../lib/tool")),
+                ],
+                true,
+            ),
+        ];
+        for (name, entries, ok) in rows {
+            let tmp = TempDir::new().expect("tempdir");
+            let tar_path = tmp.path().join("hostile.tar");
+            let mut builder = tar::Builder::new(File::create(&tar_path).expect("create tar"));
+            for (path, target) in *entries {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(0);
+                header.set_mode(0o755);
+                match target {
+                    Some(t) => {
+                        header.set_entry_type(tar::EntryType::Symlink);
+                        builder.append_link(&mut header, path, t).expect("link");
+                    }
+                    None => {
+                        header.set_entry_type(tar::EntryType::Directory);
+                        builder
+                            .append_data(&mut header, path, std::io::empty())
+                            .expect("dir");
+                    }
+                }
+            }
+            builder.finish().expect("finish");
+            let dest = tmp.path().join("out");
+            fs::create_dir_all(&dest).expect("mkdir");
+            let result = extract_archive_safe(&tar_path, Format::Tar, &dest);
+            if *ok {
+                assert!(result.is_ok(), "{name}: {result:?}");
+            } else {
+                assert!(
+                    matches!(result, Err(EasiError::PathEscape(_))),
+                    "{name}: {result:?}"
+                );
+            }
+        }
     }
 }
