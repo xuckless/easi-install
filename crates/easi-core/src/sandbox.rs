@@ -36,8 +36,14 @@ pub const INSPECT_PROTOCOL: u32 = 1;
 /// Newest Landlock ABI whose rights we request; best-effort mode drops what the kernel lacks.
 const TARGET_ABI: ABI = ABI::V10;
 
-/// Devices a POSIX shell needs to write even when everything else is read-only.
-const SHELL_DEVICES: &[&str] = &["/dev/null", "/dev/tty"];
+/// ABI whose filesystem rights (up to V3 `Truncate`) deny writes outside the granted paths.
+/// [`SandboxStatus`] describes only this layer; newer hardening (device ioctls, UNIX-socket
+/// connect, network, scopes) is stacked best-effort and never downgrades the reported status.
+const WRITE_DENIAL_ABI: ABI = ABI::V3;
+
+/// Always writable for `__sandbox-exec`: devices a POSIX shell and terminal output need, and
+/// `/tmp` for installers (e.g. makeself) that ignore `$TMPDIR`.
+const SHARED_WRITABLE: &[&str] = &["/dev/null", "/dev/tty", "/dev/pts", "/tmp"];
 
 /// Where untrusted work runs: re-exec'd into the sandboxed `easi` helper binary (production), or
 /// in this process without a sandbox (unit tests, which have no `easi` binary to re-exec).
@@ -47,7 +53,7 @@ pub enum Isolation {
     InProcess,
 }
 
-/// How much of the requested Landlock ruleset the kernel enforced.
+/// How much of the write-denial Landlock ruleset (see [`WRITE_DENIAL_ABI`]) the kernel enforced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SandboxStatus {
     FullyEnforced,
@@ -64,18 +70,18 @@ struct StatusText {
 const STATUS_TEXT: &[StatusText] = &[
     StatusText {
         status: SandboxStatus::FullyEnforced,
-        label: "sandboxed (Landlock fully enforced)",
-        script_note: "Runs sandboxed: it can only write to its install folder, ~/.config, ~/.local/share and easi's app folders.",
+        label: "sandboxed (Landlock enforced)",
+        script_note: "Expected: runs sandboxed — it can only write to its install folder, ~/.config, ~/.local/share, /tmp and easi's app folders.",
     },
     StatusText {
         status: SandboxStatus::PartiallyEnforced,
-        label: "partially sandboxed (this kernel lacks some Landlock protections)",
-        script_note: "Runs partially sandboxed: writes are limited to its install folder, ~/.config, ~/.local/share and easi's app folders, but this kernel lacks some Landlock protections.",
+        label: "partially sandboxed (kernel older than 6.2 lacks some Landlock file protections)",
+        script_note: "Expected: runs partially sandboxed — writes are limited to its install folder, ~/.config, ~/.local/share, /tmp and easi's app folders, but this older kernel cannot block every kind of file change.",
     },
     StatusText {
         status: SandboxStatus::NotEnforced,
         label: "not sandboxed (kernel Landlock unavailable)",
-        script_note: "Runs NOT sandboxed: Landlock is unavailable here, so the script can modify any of your files.",
+        script_note: "Expected: runs NOT sandboxed — Landlock is unavailable here, so the script can modify any of your files.",
     },
 ];
 
@@ -113,25 +119,52 @@ fn grant_access(grant: Grant) -> BitFlags<AccessFs> {
     }
 }
 
+/// One stacked Landlock layer: the write-denial rules the status reports, or best-effort
+/// hardening on top of them.
+#[derive(Debug, Clone, Copy)]
+enum Layer {
+    WriteDenial,
+    Hardening { deny_network: bool },
+}
+
+fn apply_layer(rules: &[(PathBuf, Grant)], layer: Layer) -> Result<RulesetStatus, RulesetError> {
+    let write_denial = AccessFs::from_all(WRITE_DENIAL_ABI);
+    let (handled, deny_network) = match layer {
+        Layer::WriteDenial => (write_denial, None),
+        Layer::Hardening { deny_network } => (
+            AccessFs::from_all(TARGET_ABI) & !write_denial,
+            Some(deny_network),
+        ),
+    };
+    let mut ruleset = Ruleset::default()
+        .set_compatibility(CompatLevel::BestEffort)
+        .handle_access(handled)?;
+    if let Some(deny_network) = deny_network {
+        ruleset = ruleset.scope(Scope::from_all(TARGET_ABI))?;
+        if deny_network {
+            ruleset = ruleset.handle_access(AccessNet::from_all(TARGET_ABI))?;
+        }
+    }
+    let mut created = ruleset.create()?;
+    for (path, grant) in rules {
+        let access = grant_access(*grant) & handled;
+        if !access.is_empty() {
+            created = created.add_rules(path_beneath_rules([path], access))?;
+        }
+    }
+    Ok(created.restrict_self()?.ruleset)
+}
+
 /// Restrict this (single-threaded) process: all filesystem access is handled and only `rules`
 /// are allowed; abstract UNIX sockets and signals are scoped to the sandbox; TCP/UDP is denied
-/// when `deny_network`.
+/// when `deny_network`. Reports the write-denial layer's enforcement only.
 fn restrict_self(
     rules: &[(PathBuf, Grant)],
     deny_network: bool,
 ) -> Result<SandboxStatus, RulesetError> {
-    let mut ruleset = Ruleset::default()
-        .set_compatibility(CompatLevel::BestEffort)
-        .handle_access(AccessFs::from_all(TARGET_ABI))?
-        .scope(Scope::from_all(TARGET_ABI))?;
-    if deny_network {
-        ruleset = ruleset.handle_access(AccessNet::from_all(TARGET_ABI))?;
-    }
-    let mut created = ruleset.create()?;
-    for (path, grant) in rules {
-        created = created.add_rules(path_beneath_rules([path], grant_access(*grant)))?;
-    }
-    Ok(match created.restrict_self()?.ruleset {
+    let status = apply_layer(rules, Layer::WriteDenial)?;
+    apply_layer(rules, Layer::Hardening { deny_network })?;
+    Ok(match status {
         RulesetStatus::FullyEnforced => SandboxStatus::FullyEnforced,
         RulesetStatus::PartiallyEnforced => SandboxStatus::PartiallyEnforced,
         RulesetStatus::NotEnforced => SandboxStatus::NotEnforced,
@@ -181,7 +214,7 @@ fn sandbox_exec_main(args: &[OsString]) -> ExitCode {
         );
     };
     rules.extend(
-        SHELL_DEVICES
+        SHARED_WRITABLE
             .iter()
             .map(|d| (PathBuf::from(d), Grant::Full)),
     );
@@ -211,7 +244,7 @@ pub(crate) struct Confined {
 }
 
 impl Confined {
-    /// `program` may write only beneath `writable` (plus [`SHELL_DEVICES`]); reads stay open.
+    /// `program` may write only beneath `writable` (plus [`SHARED_WRITABLE`]); reads stay open.
     pub(crate) fn new(
         isolation: &Isolation,
         writable: &[PathBuf],

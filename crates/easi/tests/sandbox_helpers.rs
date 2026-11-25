@@ -16,6 +16,12 @@ use tempfile::TempDir;
 
 const EASI: &str = env!("CARGO_BIN_EXE_easi");
 
+/// Temp dirs under `target/tmp`: `/tmp` itself is writable inside `__sandbox-exec`, so a HOME
+/// there would hide the denials under test.
+fn outside_tmp() -> TempDir {
+    tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap()
+}
+
 fn enforced(status: SandboxStatus, what: &str) -> bool {
     if status == SandboxStatus::NotEnforced {
         eprintln!("skipping {what} denial assertions: kernel reports Landlock not enforced");
@@ -43,16 +49,19 @@ fn inspect_helper_returns_versioned_contents() {
 
 #[test]
 fn sandbox_exec_confines_writes_to_granted_paths() {
-    let tmp = TempDir::new().unwrap();
+    let tmp = outside_tmp();
     let granted = tmp.path().join("granted");
     let denied = tmp.path().join("denied");
     std::fs::create_dir_all(&granted).unwrap();
     std::fs::create_dir_all(&denied).unwrap();
     let status_file = tmp.path().join("status.json");
+    // `/tmp` is always writable (makeself-style installers ignore $TMPDIR).
+    let in_tmp = tempfile::tempdir_in("/tmp").unwrap();
     let script = format!(
-        "echo x > '{}/f'; echo x 2>/dev/null > '{}/f'; true",
+        "echo x > '{}/f'; echo x 2>/dev/null > '{}/f'; echo x > '{}/f'; true",
         granted.display(),
-        denied.display()
+        denied.display(),
+        in_tmp.path().display()
     );
     let out = Command::new(EASI)
         .arg(SANDBOX_EXEC)
@@ -66,7 +75,7 @@ fn sandbox_exec_confines_writes_to_granted_paths() {
     assert!(out.status.success(), "{out:?}");
     let status: SandboxStatus =
         serde_json::from_slice(&std::fs::read(&status_file).unwrap()).unwrap();
-    assert!(granted.join("f").exists());
+    assert!(granted.join("f").exists() && in_tmp.path().join("f").exists());
     if enforced(status, "sandbox-exec") {
         assert!(!denied.join("f").exists());
     }
@@ -88,7 +97,7 @@ fn classify_parses_packages_through_the_helper() {
 
 #[test]
 fn consented_installer_cannot_touch_dotfiles_but_may_write_config() {
-    let home = TempDir::new().unwrap();
+    let home = outside_tmp();
     let roots = InstallRoots::from_home(home.path());
     let bashrc = home.path().join(".bashrc");
     std::fs::write(&bashrc, "original\n").unwrap();
