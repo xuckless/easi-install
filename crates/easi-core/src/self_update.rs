@@ -261,6 +261,11 @@ pub fn previous_binary_path(bin: &Path) -> PathBuf {
     bin.with_file_name(name)
 }
 
+/// `errno` for "text file busy".
+const ETXTBSY: i32 = 26;
+const BUSY_RETRIES: u32 = 5;
+const BUSY_RETRY_DELAY: Duration = Duration::from_millis(100);
+
 /// Stage `new_bin` under a random name beside `target_bin`, require it to report
 /// `expected_version`, keep the current binary as [`previous_binary_path`], then rename the
 /// staged copy over `target_bin`. A random name cannot be pre-planted as a symlink.
@@ -314,13 +319,25 @@ pub fn rollback_self_update(target_bin: &Path) -> Result<String, EasiError> {
 /// The version an easi binary prints for `--version` (`easi X.Y.Z`), or what it printed
 /// instead; a binary that fails, hangs past 10 s or prints nothing reports an empty version.
 fn binary_version(bin: &Path) -> Result<String, EasiError> {
-    let mut child = Command::new(bin)
+    let mut command = Command::new(bin);
+    command
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()?;
+        .process_group(0);
+    // Another thread forking while `bin` was still open for writing (the staged copy) makes
+    // exec fail with ETXTBSY until that child execs; retry briefly.
+    let mut retries = 0;
+    let mut child = loop {
+        match command.spawn() {
+            Err(e) if e.raw_os_error() == Some(ETXTBSY) && retries < BUSY_RETRIES => {
+                retries += 1;
+                std::thread::sleep(BUSY_RETRY_DELAY);
+            }
+            spawned => break spawned?,
+        }
+    };
     let outcome = wait_or_kill(&mut child, Duration::from_secs(10), &AtomicBool::new(false))?;
     let mut out = String::new();
     match outcome {
@@ -693,20 +710,6 @@ ANbB7XuM6V9oebe+HcYx0ZvC5dcyaNu1A1mQEpWArDJOjSmRR9tDPpY0QhrZey35BPUnVzSvGq+3Cd2g
         fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    /// A sibling test forking while a fake binary's write fd is open makes exec fail with
-    /// ETXTBSY until that child execs; retry briefly instead of racing.
-    fn retry_busy<T>(mut f: impl FnMut() -> Result<T, EasiError>) -> Result<T, EasiError> {
-        for _ in 0..50 {
-            match f() {
-                Err(EasiError::Io(e)) if e.raw_os_error() == Some(26) => {
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                other => return other,
-            }
-        }
-        f()
-    }
-
     #[test]
     #[allow(clippy::unwrap_used, clippy::expect_used)]
     fn swap_requires_expected_version_and_keeps_previous_for_rollback() {
@@ -723,7 +726,7 @@ ANbB7XuM6V9oebe+HcYx0ZvC5dcyaNu1A1mQEpWArDJOjSmRR9tDPpY0QhrZey35BPUnVzSvGq+3Cd2g
             let new_bin = tmp.path().join("new-easi");
             fake_easi(&target, "echo 'easi 1.0.0'");
             fake_easi(&new_bin, body);
-            let result = retry_busy(|| swap_in_binary(&new_bin, &target, "9.9.9"));
+            let result = swap_in_binary(&new_bin, &target, "9.9.9");
             assert_eq!(result.is_ok(), swapped, "{case}: {result:?}");
             let installed = fs::read_to_string(&target).unwrap();
             assert_eq!(installed.contains(body), swapped, "{case}");
@@ -731,10 +734,7 @@ ANbB7XuM6V9oebe+HcYx0ZvC5dcyaNu1A1mQEpWArDJOjSmRR9tDPpY0QhrZey35BPUnVzSvGq+3Cd2g
             let entries = fs::read_dir(tmp.path()).unwrap().count();
             assert_eq!(entries, if swapped { 3 } else { 2 }, "{case}");
             if swapped {
-                assert_eq!(
-                    retry_busy(|| rollback_self_update(&target)).unwrap(),
-                    "1.0.0"
-                );
+                assert_eq!(rollback_self_update(&target).unwrap(), "1.0.0");
                 assert!(fs::read_to_string(&target).unwrap().contains("easi 1.0.0"));
                 assert!(!previous_binary_path(&target).exists(), "{case}");
             }
