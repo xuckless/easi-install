@@ -24,7 +24,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with: { toolchain: stable }
       - run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libfreetype-dev libxkbcommon-dev libgl1-mesa-dev
-      - run: cargo build --release --bin easi
+      - run: cargo test --workspace --locked
+      - run: cargo build --release --locked --bin easi
       - name: Package tarball
         env:
           ARCH: ${{ matrix.arch }}
