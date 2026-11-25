@@ -1,5 +1,5 @@
 //! Self-update engine (`easi self-update`): fetches latest GitHub Release, verifies SHA-256
-//! (and optional minisign), extracts safely, and atomically swaps the running binary.
+//! and the pinned minisign signature, extracts safely, and atomically swaps the running binary.
 
 use std::fs::{self, File};
 use std::io::Read;
@@ -171,25 +171,19 @@ pub fn run_self_update(
     download_file(&format!("{base_url}/{tarball_name}"), &tarball_path)?;
     download_file(&format!("{base_url}/SHA256SUMS"), &sums_path)?;
 
-    let pubkey = std::env::var("EASI_MINISIGN_PUBKEY")
-        .unwrap_or_else(|_| DEFAULT_MINISIGN_PUBKEY.to_string());
-    if !pubkey.is_empty() && has_minisign() {
-        let sig_path = tmp.path().join("SHA256SUMS.minisig");
-        // Fail-closed: if minisign is available, a missing/blocked signature MUST abort the update.
-        download_file(&format!("{base_url}/SHA256SUMS.minisig"), &sig_path)?;
-        let out = Command::new("minisign")
-            .args(["-V", "-P", &pubkey, "-m"])
-            .arg(&sums_path)
-            .output()
-            .map_err(|e| EasiError::Desktop(format!("minisign failed to run: {e}")))?;
-        if !out.status.success() {
-            return Err(EasiError::Desktop(
-                "minisign verification failed for release SHA256SUMS".into(),
-            ));
-        }
-    }
+    let sig_path = tmp.path().join("SHA256SUMS.minisig");
+    // Fail-closed: a release without a signature is never installed.
+    download_file(&format!("{base_url}/SHA256SUMS.minisig"), &sig_path)?;
+    // Read SHA256SUMS once so the bytes we verify are the bytes we trust.
+    let sums = fs::read(&sums_path)?;
+    verify_sums_signature(
+        &sums,
+        &fs::read_to_string(&sig_path)?,
+        DEFAULT_MINISIGN_PUBKEY,
+        &latest_tag,
+    )?;
 
-    let sums_text = fs::read_to_string(&sums_path)?;
+    let sums_text = String::from_utf8_lossy(&sums);
     let expected = parse_sha256sums(&sums_text, &tarball_name).ok_or_else(|| {
         EasiError::Desktop(format!("checksum for {tarball_name} missing in SHA256SUMS"))
     })?;
@@ -232,13 +226,31 @@ pub fn run_self_update(
     })
 }
 
-fn has_minisign() -> bool {
-    Command::new("minisign")
-        .arg("-v")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok()
+/// Verify `sums` against a minisign signature from `pubkey` and require its signed trusted
+/// comment to carry the exact token `tag:{tag}`, so an older validly signed release cannot be
+/// replayed as the latest one.
+pub fn verify_sums_signature(
+    sums: &[u8],
+    sig_text: &str,
+    pubkey: &str,
+    tag: &str,
+) -> Result<(), EasiError> {
+    let fail = |e: minisign_verify::Error| EasiError::Signature(e.to_string());
+    let key = minisign_verify::PublicKey::from_base64(pubkey).map_err(fail)?;
+    let sig = minisign_verify::Signature::decode(sig_text).map_err(fail)?;
+    // Legacy (non-prehashed) signatures are refused; release.yml signs with current minisign.
+    key.verify(sums, &sig, false).map_err(fail)?;
+    let wanted = format!("tag:{tag}");
+    if !sig
+        .trusted_comment()
+        .split_whitespace()
+        .any(|t| t == wanted)
+    {
+        return Err(EasiError::Signature(format!(
+            "signed trusted comment does not name release {tag}"
+        )));
+    }
+    Ok(())
 }
 
 fn current_arch() -> Result<&'static str, EasiError> {
@@ -384,6 +396,78 @@ pub fn is_newer_version(current: &str, candidate: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Throwaway keypair made with `minisign -G -W`; SHA256SUMS signed with
+    // `minisign -S -t "easi release tag:v9.9.9"` (minisign 0.12, prehashed).
+    const TEST_PUBKEY: &str = "RWSnizU49shh6ejkXJgD9HKQaPbOen8nYG3iTouciJ9C8cb8b/G9kjKL";
+    const TEST_SUMS: &[u8] = b"abc123  easi-v9.9.9-linux-x86_64.tar.gz\n";
+    const TEST_SIG: &str = "untrusted comment: signature from minisign secret key
+RUSnizU49shh6TJZbhRI8WiTqgVwZzT0F8nMaX7lgXjVgGwNojRIuqQgBkPPe2k0paPzlxDWzvUFYTzcdgFsAIVogzI8neb4fQc=
+trusted comment: easi release tag:v9.9.9
+ANbB7XuM6V9oebe+HcYx0ZvC5dcyaNu1A1mQEpWArDJOjSmRR9tDPpY0QhrZey35BPUnVzSvGq+3Cd2gEFccBQ==
+";
+
+    #[test]
+    fn sums_signature_requires_valid_signature_and_exact_tag() {
+        let retagged = TEST_SIG.replace("tag:v9.9.9", "tag:v9.9.8");
+        // (case, sums, signature, pubkey, tag, must pass)
+        type Row<'a> = (&'a str, &'a [u8], &'a str, &'a str, &'a str, bool);
+        let rows: &[Row] = &[
+            ("valid", TEST_SUMS, TEST_SIG, TEST_PUBKEY, "v9.9.9", true),
+            (
+                "tampered sums",
+                b"def456  easi-v9.9.9-linux-x86_64.tar.gz\n",
+                TEST_SIG,
+                TEST_PUBKEY,
+                "v9.9.9",
+                false,
+            ),
+            (
+                "wrong tag",
+                TEST_SUMS,
+                TEST_SIG,
+                TEST_PUBKEY,
+                "v9.9.8",
+                false,
+            ),
+            (
+                "tag prefix only",
+                TEST_SUMS,
+                TEST_SIG,
+                TEST_PUBKEY,
+                "v9.9",
+                false,
+            ),
+            (
+                "edited trusted comment",
+                TEST_SUMS,
+                &retagged,
+                TEST_PUBKEY,
+                "v9.9.8",
+                false,
+            ),
+            (
+                "wrong key",
+                TEST_SUMS,
+                TEST_SIG,
+                DEFAULT_MINISIGN_PUBKEY,
+                "v9.9.9",
+                false,
+            ),
+            (
+                "empty signature",
+                TEST_SUMS,
+                "",
+                TEST_PUBKEY,
+                "v9.9.9",
+                false,
+            ),
+        ];
+        for (case, sums, sig, pubkey, tag, ok) in rows {
+            let result = verify_sums_signature(sums, sig, pubkey, tag);
+            assert_eq!(result.is_ok(), *ok, "{case}: {result:?}");
+        }
+    }
 
     #[test]
     fn semver_and_sha256sums_parsing() {

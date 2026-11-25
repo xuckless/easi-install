@@ -30,6 +30,9 @@ pub enum EasiError {
     #[error("manifest error: {0}")]
     Manifest(String),
 
+    #[error("release signature verification failed: {0}")]
+    Signature(String),
+
     #[error("desktop integration error: {0}")]
     Desktop(String),
 

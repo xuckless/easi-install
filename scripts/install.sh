@@ -6,7 +6,8 @@ set -eu
 REPO="${EASI_REPO:-xuckless/easi-install}"
 VERSION="${EASI_VERSION:-latest}"
 BIN_DIR="${HOME}/.local/bin"
-MINISIGN_PUBKEY="${EASI_MINISIGN_PUBKEY:-RWQnPmfJNaxDO2ecscxiezHEPZmmtizudyau8OENs5gw21DZWlmc2IRQ}"
+# Pinned publisher key; deliberately not overridable from the environment.
+MINISIGN_PUBKEY="RWQnPmfJNaxDO2ecscxiezHEPZmmtizudyau8OENs5gw21DZWlmc2IRQ"
 
 die() {
     printf 'easi install error: %s\n' "$1" >&2
@@ -65,12 +66,16 @@ main() {
     curl --proto '=https' --tlsv1.2 -fsSL "${base_url}/${tarball}" -o "${tmpdir}/${tarball}"
     curl --proto '=https' --tlsv1.2 -fsSL "${base_url}/SHA256SUMS" -o "${tmpdir}/SHA256SUMS"
 
-    if [ -n "${MINISIGN_PUBKEY}" ] && command -v minisign >/dev/null 2>&1; then
+    if command -v minisign >/dev/null 2>&1; then
         curl --proto '=https' --tlsv1.2 -fsSL "${base_url}/SHA256SUMS.minisig" -o "${tmpdir}/SHA256SUMS.minisig" \
             || die "failed to download SHA256SUMS.minisig for signature verification"
         minisign -V -P "${MINISIGN_PUBKEY}" -m "${tmpdir}/SHA256SUMS" >/dev/null \
             || die "minisign signature verification failed"
         printf 'Verified minisign signature.\n'
+    else
+        # A plain checksum from the same server proves integrity, not who published it.
+        printf 'easi install warning: minisign not found; only the SHA-256 checksum was verified, not the publisher signature.\n' >&2
+        printf 'Install minisign (e.g. your distro package or https://jedisct1.github.io/minisign/) and re-run to verify it.\n' >&2
     fi
 
     (cd "$tmpdir" && verify_sha256 "SHA256SUMS" "$tarball")

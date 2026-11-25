@@ -41,6 +41,9 @@ sevenz-rust = "0.6"
 backhand = "0.21"
 # tempfile: fresh temp dirs for untrusted extraction and temp-root tests.
 tempfile = "3"
+# minisign-verify: pure-Rust, zero-dependency minisign signature check so self-update always
+# verifies the publisher signature in-process instead of depending on an external `minisign`.
+minisign-verify = "0.3"
 # xattr: read user.xdg.origin.url extended attribute for trust summary.
 xattr = "1"
 
