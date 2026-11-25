@@ -288,11 +288,10 @@ fn repair_renamed_binary_wiring(
             n.ends_with(".AppImage") || n.ends_with(".appimage")
         })
     {
-        let new_ai_str = new_ai.to_string_lossy();
-        if !script.contains(new_ai_str.as_ref()) {
-            let updated = format!(
-                "#!/bin/sh\nexport APPIMAGE_EXTRACT_AND_RUN=1\nexec \"{new_ai_str}\" \"$@\"\n"
-            );
+        // Keep the wrapper's flavour: a NixOS `appimage-run` wrapper stays one.
+        let updated =
+            crate::install::appimage_wrapper_script(new_ai, script.contains("appimage-run"));
+        if script != updated {
             let _ = crate::atomic::write_atomic(&target, updated.as_bytes(), 0o755);
             return true;
         }
@@ -464,5 +463,58 @@ mod tests {
         assert!(!cfg_dir.exists(), "purged config dir must be removed");
         assert!(!new_ai.exists());
         assert!(!summary.install_dir.exists());
+    }
+
+    #[test]
+    fn renamed_appimage_wrapper_never_expands_the_filename() {
+        // Hostile names an app's self-updater could pick for its new AppImage.
+        let rows = [
+            "$(touch pwned).AppImage",
+            "it's.AppImage",
+            "`touch pwned`.AppImage",
+            "a\"b $HOME.AppImage",
+        ];
+        for name in rows {
+            let tmp = TempDir::new().expect("tempdir");
+            let roots = InstallRoots::from_home(tmp.path());
+            let install_dir = roots.applications_dir.join("App");
+            fs::create_dir_all(&install_dir).expect("mkdir");
+            fs::create_dir_all(&roots.bin_dir).expect("mkdir bin");
+            let new_ai = install_dir.join(name);
+            fs::write(&new_ai, "#!/bin/sh\necho \"ran $*\"\n").expect("write appimage");
+            fs::set_permissions(&new_ai, fs::Permissions::from_mode(0o755)).expect("chmod");
+            let wrapper = install_dir.join("app-run.sh");
+            fs::write(&wrapper, "#!/bin/sh\nexec \"/gone/Old.AppImage\" \"$@\"\n").expect("wrap");
+            let bin_link = roots.bin_dir.join("app");
+            symlink(&wrapper, &bin_link).expect("link");
+
+            assert!(repair_renamed_binary_wiring(
+                &roots,
+                &install_dir,
+                std::slice::from_ref(&new_ai),
+                std::slice::from_ref(&bin_link),
+            ));
+            // A sibling test forking while the fake AppImage's write fd was open makes exec
+            // fail with ETXTBSY (exit 126) for an instant; retry briefly.
+            let out = (0..50)
+                .map(|_| {
+                    std::process::Command::new("sh")
+                        .arg(&wrapper)
+                        .arg("x")
+                        .current_dir(tmp.path())
+                        .output()
+                        .expect("run wrapper")
+                })
+                .find(|o| {
+                    let busy = o.status.code() == Some(126);
+                    if busy {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    !busy
+                })
+                .expect("wrapper kept failing with ETXTBSY");
+            assert_eq!(String::from_utf8_lossy(&out.stdout), "ran x\n", "{name}");
+            assert!(!tmp.path().join("pwned").exists(), "{name}");
+        }
     }
 }

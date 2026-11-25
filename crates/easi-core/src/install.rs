@@ -306,14 +306,7 @@ where
                         .unwrap_or(&plan.app_id)
                         .to_ascii_lowercase();
                     let wrapper = safe_join(&app_dir, Path::new(&format!("{bin_name}-run.sh")))?;
-                    let dest_q = shell_single_quote(&dest.to_string_lossy());
-                    let script = if nix_wrap {
-                        format!("#!/bin/sh\nexec appimage-run {dest_q} \"$@\"\n")
-                    } else {
-                        format!(
-                            "#!/bin/sh\nexport APPIMAGE_EXTRACT_AND_RUN=1\nexec {dest_q} \"$@\"\n"
-                        )
-                    };
+                    let script = appimage_wrapper_script(&dest, nix_wrap);
                     crate::atomic::write_atomic(&wrapper, script.as_bytes(), 0o755)?;
                     tx.record_file(wrapper.clone());
                     resolved_exec = Some(wrapper);
@@ -926,6 +919,18 @@ fn shell_single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// `<bin>-run.sh` launching `appimage` through `appimage-run` (NixOS) or with
+/// `APPIMAGE_EXTRACT_AND_RUN=1` (no FUSE2). The path is single-quoted so `$`, backticks and
+/// quotes in a (possibly self-updater-chosen) filename are never expanded.
+pub(crate) fn appimage_wrapper_script(appimage: &Path, nix: bool) -> String {
+    let quoted = shell_single_quote(&appimage.to_string_lossy());
+    if nix {
+        format!("#!/bin/sh\nexec appimage-run {quoted} \"$@\"\n")
+    } else {
+        format!("#!/bin/sh\nexport APPIMAGE_EXTRACT_AND_RUN=1\nexec {quoted} \"$@\"\n")
+    }
+}
+
 fn render_desktop_entry(plan: &InstallPlan, exec_path: &Path, icon_name: Option<&str>) -> String {
     let exec_quoted = quote_desktop_exec(exec_path);
     let mut lines = vec![
@@ -992,10 +997,17 @@ const EXEC_ESCAPES: &[(char, &str)] = &[
 
 /// Render `path` as the always-quoted program argument of a `.desktop` `Exec=` line.
 pub(crate) fn quote_desktop_exec(path: &Path) -> String {
-    let s = sanitize_desktop_value(&path.to_string_lossy());
+    quote_with(
+        &sanitize_desktop_value(&path.to_string_lossy()),
+        EXEC_ESCAPES,
+    )
+}
+
+/// Double-quote `s`, writing each character listed in `escapes` as its escaped form.
+pub(crate) fn quote_with(s: &str, escapes: &[(char, &str)]) -> String {
     let mut out = String::from("\"");
     for c in s.chars() {
-        match EXEC_ESCAPES.iter().find(|(special, _)| *special == c) {
+        match escapes.iter().find(|(special, _)| *special == c) {
             Some((_, escaped)) => out.push_str(escaped),
             None => out.push(c),
         }
