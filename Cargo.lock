@@ -1378,6 +1378,7 @@ dependencies = [
  "lz4_flex",
  "minisign-verify",
  "serde",
+ "serde_json",
  "sevenz-rust",
  "sha2",
  "tar",

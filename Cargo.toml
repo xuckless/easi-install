@@ -23,6 +23,9 @@ thiserror = "2"
 # serde + toml: manifest & saved-handler config persistence.
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+# serde_json: parse forge release API responses (GitHub/Gitea/GitLab) correctly — escaped strings
+# and nested asset objects broke hand parsing. Already in the tree via slint-build.
+serde_json = "1"
 # sha2: SHA-256 digest for trust summary.
 sha2 = "0.10"
 # tar + compression crates: streaming archive inspection & safe extraction without shelling out.

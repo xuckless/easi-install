@@ -750,10 +750,9 @@ pub fn check_app_update(manifest: &Manifest) -> AppUpdateStatus {
             let api = format!("https://api.github.com/repos/{owner}/{repo}/releases/latest");
             let release_url = format!("https://github.com/{owner}/{repo}/releases/latest");
             match curl_text(&api, &["-fsSL", "--max-time", "5"]) {
-                Ok(body) => match extract_json_string_field(&body, "tag_name") {
-                    Some(tag) => {
-                        let latest = tag.trim_start_matches('v').to_string();
-                        version_status(manifest, current, latest, release_url)
+                Ok(body) => match parse_release_json(&body) {
+                    Some(release) => {
+                        version_status(manifest, current, release.version, release_url)
                     }
                     None => fail("no tag_name in GitHub release response".into()),
                 },
@@ -781,10 +780,9 @@ pub fn check_app_update(manifest: &Manifest) -> AppUpdateStatus {
                 )
             };
             match curl_text(&api, &["-fsSL", "--max-time", "5"]) {
-                Ok(body) => match extract_json_string_field(&body, "tag_name") {
-                    Some(tag) => {
-                        let latest = tag.trim_start_matches('v').to_string();
-                        version_status(manifest, current, latest, release_url)
+                Ok(body) => match parse_release_json(&body) {
+                    Some(release) => {
+                        version_status(manifest, current, release.version, release_url)
                     }
                     None => fail(format!("no tag_name in {host} release response")),
                 },
@@ -895,23 +893,69 @@ fn resolve_redirect_url(url: &str) -> Result<String, String> {
     Ok(final_url)
 }
 
-/// Extract all `browser_download_url` / `direct_asset_url` values from a forge Releases JSON payload.
-pub fn extract_github_asset_urls(json: &str) -> Vec<String> {
-    let mut urls = Vec::new();
-    for needle in ["\"browser_download_url\"", "\"direct_asset_url\""] {
-        let mut rest = json;
-        while let Some(idx) = rest.find(needle) {
-            rest = &rest[idx + needle.len()..];
-            if let Some(after_colon) = rest.trim_start().strip_prefix(':')
-                && let Some(after_quote) = after_colon.trim_start().strip_prefix('"')
-                && let Some(end) = after_quote.find('"')
-            {
-                urls.push(after_quote[..end].to_string());
-                rest = &after_quote[end + 1..];
-            }
-        }
+/// A forge release reduced to what updates need, parsed with serde_json so escaped strings and
+/// field order cannot confuse asset selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedRelease {
+    pub version: String,
+    pub asset_urls: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct ReleaseJson {
+    tag_name: String,
+    #[serde(default)]
+    assets: ReleaseAssetsJson,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ReleaseAssetsJson {
+    /// GitHub / Gitea / Forgejo: `assets: [{browser_download_url}]`.
+    Listed(Vec<ListedAssetJson>),
+    /// GitLab: `assets: {links: [{url, direct_asset_url}]}`.
+    Linked { links: Vec<LinkedAssetJson> },
+}
+
+impl Default for ReleaseAssetsJson {
+    fn default() -> Self {
+        Self::Listed(Vec::new())
     }
-    urls
+}
+
+#[derive(Deserialize)]
+struct ListedAssetJson {
+    browser_download_url: String,
+}
+
+#[derive(Deserialize)]
+struct LinkedAssetJson {
+    url: String,
+    #[serde(default)]
+    direct_asset_url: Option<String>,
+}
+
+/// Parse a GitHub/Gitea release object or a GitLab release list (newest first).
+pub fn parse_release_json(body: &str) -> Option<ParsedRelease> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let object = match value {
+        serde_json::Value::Array(list) => list.into_iter().next()?,
+        other => other,
+    };
+    let release: ReleaseJson = serde_json::from_value(object).ok()?;
+    let asset_urls = match release.assets {
+        ReleaseAssetsJson::Listed(list) => {
+            list.into_iter().map(|a| a.browser_download_url).collect()
+        }
+        ReleaseAssetsJson::Linked { links } => links
+            .into_iter()
+            .map(|l| l.direct_asset_url.unwrap_or(l.url))
+            .collect(),
+    };
+    Some(ParsedRelease {
+        version: release.tag_name.trim_start_matches('v').to_string(),
+        asset_urls,
+    })
 }
 
 /// Score forge release asset URLs and pick the best match for the current Linux arch and
@@ -999,19 +1043,22 @@ pub fn download_and_update_app(
             let api = format!("https://api.github.com/repos/{owner}/{repo}/releases/latest");
             let body =
                 curl_text(&api, &["-fsSL", "--max-time", "15"]).map_err(EasiError::Desktop)?;
-            let ver = extract_json_string_field(&body, "tag_name")
-                .map(|t| t.trim_start_matches('v').to_string());
-            let urls = extract_github_asset_urls(&body);
-            let url =
-                select_best_github_asset(&urls, std::env::consts::ARCH, &manifest.source_filename)
-                    .ok_or_else(|| {
-                        EasiError::Desktop(format!(
-                            "no matching Linux release asset found for {} ({})",
-                            manifest.name,
-                            std::env::consts::ARCH
-                        ))
-                    })?;
-            (url, ver)
+            let release = parse_release_json(&body).ok_or_else(|| {
+                EasiError::Desktop("could not parse GitHub release response".into())
+            })?;
+            let url = select_best_github_asset(
+                &release.asset_urls,
+                std::env::consts::ARCH,
+                &manifest.source_filename,
+            )
+            .ok_or_else(|| {
+                EasiError::Desktop(format!(
+                    "no matching Linux release asset found for {} ({})",
+                    manifest.name,
+                    std::env::consts::ARCH
+                ))
+            })?;
+            (url, Some(release.version))
         }
         UpdateSource::ForgeRelease {
             host,
@@ -1031,18 +1078,21 @@ pub fn download_and_update_app(
             };
             let body =
                 curl_text(&api, &["-fsSL", "--max-time", "15"]).map_err(EasiError::Desktop)?;
-            let ver = extract_json_string_field(&body, "tag_name")
-                .map(|t| t.trim_start_matches('v').to_string());
-            let urls = extract_github_asset_urls(&body);
-            let url =
-                select_best_github_asset(&urls, std::env::consts::ARCH, &manifest.source_filename)
-                    .ok_or_else(|| {
-                        EasiError::Desktop(format!(
-                            "no matching Linux release asset found on {host} for {}",
-                            manifest.name
-                        ))
-                    })?;
-            (url, ver)
+            let release = parse_release_json(&body).ok_or_else(|| {
+                EasiError::Desktop(format!("could not parse {host} release response"))
+            })?;
+            let url = select_best_github_asset(
+                &release.asset_urls,
+                std::env::consts::ARCH,
+                &manifest.source_filename,
+            )
+            .ok_or_else(|| {
+                EasiError::Desktop(format!(
+                    "no matching Linux release asset found on {host} for {}",
+                    manifest.name
+                ))
+            })?;
+            (url, Some(release.version))
         }
         UpdateSource::ZsyncUrl { url } => {
             let header = curl_text(url, &["-fsSL", "--max-time", "10", "-r", "0-4095"])
@@ -1212,6 +1262,47 @@ fn download_to_file(url: &str, dest: &Path) -> Result<(), EasiError> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_release_json_across_forges() {
+        let rows: &[(&str, &str, Option<ParsedRelease>)] = &[
+            (
+                "github with escaped quote in body",
+                r#"{"tag_name":"v1.2.0","body":"say \"browser_download_url\": \"https://evil\"","assets":[{"name":"a","browser_download_url":"https://github.com/o/r/releases/download/v1.2.0/app-x86_64.AppImage"}]}"#,
+                Some(ParsedRelease {
+                    version: "1.2.0".into(),
+                    asset_urls: vec![
+                        "https://github.com/o/r/releases/download/v1.2.0/app-x86_64.AppImage"
+                            .into(),
+                    ],
+                }),
+            ),
+            (
+                "gitlab list, newest first, prefers direct_asset_url",
+                r#"[{"tag_name":"2.0","assets":{"links":[{"url":"https://cdn.example/x.tar.gz","direct_asset_url":"https://gitlab.com/g/p/-/releases/2.0/downloads/x.tar.gz"}]}},{"tag_name":"1.0"}]"#,
+                Some(ParsedRelease {
+                    version: "2.0".into(),
+                    asset_urls: vec![
+                        "https://gitlab.com/g/p/-/releases/2.0/downloads/x.tar.gz".into(),
+                    ],
+                }),
+            ),
+            (
+                "release without assets",
+                r#"{"tag_name":"v3"}"#,
+                Some(ParsedRelease {
+                    version: "3".into(),
+                    asset_urls: vec![],
+                }),
+            ),
+            ("missing tag", r#"{"assets":[]}"#, None),
+            ("empty gitlab list", "[]", None),
+            ("not json", "<html>rate limited</html>", None),
+        ];
+        for (name, body, want) in rows {
+            assert_eq!(&parse_release_json(body), want, "{name}");
+        }
+    }
 
     #[test]
     fn parses_appimage_upd_info_github_and_zsync_headers() {
