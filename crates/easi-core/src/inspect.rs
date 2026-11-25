@@ -87,6 +87,38 @@ const EXEC_PATH_RULES: &[ScoreRule] = &[
         delta: -40,
     },
     ScoreRule {
+        needle: "/platform/",
+        delta: -55,
+    },
+    ScoreRule {
+        needle: "/third_party/",
+        delta: -70,
+    },
+    ScoreRule {
+        needle: "/vendored/",
+        delta: -70,
+    },
+    ScoreRule {
+        needle: "/vendor/",
+        delta: -55,
+    },
+    ScoreRule {
+        needle: "/site-packages/",
+        delta: -80,
+    },
+    ScoreRule {
+        needle: "/node_modules/",
+        delta: -80,
+    },
+    ScoreRule {
+        needle: "/ext-runtime/",
+        delta: -60,
+    },
+    ScoreRule {
+        needle: "/bootstrapping/",
+        delta: -50,
+    },
+    ScoreRule {
         needle: ".so",
         delta: -100,
     },
@@ -209,8 +241,12 @@ pub fn score_executables(
         if !app_slug.is_empty() && (base == app_slug || base.starts_with(app_slug)) {
             score += 45;
         }
-        let depth = entry.path.matches('/').count() as i32;
+        let depth = entry.path.trim_start_matches("./").matches('/').count() as i32;
         score -= depth * 5;
+        // Boost primary top-level `<app>/bin/<cmd>` entrypoints over deeply-nested bundled runtimes.
+        if depth <= 2 && lower.contains("/bin/") {
+            score += 25;
+        }
 
         for rule in EXEC_PATH_RULES {
             if lower.contains(rule.needle) {
@@ -226,6 +262,23 @@ pub fn score_executables(
     out
 }
 
+/// Directory segments that contain documentation/vendored images, NEVER application icons.
+const NON_APP_ICON_SEGMENTS: &[&str] = &[
+    "/docs/",
+    "/doc/",
+    "/_static/",
+    "/third_party/",
+    "/vendored/",
+    "/vendor/",
+    "/site-packages/",
+    "/node_modules/",
+    "/tests/",
+    "/test/",
+    "/examples/",
+    "/ref/",
+    "/man/",
+];
+
 pub fn score_icons(entries: &[ArchiveEntry], app_slug: &str) -> Vec<Candidate> {
     let mut out = Vec::new();
     for entry in entries {
@@ -233,6 +286,10 @@ pub fn score_icons(entries: &[ArchiveEntry], app_slug: &str) -> Vec<Candidate> {
             continue;
         }
         let lower = entry.path.to_ascii_lowercase();
+        let padded = format!("/{lower}");
+        if NON_APP_ICON_SEGMENTS.iter().any(|seg| padded.contains(seg)) {
+            continue;
+        }
         let is_diricon = lower == ".diricon" || lower.ends_with("/.diricon");
         if !(lower.ends_with(".png")
             || lower.ends_with(".svg")
@@ -964,5 +1021,36 @@ mod tests {
         }
         let err = classify_package(&bad_zip, |_| None).expect_err("must reject path escape");
         assert!(matches!(err, EasiError::PathEscape(_)));
+
+        // 6. CLI SDK with bundled runtime ELF + vendored doc PNGs -> Terminal, top-level bin/ wins
+        let sdk_pkg = make_tar_gz(
+            tmp.path(),
+            "google-cloud-cli-linux-x86_64.tar.gz",
+            &[
+                (
+                    "google-cloud-sdk/bin/gcloud",
+                    b"#!/bin/sh\necho hi\n",
+                    0o755,
+                ),
+                (
+                    "google-cloud-sdk/platform/bundledpythonunix/bin/python3.14",
+                    b"\x7fELF\x02\x01\x01\x00",
+                    0o755,
+                ),
+                (
+                    "google-cloud-sdk/platform/gsutil/third_party/requests/docs/_static/logo.png",
+                    b"\x89PNG\r\n",
+                    0o644,
+                ),
+            ],
+        );
+        match classify_package(&sdk_pkg, |_| None).expect("classify sdk") {
+            Classified::Ready { plan, .. } => {
+                assert_eq!(plan.kind, AppKind::Terminal);
+                assert_eq!(plan.main_exec, "google-cloud-sdk/bin/gcloud");
+                assert!(plan.icon_path.is_none());
+            }
+            other => panic!("expected Ready Terminal for CLI SDK, got {other:?}"),
+        }
     }
 }

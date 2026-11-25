@@ -969,6 +969,40 @@ fn collect_files_recursive(dir: &Path, out: &mut std::collections::HashSet<PathB
     }
 }
 
+/// Verify that a relative symlink at `entry_rel` pointing to `target` stays strictly inside the
+/// archive extraction root. Allows safe internal relative symlinks (e.g. `share/terminfo/1/foo -> ../a/bar`
+/// or `bin/tool -> ../lib/tool/tool`) while blocking absolute targets and any `..` that escapes root.
+pub fn is_safe_archive_symlink(entry_rel: &Path, target: &Path) -> bool {
+    if target.is_absolute() {
+        return false;
+    }
+    let mut stack: Vec<std::ffi::OsString> = Vec::new();
+    if let Some(parent) = entry_rel.parent() {
+        for comp in parent.components() {
+            match comp {
+                std::path::Component::Normal(p) => stack.push(p.to_os_string()),
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_) => return false,
+            }
+        }
+    }
+    for comp in target.components() {
+        match comp {
+            std::path::Component::Normal(p) => stack.push(p.to_os_string()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if stack.pop().is_none() {
+                    return false;
+                }
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => return false,
+        }
+    }
+    !stack.is_empty()
+}
+
 fn extract_tar_safe<R: Read>(reader: R, dest_root: &Path) -> Result<(), EasiError> {
     let mut archive = Archive::new(reader);
     let entries = archive
@@ -1002,15 +1036,14 @@ fn extract_tar_safe<R: Read>(reader: R, dest_root: &Path) -> Result<(), EasiErro
             fs::create_dir_all(&dest)?;
         } else if etype.is_symlink() {
             if let Some(target) = entry.link_name().ok().flatten() {
-                if target.is_absolute()
-                    || target
-                        .components()
-                        .any(|c| matches!(c, std::path::Component::ParentDir))
-                {
+                if !is_safe_archive_symlink(&rel, target.as_ref()) {
                     return Err(EasiError::PathEscape(target.to_string_lossy().into_owned()));
                 }
                 if let Some(parent) = dest.parent() {
                     fs::create_dir_all(parent)?;
+                }
+                if dest.symlink_metadata().is_ok() {
+                    let _ = fs::remove_file(&dest);
                 }
                 symlink(target.as_ref(), &dest)?;
             }
@@ -1054,15 +1087,14 @@ fn extract_zip_safe(path: &Path, dest_root: &Path) -> Result<(), EasiError> {
             let mut target = String::new();
             entry.read_to_string(&mut target)?;
             let target_path = Path::new(&target);
-            if target_path.is_absolute()
-                || target_path
-                    .components()
-                    .any(|c| matches!(c, std::path::Component::ParentDir))
-            {
+            if !is_safe_archive_symlink(&rel, target_path) {
                 return Err(EasiError::PathEscape(target));
             }
             if let Some(parent) = dest.parent() {
                 fs::create_dir_all(parent)?;
+            }
+            if dest.symlink_metadata().is_ok() {
+                let _ = fs::remove_file(&dest);
             }
             symlink(target_path, &dest)?;
         } else {
@@ -1578,5 +1610,28 @@ Exec=/bin/sh -c 'pwned'
             1,
             "must emit exactly one trusted Exec= line"
         );
+
+        // 3. Relative archive symlinks: internal `..` stays inside root (allowed);
+        //    escaping `..` or absolute targets are blocked!
+        assert!(is_safe_archive_symlink(
+            Path::new("google-cloud-sdk/platform/python/share/terminfo/1/1178"),
+            Path::new("../a/adm1178")
+        ));
+        assert!(is_safe_archive_symlink(
+            Path::new("app/bin/tool"),
+            Path::new("../lib/tool/tool")
+        ));
+        assert!(!is_safe_archive_symlink(
+            Path::new("app/bin/tool"),
+            Path::new("../../../etc/passwd")
+        ));
+        assert!(!is_safe_archive_symlink(
+            Path::new("app/link"),
+            Path::new("../../outside")
+        ));
+        assert!(!is_safe_archive_symlink(
+            Path::new("app/link"),
+            Path::new("/etc/passwd")
+        ));
     }
 }
