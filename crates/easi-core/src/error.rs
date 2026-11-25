@@ -89,6 +89,10 @@ struct ErrorHelp {
 
 const ERROR_HINTS: &[ErrorHelp] = &[
     ErrorHelp {
+        prefix: "release signature verification failed: update blocked",
+        hint: "The update carries a signature that does not verify, so it was not installed and cannot be re-trusted. If you still want this release, uninstall the app and install it manually after checking it with the developer.",
+    },
+    ErrorHelp {
         prefix: "update blocked: publisher signing key changed",
         hint: "Nothing was installed. Confirm the new signing key with the developer, then accept and record it with `easi update <app> --retrust`.",
     },

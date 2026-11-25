@@ -14,7 +14,7 @@ use crate::error::EasiError;
 use crate::inspect::{DETACHED_SIGNATURE_EXTS, classify_package};
 use crate::install::execute_install;
 use crate::manifest::{Manifest, list_manifests, resolve_installed, save_manifest};
-use crate::model::{AppKind, Classified, InstallSummary, UpdateSource};
+use crate::model::{AppKind, Classified, InstallSummary, SignatureStatus, UpdateSource};
 use crate::roots::InstallRoots;
 use crate::self_update::{extract_json_string_field, file_digest_hex, is_newer_version};
 
@@ -1113,13 +1113,23 @@ pub enum PublisherTrust {
 }
 
 /// Trust-on-first-use continuity: once a verified signer is recorded, updates must carry a valid
-/// signature from the same primary key unless the user explicitly re-trusts.
+/// signature from the same primary key unless the user explicitly re-trusts. A signature that is
+/// present but bad is never acceptable, so `Invalid` blocks even under `Retrust`.
 pub fn check_publisher_continuity(
     app: &str,
     recorded: Option<&str>,
-    found: Option<&str>,
+    signature: &SignatureStatus,
     trust: PublisherTrust,
 ) -> Result<(), EasiError> {
+    let found = match signature {
+        SignatureStatus::Invalid(detail) => {
+            return Err(EasiError::Signature(format!(
+                "update blocked for {app}: {detail}"
+            )));
+        }
+        SignatureStatus::Verified { fingerprint, .. } => Some(fingerprint.as_str()),
+        SignatureStatus::PresentUnverified(_) | SignatureStatus::None => None,
+    };
     match (recorded, trust) {
         (None, PublisherTrust::Recorded | PublisherTrust::Retrust)
         | (Some(_), PublisherTrust::Retrust) => Ok(()),
@@ -1500,7 +1510,7 @@ pub fn download_and_update_app(
     check_publisher_continuity(
         &manifest.name,
         manifest.signer_fingerprint.as_deref(),
-        signature.fingerprint(),
+        &signature,
         trust,
     )?;
     // Record the new signer and host (first update, unchanged, or an explicit re-trust).
@@ -1720,63 +1730,111 @@ mod tests {
     fn publisher_continuity_blocks_key_changes_unless_retrusted() {
         const OLD: &str = "0123456789ABCDEF0123456789ABCDEF01234567";
         const NEW: &str = "FEDCBA9876543210FEDCBA9876543210FEDCBA98";
-        let lower_old = OLD.to_ascii_lowercase();
         use PublisherTrust::{Recorded, Retrust};
+        let signed = |fpr: &str| SignatureStatus::Verified {
+            detail: "detached .sig verified via gpg".into(),
+            fingerprint: fpr.into(),
+        };
+        let unsigned = SignatureStatus::None;
+        let no_key = SignatureStatus::PresentUnverified("key not in keyring".into());
+        let bad = SignatureStatus::Invalid("bad signature".into());
+        /// `Err(true)` = PublisherChanged, `Err(false)` = invalid-signature block.
         type Row<'a> = (
             &'a str,
             Option<&'a str>,
-            Option<&'a str>,
+            SignatureStatus,
             PublisherTrust,
-            bool,
+            Result<(), bool>,
         );
         let rows: &[Row] = &[
-            ("never signed, unsigned update", None, None, Recorded, true),
+            (
+                "never signed, unsigned update",
+                None,
+                unsigned.clone(),
+                Recorded,
+                Ok(()),
+            ),
             (
                 "never signed, first signed update",
                 None,
-                Some(NEW),
+                signed(NEW),
                 Recorded,
-                true,
+                Ok(()),
             ),
-            ("same key", Some(OLD), Some(OLD), Recorded, true),
+            ("same key", Some(OLD), signed(OLD), Recorded, Ok(())),
             (
                 "same key, different case",
                 Some(OLD),
-                Some(&lower_old),
+                signed(&OLD.to_ascii_lowercase()),
                 Recorded,
-                true,
+                Ok(()),
             ),
-            ("key changed", Some(OLD), Some(NEW), Recorded, false),
+            ("key changed", Some(OLD), signed(NEW), Recorded, Err(true)),
             (
                 "signed app arrives unsigned",
                 Some(OLD),
-                None,
+                unsigned.clone(),
                 Recorded,
-                false,
+                Err(true),
+            ),
+            (
+                "signed app, key missing locally",
+                Some(OLD),
+                no_key.clone(),
+                Recorded,
+                Err(true),
             ),
             (
                 "key changed, re-trusted",
                 Some(OLD),
-                Some(NEW),
+                signed(NEW),
                 Retrust,
-                true,
+                Ok(()),
             ),
-            ("unsigned, re-trusted", Some(OLD), None, Retrust, true),
-            ("never signed, re-trusted", None, None, Retrust, true),
+            (
+                "unsigned, re-trusted",
+                Some(OLD),
+                unsigned.clone(),
+                Retrust,
+                Ok(()),
+            ),
+            (
+                "never signed, key missing locally",
+                None,
+                no_key,
+                Recorded,
+                Ok(()),
+            ),
+            (
+                "bad signature, never signed",
+                None,
+                bad.clone(),
+                Recorded,
+                Err(false),
+            ),
+            (
+                "bad signature, same app",
+                Some(OLD),
+                bad.clone(),
+                Recorded,
+                Err(false),
+            ),
+            (
+                "bad signature cannot be re-trusted",
+                Some(OLD),
+                bad,
+                Retrust,
+                Err(false),
+            ),
         ];
-        for (name, recorded, found, trust, ok) in rows {
-            let got = check_publisher_continuity("App", *recorded, *found, *trust);
-            match (got, ok) {
-                (Ok(()), true) => {}
-                (
-                    Err(EasiError::PublisherChanged {
-                        expected, found: f, ..
-                    }),
-                    false,
-                ) => {
+        for (name, recorded, signature, trust, want) in rows {
+            let got = check_publisher_continuity("App", *recorded, signature, *trust);
+            match (got, want) {
+                (Ok(()), Ok(())) => {}
+                (Err(EasiError::PublisherChanged { expected, .. }), Err(true)) => {
                     assert_eq!(Some(expected.as_str()), *recorded, "{name}");
-                    assert_eq!(f, found.unwrap_or("no valid signature"), "{name}");
                 }
+                (Err(EasiError::Signature(_)), Err(false)) => {}
                 (got, _) => panic!("{name}: unexpected {got:?}"),
             }
         }
