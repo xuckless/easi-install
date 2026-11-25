@@ -380,6 +380,15 @@ fn run_setup_cmd(roots: &InstallRoots, claim_archives: bool) -> ExitCode {
 }
 
 fn run_list_cmd(roots: &InstallRoots) -> ExitCode {
+    for path in easi_core::manifest::list_manifests_checked(roots)
+        .map(|(_, unreadable)| unreadable)
+        .unwrap_or_default()
+    {
+        eprintln!(
+            "easi: warning: {}",
+            easi_core::manifest::unreadable_manifest_notice(&path)
+        );
+    }
     match reconcile_all(roots) {
         Ok(list) if list.is_empty() => {
             println!("No apps installed by easi.");

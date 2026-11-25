@@ -180,22 +180,43 @@ pub fn find_manifest_by_id(roots: &InstallRoots, app_id: &str) -> Option<Manifes
 }
 
 pub fn list_manifests(roots: &InstallRoots) -> Result<Vec<Manifest>, EasiError> {
+    Ok(list_manifests_checked(roots)?.0)
+}
+
+/// Every parseable manifest (sorted by name) plus the manifest files that failed to parse.
+/// Unreadable files are reported, never deleted: they may be the only record of what an
+/// install created.
+pub fn list_manifests_checked(
+    roots: &InstallRoots,
+) -> Result<(Vec<Manifest>, Vec<PathBuf>), EasiError> {
     let dir = roots.manifests_dir();
     if !dir.exists() {
-        return Ok(vec![]);
+        return Ok((vec![], vec![]));
     }
     let mut manifests = Vec::new();
+    let mut unreadable = Vec::new();
     for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) == Some("toml")
-            && let Ok(m) = load_manifest(&path)
-        {
-            manifests.push(m);
+        let path = entry?.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("toml") {
+            continue;
+        }
+        match load_manifest(&path) {
+            Ok(m) => manifests.push(m),
+            Err(_) => unreadable.push(path),
         }
     }
     manifests.sort_by_key(|a| a.name.to_lowercase());
-    Ok(manifests)
+    unreadable.sort();
+    Ok((manifests, unreadable))
+}
+
+/// Warning shown (CLI stderr, GUI notification) for a manifest that no longer parses.
+pub fn unreadable_manifest_notice(path: &Path) -> String {
+    format!(
+        "manifest {} could not be read, so its app is not listed; easi left the file in place. \
+         Fix or remove it by hand.",
+        path.display()
+    )
 }
 
 /// Match an installed app by exact `app_id`, slug without `easi.`, or case-insensitive `name`.
@@ -245,5 +266,38 @@ mod tests {
         assert_eq!(m.signer_fingerprint, None);
         assert_eq!(m.pinned_download_host, None);
         assert_eq!(m.update_source, None);
+    }
+
+    #[test]
+    fn unparseable_manifests_are_reported_and_kept() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let roots = InstallRoots::from_home(tmp.path());
+        let good = Manifest {
+            app_id: "easi.good".into(),
+            name: "Good".into(),
+            version: None,
+            source_filename: "g.AppImage".into(),
+            kind: AppKind::Gui,
+            install_dir: tmp.path().join("Applications/Good"),
+            developer: None,
+            origin_url: None,
+            signature_summary: None,
+            signer_fingerprint: None,
+            pinned_download_host: None,
+            update_source: None,
+            adopted: false,
+            created_files: vec![],
+            created_dirs: vec![],
+            installer_data_paths: vec![],
+        };
+        save_manifest(&roots, &good).unwrap();
+        let bad = manifest_path(&roots, "easi.bad");
+        fs::write(&bad, "app_id = \"easi.bad\"\nname = ").unwrap();
+        fs::write(roots.manifests_dir().join("notes.txt"), "ignored").unwrap();
+
+        let (manifests, unreadable) = list_manifests_checked(&roots).unwrap();
+        assert_eq!(manifests, vec![good]);
+        assert_eq!(unreadable, vec![bad.clone()]);
+        assert!(bad.exists());
     }
 }

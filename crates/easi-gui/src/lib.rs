@@ -85,6 +85,15 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         );
     }
     let needs_onboard = initial_path.is_none() && cfg.needs_onboarding();
+    for path in easi_core::manifest::list_manifests_checked(&runner.roots)
+        .map(|(_, unreadable)| unreadable)
+        .unwrap_or_default()
+    {
+        easi_core::desktop::notify(
+            "easi manifest unreadable",
+            &easi_core::manifest::unreadable_manifest_notice(&path),
+        );
+    }
     // Only auto-heal easi.desktop/icon after onboarding has been completed.
     if !needs_onboard && let Ok(exe) = std::env::current_exe() {
         easi_core::desktop::ensure_easi_desktop_and_icon(&runner.roots, &exe);
