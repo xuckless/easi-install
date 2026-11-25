@@ -18,7 +18,7 @@ GitHub Releases; this file tracks only locked decisions and remaining work.
 | Sandboxing | Package internals are parsed only in the re-exec'd `easi __inspect` helper (Landlock: read the package file only, no TCP/UDP; `RLIMIT_AS` 2 GiB, `RLIMIT_CPU` 60 s). Consented `.run`/`.sh` installers run via `easi __sandbox-exec`: writes only to the app dir, staging dir, easi's bin/desktop/icon roots, `~/.config`, `~/.local/share`, `/tmp` (+ `/dev/null`, `/dev/tty`, `/dev/pts`); network allowed; scrubbed env. New or changed entries in `~/.config/{autostart,systemd/user,environment.d}` or `~/.local/share/easi` fail the install (new ones removed); a failed/cancelled script is rolled back including its new top-level data entries. Landlock is best-effort; the status reflects the write-denial layer (fs rights ≤ ABI V3) and is always shown, never overstated. |
 | CLI | Full subcommand parity (`install`, `inspect`, `list`, `scan`, `adopt`, `repair`, `organize`, `forget`, `set-source`, `check-updates`, `update`, `export`, `import`, `uninstall`, `learn-wmclass`, `config`, `journal`, `self-update`, `self-uninstall`). Safe `-y/--yes` (opt-in `--trash` and `--add-to-path`). |
 | GUI | Slint (Skia + FreeType renderer), Functional Calm design system + Drop brand, strict Redux projection of `Store` (`State` + `ManagerUi`). |
-| Distribution | Self-installing binary + `curl \| sh` installer + `easi self-update` (GitHub Releases, SHA-256 + minisign verified). |
+| Distribution | Self-installing binary + `curl \| sh` installer + `easi self-update` (GitHub Releases, SHA-256 + minisign verified, build-provenance attested). |
 | License | Apache-2.0. |
 | Layout | Cargo workspace: `easi-core`, `easi-cli`, `easi-gui`, top-level `easi` binary. |
 
@@ -42,6 +42,7 @@ inside `Store` and transitions via exhaustive `reduce_ui`.
 
 - [ ] OS drag-and-drop onto the App Manager window (drop packages straight from Nautilus/Dolphin/Nemo)
 - [ ] Optional system-wide installs (`/opt` via polkit/`pkexec`)
+- [ ] Upgrade `zip` 2 → 9 and replace the unmaintained `sevenz-rust` with a maintained fork, then drop their `deny.toml` advisory ignores
 
 ## Open questions
 - (none)
