@@ -78,6 +78,16 @@ pub enum EasiError {
     )]
     NoExecMount(PathBuf),
 
+    #[error(
+        "installer script tried to add startup/persistence entry {0}; it was removed and the install was rolled back"
+    )]
+    InstallerPersistenceBlocked(PathBuf),
+
+    #[error(
+        "installer script modified or removed {0}, which easi cannot restore; the install was rolled back"
+    )]
+    InstallerTampered(PathBuf),
+
     #[error("package inspection failed: {reason}")]
     InspectionFailed { reason: String },
 
@@ -106,6 +116,14 @@ const ERROR_HINTS: &[ErrorHelp] = &[
     ErrorHelp {
         prefix: "downloaded update failed its",
         hint: "The file does not match the checksum its publisher listed; nothing was installed. Retry later — if it persists, the release or download mirror may be tampered with.",
+    },
+    ErrorHelp {
+        prefix: "installer script tried to add startup",
+        hint: "Installer scripts may not register autostart entries, user services, environment variables or easi state. Treat this package as untrusted.",
+    },
+    ErrorHelp {
+        prefix: "installer script modified or removed",
+        hint: "Check that file by hand (restore it from a backup if needed) and treat this package as untrusted.",
     },
     ErrorHelp {
         prefix: "package inspection failed",

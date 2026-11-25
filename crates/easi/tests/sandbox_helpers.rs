@@ -149,3 +149,34 @@ fn consented_installer_cannot_touch_dotfiles_but_may_write_config() {
         assert_eq!(std::fs::read_to_string(&bashrc).unwrap(), "original\n");
     }
 }
+
+#[test]
+fn installer_planting_an_autostart_entry_fails_and_is_cleaned_up() {
+    let home = TempDir::new().unwrap();
+    let roots = InstallRoots::from_home(home.path());
+    let downloads = TempDir::new().unwrap();
+    let pkg = downloads.path().join("tool-installer.sh");
+    std::fs::write(
+        &pkg,
+        "#!/bin/sh\n\
+         mkdir -p \"$HOME/.config/autostart\"\n\
+         printf '[Desktop Entry]\\nExec=evil\\n' > \"$HOME/.config/autostart/x.desktop\"\n",
+    )
+    .unwrap();
+    let isolation = Isolation::Helper(EASI.into());
+    let Classified::Ready { plan, .. } = classify_package(&pkg, &isolation, |_| None).unwrap()
+    else {
+        panic!("expected a ready plan");
+    };
+    let err = execute_install(
+        &roots,
+        &isolation,
+        &plan,
+        false,
+        &AtomicBool::new(false),
+        |_, _| {},
+    )
+    .expect_err("autostart entry must fail the install");
+    assert!(err.to_string().contains("autostart/x.desktop"), "{err}");
+    assert!(!home.path().join(".config/autostart/x.desktop").exists());
+}

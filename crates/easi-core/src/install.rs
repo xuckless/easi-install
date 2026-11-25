@@ -33,6 +33,9 @@ use crate::sandbox::{
 pub struct Transaction {
     pub created_files: Vec<PathBuf>,
     pub created_dirs: Vec<PathBuf>,
+    /// New top-level installer-script entries in ~/.config / ~/.local/share (already checked
+    /// with `InstallRoots::is_purgeable_user_data`); removed whole on rollback.
+    pub created_data: Vec<PathBuf>,
 }
 
 impl Transaction {
@@ -46,8 +49,24 @@ impl Transaction {
         }
     }
 
+    pub fn record_data(&mut self, path: PathBuf) {
+        self.created_data.push(path);
+    }
+
     pub fn rollback(&self) {
         rollback_paths(&self.created_files, &self.created_dirs);
+        for path in &self.created_data {
+            let _ = remove_entry(path);
+        }
+    }
+}
+
+/// Remove a file, link or directory tree; `symlink_metadata` so a planted link is removed
+/// itself, never followed.
+fn remove_entry(path: &Path) -> std::io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => fs::remove_dir_all(path),
+        _ => fs::remove_file(path),
     }
 }
 
@@ -57,6 +76,55 @@ pub fn rollback_paths(files: &[PathBuf], dirs: &[PathBuf]) {
     }
     for dir in dirs.iter().rev() {
         let _ = fs::remove_dir(dir);
+    }
+}
+
+/// Startup/persistence hooks and easi's own state inside the script-writable bases (relative to
+/// `$HOME`): an installer may neither add nor change anything here.
+const PERSISTENCE_GUARDS: [&str; 4] = [
+    ".config/autostart",
+    ".config/systemd/user",
+    ".config/environment.d",
+    ".local/share/easi",
+];
+
+/// (size, mtime, is_symlink) of a file, without following links.
+type Fingerprint = (u64, Option<SystemTime>, bool);
+
+fn fingerprint_files(dirs: &[PathBuf]) -> std::collections::BTreeMap<PathBuf, Fingerprint> {
+    snapshot_files(dirs)
+        .into_iter()
+        .filter_map(|p| {
+            let meta = fs::symlink_metadata(&p).ok()?;
+            let print = (
+                meta.len(),
+                meta.modified().ok(),
+                meta.file_type().is_symlink(),
+            );
+            Some((p, print))
+        })
+        .collect()
+}
+
+/// New guarded entries are removed and fail the install; changed or removed ones cannot be
+/// restored, so they fail it with the path for the user to check.
+fn check_persistence_guards(
+    before: &std::collections::BTreeMap<PathBuf, Fingerprint>,
+    after: &std::collections::BTreeMap<PathBuf, Fingerprint>,
+) -> Result<(), EasiError> {
+    let added: Vec<&PathBuf> = after.keys().filter(|p| !before.contains_key(*p)).collect();
+    for path in &added {
+        let _ = fs::remove_file(path);
+    }
+    if let Some(path) = added.first() {
+        return Err(EasiError::InstallerPersistenceBlocked((*path).clone()));
+    }
+    match before
+        .iter()
+        .find(|(p, print)| after.get(*p) != Some(print))
+    {
+        Some((path, _)) => Err(EasiError::InstallerTampered(path.clone())),
+        None => Ok(()),
     }
 }
 
@@ -198,10 +266,6 @@ where
         .map(|(p, b)| (p.clone(), b.clone()));
     let mut installed_icon_name: Option<String> = None;
     let mut script_sandbox: Option<SandboxStatus> = None;
-    // Carried over on replace so a re-install keeps earlier script data purgeable.
-    let mut installer_data_paths: Vec<PathBuf> = old_manifest
-        .map(|m| m.installer_data_paths.clone())
-        .unwrap_or_default();
 
     for (idx, op) in ops.iter().enumerate() {
         check_cancelled(cancel_flag)?;
@@ -312,6 +376,10 @@ where
                 // The data bases hold everyone's settings, so only their new top-level
                 // entries are attributed to this script (shallow diff).
                 let data_before = top_level_entries(&data_bases);
+                // Landlock is allow-only, so startup hooks and easi's own state inside the
+                // writable bases are guarded by a before/after fingerprint instead.
+                let guarded = PERSISTENCE_GUARDS.map(|rel| roots.home_dir.join(rel));
+                let guard_before = fingerprint_files(&guarded);
                 let mut confined = Confined::new(isolation, &writable, "sh")?;
                 // Own process group so cancel/timeout can kill everything the script spawned
                 // (RLIMIT_NPROC is per-UID across the whole desktop session, so a `ulimit -u` cap
@@ -336,7 +404,21 @@ where
                     .env("EASI_INSTALL_DIR", &app_dir)
                     .spawn()?;
                 let max = std::time::Duration::from_secs(LIMITS.installer_wall_secs);
-                let status = match wait_or_kill(&mut child, max, cancel_flag)? {
+                let outcome = wait_or_kill(&mut child, max, cancel_flag)?;
+                // Record what the script left behind before judging how it ended, so a failed,
+                // cancelled or blocked run is rolled back too.
+                for path in snapshot_files(&watched) {
+                    if !before.contains(&path) {
+                        tx.record_file(path);
+                    }
+                }
+                for path in top_level_entries(&data_bases) {
+                    if !data_before.contains(&path) && roots.is_purgeable_user_data(&path) {
+                        tx.record_data(path);
+                    }
+                }
+                check_persistence_guards(&guard_before, &fingerprint_files(&guarded))?;
+                let status = match outcome {
                     WaitOutcome::Exited(status) => status,
                     WaitOutcome::Cancelled => {
                         return Err(EasiError::Desktop("installation cancelled".into()));
@@ -354,17 +436,6 @@ where
                     )));
                 }
                 script_sandbox = Some(confined.status());
-                installer_data_paths.extend(
-                    top_level_entries(&data_bases)
-                        .into_iter()
-                        .filter(|p| !data_before.contains(p) && roots.is_purgeable_user_data(p)),
-                );
-                let after = snapshot_files(&watched);
-                for path in after {
-                    if !before.contains(&path) {
-                        tx.record_file(path);
-                    }
-                }
             }
             PlanOp::ExtractAppImageAssets => {
                 on_progress(InstallStep::Extracting, pct);
@@ -502,7 +573,13 @@ where
                     adopted: false,
                     created_files: tx.created_files.clone(),
                     created_dirs: tx.created_dirs.clone(),
-                    installer_data_paths: installer_data_paths.clone(),
+                    // Carried over on replace so a re-install keeps earlier script data purgeable.
+                    installer_data_paths: old_manifest
+                        .map(|m| m.installer_data_paths.clone())
+                        .unwrap_or_default()
+                        .into_iter()
+                        .chain(tx.created_data.iter().cloned())
+                        .collect(),
                 };
                 save_manifest(roots, &manifest)?;
             }
@@ -1414,11 +1491,7 @@ pub fn uninstall_app_with_options(
             .iter()
             .filter(|p| roots.is_purgeable_user_data(p))
         {
-            // `symlink_metadata` so a planted link is removed itself, never followed.
-            let _ = match fs::symlink_metadata(path) {
-                Ok(meta) if meta.is_dir() => fs::remove_dir_all(path),
-                _ => fs::remove_file(path),
-            };
+            let _ = remove_entry(path);
         }
     }
     delete_manifest(roots, &manifest.app_id)?;
@@ -1650,6 +1723,68 @@ mod tests {
                 assert_eq!(path.exists(), kept, "purge={purge} {path:?}");
             }
             assert!(config.join("keep/new").exists() && config.join("autostart").exists());
+        }
+    }
+
+    #[test]
+    fn failed_or_hook_planting_scripts_are_rolled_back() {
+        // (script body, error fragment, path that must be gone afterwards, rel to $HOME)
+        let rows = [
+            (
+                "mkdir -p \"$HOME/.config/systemd/user\" && echo x > \"$HOME/.config/systemd/user/evil.service\"",
+                "add startup/persistence entry",
+                Some(".config/systemd/user/evil.service"),
+            ),
+            (
+                "echo tamper >> \"$HOME/.local/share/easi/config.toml\"",
+                "modified or removed",
+                None,
+            ),
+            (
+                "mkdir -p \"$HOME/.config/tool\" \"$HOME/.local/share/tool-data\"; exit 1",
+                "exited with status",
+                Some(".config/tool"),
+            ),
+        ];
+        for (body, fragment, gone) in rows {
+            let tmp = TempDir::new().expect("tempdir");
+            let roots = InstallRoots::from_home(tmp.path());
+            let config_toml = roots.config_path();
+            fs::create_dir_all(&roots.easi_dir).expect("easi dir");
+            fs::write(&config_toml, "auto_check_updates = true\n").expect("config");
+            let pkg = tmp.path().join("tool-setup.sh");
+            fs::write(&pkg, format!("#!/bin/sh\n{body}\n")).expect("write script");
+            let Classified::Ready { plan, .. } =
+                classify_package(&pkg, &Isolation::InProcess, |_| None).expect("classify")
+            else {
+                panic!("expected ready plan");
+            };
+            let err = execute_install(
+                &roots,
+                &Isolation::InProcess,
+                &plan,
+                false,
+                &AtomicBool::new(false),
+                |_, _| {},
+            )
+            .expect_err(body);
+            let msg = err.to_string();
+            assert!(msg.contains(fragment), "{body}: {msg}");
+            if let Some(rel) = gone {
+                assert!(!tmp.path().join(rel).exists(), "{body}: {rel} left behind");
+                assert!(
+                    msg.contains(rel) || fragment == "exited with status",
+                    "{msg}"
+                );
+            }
+            assert!(
+                !tmp.path().join(".local/share/tool-data").exists(),
+                "{body}"
+            );
+            assert!(
+                find_manifest_by_id(&roots, &plan.app_id).is_none(),
+                "{body}"
+            );
         }
     }
 
