@@ -1,0 +1,53 @@
+# cargo-deny policy (CI `deny` job and the weekly advisory scan). Kept minimal: block known
+# advisories, unknown sources and licenses outside what the tree uses today.
+
+[graph]
+# easi ships Linux binaries only; Windows/Apple-only crates never reach a release.
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+
+[advisories]
+# Unmaintained notices only fail for our direct dependencies; transitive ones (chrono, zbus,
+# ttf-parser, pin-utils via slint/accesskit) can only be fixed upstream.
+unmaintained = "workspace"
+# Every other RustSec report fails the check. Each ignore says why easi is not affected; easi
+# never calls the zip or 7z crates' own extract/decompress helpers — it walks entries by index
+# and writes them itself through `safe_join`, its symlink checks and `mode & 0o777`
+# (crates/easi-core/src/install.rs, covered by the hostile-archive corpus). Patched zip is 9.x.
+ignore = [
+    { id = "RUSTSEC-2026-0245", reason = "sevenz-rust path traversal is in its decompress* helpers; easi uses SevenZReader::for_each_entries + safe_join" },
+    { id = "RUSTSEC-2026-0246", reason = "sevenz-rust unmaintained; no vulnerability reachable from easi's use, migration to a fork tracked separately" },
+    { id = "RUSTSEC-2026-0367", reason = "zip keeps SUID/SGID in ZipArchive::extract; easi does not call it and masks modes to 0o777 itself" },
+    { id = "RUSTSEC-2026-0368", reason = "zip symlink escape is in ZipArchive::extract; easi does not call it and validates link targets itself" },
+    { id = "RUSTSEC-2026-0369", reason = "zip chmod-through-symlink is in extract(); easi does not call it" },
+    { id = "RUSTSEC-2026-0429", reason = "zip abort is in ZipArchive::extract's symlink buffer; easi reads link targets capped at 4 KiB" },
+    { id = "RUSTSEC-2026-0545", reason = "zip AES MAC bypass needs the aes-crypto feature and a password; easi builds zip without it" },
+    { id = "RUSTSEC-2026-0548", reason = "zip local/central name mismatch affects ZipStreamReader; easi reads central-directory entries only" },
+]
+
+[bans]
+# Duplicate semver-incompatible versions come from upstream (slint/winit/zbus); visible, not fatal.
+multiple-versions = "warn"
+
+[licenses]
+# Everything the current dependency tree uses. Slint is taken under its royalty-free license
+# (it is triple-licensed GPL-3.0-only OR Royalty-free-2.0 OR Software-3.0); GPL is not allowed.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "LicenseRef-Slint-Royalty-free-2.0",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
