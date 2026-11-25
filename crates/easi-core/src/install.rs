@@ -344,14 +344,18 @@ where
                 on_progress(InstallStep::Extracting, pct);
                 let staging = TempDir::new()?;
                 extract_archive_safe(&plan.source_path, plan.format, staging.path())?;
-                fs::create_dir_all(&app_dir)?;
-                tx.record_dir(app_dir.clone());
                 let copy_src = if let Some(top) = single_top_dir(staging.path()) {
-                    stripped_prefix = Some(top.clone());
-                    staging.path().join(top)
+                    let src = fs::canonicalize(staging.path().join(&top))?;
+                    // Stripping the top dir makes it the app dir's root, so a link that only
+                    // stayed inside staging via `../<sibling>` would point beside the app.
+                    reject_escaping_symlinks(&src, &src)?;
+                    stripped_prefix = Some(top);
+                    src
                 } else {
                     staging.path().to_path_buf()
                 };
+                fs::create_dir_all(&app_dir)?;
+                tx.record_dir(app_dir.clone());
                 copy_tree_recorded(&copy_src, &app_dir, tx)?;
                 let rel_exec = strip_top_prefix(&plan.main_exec, stripped_prefix.as_deref());
                 let exec_path = safe_join(&app_dir, Path::new(&rel_exec))?;
@@ -1464,7 +1468,8 @@ mod tests {
     use crate::manifest::list_manifests;
     use crate::model::Classified;
 
-    fn make_gui_tarball(dir: &Path, filename: &str) -> PathBuf {
+    /// `links` are extra `(path, target)` symlink entries for hostile-layout tests.
+    fn make_gui_tarball(dir: &Path, filename: &str, links: &[(&str, &str)]) -> PathBuf {
         let path = dir.join(filename);
         let file = File::create(&path).expect("create tar.gz");
         let enc = GzEncoder::new(file, Compression::fast());
@@ -1487,12 +1492,55 @@ mod tests {
                 .append_data(&mut header, *rel, *data)
                 .expect("append");
         }
+        for (rel, target) in links {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_size(0);
+            builder.append_link(&mut header, rel, target).expect("link");
+        }
         builder
             .into_inner()
             .expect("inner")
             .finish()
             .expect("finish");
         path
+    }
+
+    /// Links that stay inside staging only through the stripped top dir's parent must not be
+    /// installed, since the top dir becomes `~/Applications/<App>` itself.
+    #[test]
+    fn stripped_top_dir_links_cannot_reach_siblings_of_the_app_dir() {
+        // (internal link, installs)
+        let rows: &[((&str, &str), bool)] = &[
+            (("CoolApp/share/peer", "../../Other/x"), false),
+            (("CoolApp/share/peer", "../bin/coolapp"), true),
+        ];
+        for (link, installs) in rows {
+            let tmp = TempDir::new().expect("tempdir");
+            let roots = InstallRoots::from_home(tmp.path());
+            let pkg = make_gui_tarball(tmp.path(), "CoolApp-1.0.0.tar.gz", &[*link]);
+            let Classified::Ready { plan, .. } =
+                classify_package(&pkg, |_| None).expect("classify")
+            else {
+                panic!("expected Ready");
+            };
+            let result = execute_install(&roots, &plan, false, &AtomicBool::new(false), |_, _| {});
+            if *installs {
+                assert!(result.is_ok(), "{link:?}: {result:?}");
+            } else {
+                assert!(
+                    matches!(result, Err(EasiError::PathEscape(_))),
+                    "{link:?}: {result:?}"
+                );
+                // Rollback must leave no app dir behind.
+                assert!(
+                    fs::read_dir(&roots.applications_dir)
+                        .map(|mut d| d.next().is_none())
+                        .unwrap_or(true),
+                    "{link:?}: app dir left behind"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1502,7 +1550,7 @@ mod tests {
         let dl_dir = tmp.path().join("Downloads");
         fs::create_dir_all(&dl_dir).expect("mkdir downloads");
 
-        let pkg_v1 = make_gui_tarball(&dl_dir, "CoolApp-1.0.0.tar.gz");
+        let pkg_v1 = make_gui_tarball(&dl_dir, "CoolApp-1.0.0.tar.gz", &[]);
         let Classified::Ready { plan, .. } = classify_package(&pkg_v1, |_| None).expect("classify")
         else {
             panic!("expected Ready");
@@ -1528,7 +1576,7 @@ mod tests {
         assert_eq!(list_manifests(&roots).expect("list").len(), 1);
 
         // Re-drop detects conflict and replace succeeds.
-        let pkg_v2 = make_gui_tarball(&dl_dir, "CoolApp-2.0.0.tar.gz");
+        let pkg_v2 = make_gui_tarball(&dl_dir, "CoolApp-2.0.0.tar.gz", &[]);
         let classified_v2 = classify_package(&pkg_v2, |id| {
             find_manifest_by_id(&roots, id).map(|m| m.to_installed_app())
         })
@@ -1583,7 +1631,7 @@ mod tests {
         let dl_dir = tmp.path().join("Downloads");
         fs::create_dir_all(&dl_dir).expect("mkdir");
 
-        let pkg_v1 = make_gui_tarball(&dl_dir, "CoolApp-1.0.0.tar.gz");
+        let pkg_v1 = make_gui_tarball(&dl_dir, "CoolApp-1.0.0.tar.gz", &[]);
         let Classified::Ready { plan: plan_v1, .. } =
             classify_package(&pkg_v1, |_| None).expect("classify v1")
         else {
@@ -1595,7 +1643,7 @@ mod tests {
         fs::write(&marker, "still-here").expect("write marker");
 
         // Attempt replace with cancel already set -> must fail AND restore v1 cleanly!
-        let pkg_v2 = make_gui_tarball(&dl_dir, "CoolApp-2.0.0.tar.gz");
+        let pkg_v2 = make_gui_tarball(&dl_dir, "CoolApp-2.0.0.tar.gz", &[]);
         let Classified::Conflict { plan: plan_v2, .. } = classify_package(&pkg_v2, |id| {
             find_manifest_by_id(&roots, id).map(|m| m.to_installed_app())
         })
