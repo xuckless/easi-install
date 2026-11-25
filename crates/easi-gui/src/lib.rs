@@ -6,7 +6,7 @@ mod ui {
     slint::include_modules!();
 }
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -19,21 +19,31 @@ use easi_core::{
 };
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
 
-fn single_instance_socket_path() -> PathBuf {
+fn single_instance_socket_path() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
         let p = PathBuf::from(dir);
         if p.is_dir() {
-            return p.join("easi.sock");
+            return Some(p.join("easi.sock"));
         }
     }
-    let user = std::env::var("USER").unwrap_or_else(|_| "user".into());
-    std::env::temp_dir().join(format!("easi-{user}.sock"))
+    // A shared-/tmp name is predictable and can be pre-created by another user, so fall back to
+    // a 0700 dir of our own; the socket's safety rests on that dir, so refuse a symlink or a
+    // dir others can enter and run without single-instance hand-off instead.
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let easi_dir = InstallRoots::default_user().ok()?.easi_dir;
+    std::fs::create_dir_all(&easi_dir).ok()?;
+    let run_dir = easi_dir.join("run");
+    let _ = std::fs::DirBuilder::new().mode(0o700).create(&run_dir);
+    let meta = std::fs::symlink_metadata(&run_dir).ok()?;
+    (meta.is_dir() && meta.permissions().mode() & 0o077 == 0).then(|| run_dir.join("easi.sock"))
 }
 
 /// If another `easi` GUI instance is already running, forward the request (open path or raise)
 /// over our per-user Unix socket and return `true` so this process exits cleanly.
 fn try_forward_to_running_instance(initial_path: Option<&PathBuf>) -> bool {
-    let sock = single_instance_socket_path();
+    let Some(sock) = single_instance_socket_path() else {
+        return false;
+    };
     let Ok(mut stream) = UnixStream::connect(&sock) else {
         return false;
     };
@@ -51,12 +61,13 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         return Ok(());
     }
     let sock_path = single_instance_socket_path();
-    let _ = std::fs::remove_file(&sock_path);
-    let listener = UnixListener::bind(&sock_path).ok();
-    if listener.is_some() {
+    let listener = sock_path.as_ref().and_then(|p| {
+        let _ = std::fs::remove_file(p);
+        let listener = UnixListener::bind(p).ok()?;
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600));
-    }
+        let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600));
+        Some(listener)
+    });
 
     let roots = InstallRoots::default_user().unwrap_or_else(|_| {
         InstallRoots::from_home(&std::env::temp_dir().join("easi-fallback-home"))
@@ -1035,7 +1046,9 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         let sock = sock_path.clone();
         let r = Arc::clone(&runner);
         window.on_restart_easi(move || {
-            let _ = std::fs::remove_file(&sock);
+            if let Some(sock) = &sock {
+                let _ = std::fs::remove_file(sock);
+            }
             let exe = resolve_restart_exe(&r.roots);
             if let Some(win) = w.upgrade() {
                 let _ = win.hide();
@@ -1070,10 +1083,14 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         let s = Arc::clone(&store);
         let r = Arc::clone(&runner);
         std::thread::spawn(move || {
+            // Hand-offs are served one at a time, so bound each one: a client that never sends
+            // (or never stops sending) must not wedge every later hand-off.
             for stream in listener.incoming().flatten() {
-                let mut reader = BufReader::new(stream);
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                let mut reader = BufReader::new(stream.take(4096));
                 let mut line = String::new();
-                if reader.read_line(&mut line).is_ok() {
+                // Act only on a complete line; a cut-off one would open a truncated path.
+                if reader.read_line(&mut line).is_ok() && line.ends_with('\n') {
                     let trimmed = line.trim_end_matches(&['\r', '\n'][..]);
                     let open_target = trimmed.strip_prefix("OPEN:").map(PathBuf::from);
                     let w = w.clone();
@@ -1101,7 +1118,9 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
     }
 
     let res = window.run();
-    let _ = std::fs::remove_file(&sock_path);
+    if let Some(sock) = &sock_path {
+        let _ = std::fs::remove_file(sock);
+    }
     res
 }
 
