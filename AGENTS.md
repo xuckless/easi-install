@@ -85,6 +85,9 @@ fix the table shape first.
 - Never run code from a package during inspection (pure-Rust SquashFS/archive readers only;
   no executing bundled scripts without explicit static-analysis consent).
 - Downloaded files are untrusted: extract to a fresh temp dir, never `cd` into it to run tools.
+- Untrusted package parsing goes only through `sandbox::inspect_package` (the `__inspect` helper)
+  and consented installer scripts only through `sandbox::Confined` (`__sandbox-exec`). Never report
+  a `SandboxStatus` stronger than the one the helper returned.
 
 ## Code & repo conventions
 
