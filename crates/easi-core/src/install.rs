@@ -227,7 +227,15 @@ where
                 if let Some(parent) = orig.parent() {
                     let _ = fs::create_dir_all(parent);
                 }
-                let _ = fs::copy(saved, orig);
+                // Atomic per file (the backup may sit on another filesystem, so no rename), with
+                // the backup's mode, so a crash mid-restore never leaves a truncated launcher.
+                if let (Ok(bytes), Ok(meta)) = (fs::read(&saved), fs::metadata(&saved)) {
+                    let _ = crate::atomic::write_atomic(
+                        &orig,
+                        &bytes,
+                        meta.permissions().mode() & 0o7777,
+                    );
+                }
             }
             if let Some(old) = &old_manifest {
                 let _ = save_manifest(roots, old);
@@ -1957,6 +1965,8 @@ mod tests {
         .expect("install v1");
         let marker = s1.install_dir.join("v1_marker.txt");
         fs::write(&marker, "still-here").expect("write marker");
+        let v1_desktop =
+            fs::read_to_string(roots.desktop_dir.join("coolapp.desktop")).expect("v1 desktop");
 
         // Attempt replace with cancel already set -> must fail AND restore v1 cleanly!
         let pkg_v2 = make_gui_tarball(&dl_dir, "CoolApp-2.0.0.tar.gz", &[]);
@@ -1985,8 +1995,9 @@ mod tests {
             marker.exists(),
             "v1 install dir must be restored on failed replace"
         );
-        assert!(
-            roots.desktop_dir.join("coolapp.desktop").exists(),
+        assert_eq!(
+            fs::read_to_string(roots.desktop_dir.join("coolapp.desktop")).ok(),
+            Some(v1_desktop),
             "v1 .desktop must be restored on failed replace"
         );
         let m = find_manifest_by_id(&roots, "coolapp").expect("v1 manifest must remain");
