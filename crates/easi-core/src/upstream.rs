@@ -549,6 +549,67 @@ fn is_safe_host(host: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.'))
 }
 
+/// Release CDN hosts GitHub serves `browser_download_url` assets from (after its redirect).
+const GITHUB_DOWNLOAD_HOSTS: &[&str] = &[
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+];
+const JETBRAINS_DOWNLOAD_HOSTS: &[&str] = &["download.jetbrains.com", "download-cdn.jetbrains.com"];
+/// Second-level labels that act as public suffixes under two-letter ccTLDs (`example.co.uk`).
+const CCTLD_SECOND_LEVELS: &[&str] = &["ac", "co", "com", "edu", "gov", "net", "org"];
+
+/// Lowercase host of an `https://` URL; userinfo (`user@host`) and non-DNS hosts are refused.
+fn url_host(url: &str) -> Option<String> {
+    let authority = url
+        .strip_prefix("https://")?
+        .split(['/', '?', '#'])
+        .next()?;
+    if authority.contains('@') {
+        return None;
+    }
+    let host = authority
+        .split(':')
+        .next()?
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    is_safe_host(&host).then_some(host)
+}
+
+/// Approximate eTLD+1 (no public suffix list): last two labels, or three under `co.uk`-style suffixes.
+fn registrable_domain(host: &str) -> &str {
+    let mut labels = host.rsplit('.');
+    let tld = labels.next().unwrap_or_default();
+    let sld = labels.next().unwrap_or_default();
+    let keep = if tld.len() == 2 && CCTLD_SECOND_LEVELS.contains(&sld) {
+        3
+    } else {
+        2
+    };
+    host.rmatch_indices('.')
+        .nth(keep - 1)
+        .map_or(host, |(i, _)| &host[i + 1..])
+}
+
+/// Whether `url` (checked before download and again on curl's final redirect target) is on a
+/// host pinned for `source`: fixed CDN lists for GitHub/JetBrains, the forge host itself for
+/// GitLab/Gitea, and the recorded URL's registrable domain for URL-based sources.
+pub fn download_host_allowed(source: &UpdateSource, url: &str) -> bool {
+    let Some(host) = url_host(url) else {
+        return false;
+    };
+    match source {
+        UpdateSource::GitHubRelease { .. } => GITHUB_DOWNLOAD_HOSTS.contains(&host.as_str()),
+        UpdateSource::JetBrains { .. } => JETBRAINS_DOWNLOAD_HOSTS.contains(&host.as_str()),
+        UpdateSource::ForgeRelease { host: forge, .. } => host.eq_ignore_ascii_case(forge),
+        UpdateSource::ZsyncUrl { url: recorded }
+        | UpdateSource::ElectronYaml { url: recorded }
+        | UpdateSource::HttpRedirect { url: recorded } => {
+            url_host(recorded).is_some_and(|r| registrable_domain(&r) == registrable_domain(&host))
+        }
+    }
+}
+
 fn is_safe_product_code(code: &str) -> bool {
     !code.is_empty() && code.len() <= 16 && code.chars().all(|c| c.is_ascii_alphanumeric())
 }
@@ -1331,7 +1392,17 @@ pub fn download_and_update_app(
         .filter(|s| !s.is_empty() && *s != "." && *s != "..")
         .unwrap_or("update.pkg");
     let dest = crate::roots::safe_join(tmp.path(), Path::new(raw_fname))?;
-    download_to_file(&download_url, &dest)?;
+    let untrusted = |url: &str| EasiError::UntrustedDownloadHost {
+        url: url.to_string(),
+        update_source: source.display_label(),
+    };
+    if !download_host_allowed(source, &download_url) {
+        return Err(untrusted(&download_url));
+    }
+    let final_url = download_to_file(&download_url, &dest)?;
+    if !download_host_allowed(source, &final_url) {
+        return Err(untrusted(&final_url));
+    }
     let integrity = verify_integrity(&dest, published_digest.as_ref())?;
 
     let classified = classify_package(&dest, |_| Some(manifest.to_installed_app()))?;
@@ -1395,7 +1466,8 @@ fn resolve_zsync_download_url(zsync_url: &str, header: &str) -> Option<String> {
     None
 }
 
-fn download_to_file(url: &str, dest: &Path) -> Result<(), EasiError> {
+/// Download `url` to `dest` and return curl's final URL after redirects.
+fn download_to_file(url: &str, dest: &Path) -> Result<String, EasiError> {
     require_https_url(url).map_err(EasiError::Desktop)?;
     let out = Command::new("curl")
         .args([
@@ -1410,6 +1482,8 @@ fn download_to_file(url: &str, dest: &Path) -> Result<(), EasiError> {
             "--max-filesize",
             "2147483648",
             "-fsSL",
+            "-w",
+            "%{url_effective}",
             "-o",
         ])
         .arg(dest)
@@ -1420,7 +1494,7 @@ fn download_to_file(url: &str, dest: &Path) -> Result<(), EasiError> {
     if !out.status.success() {
         return Err(EasiError::Desktop(format!("failed to download {url}")));
     }
-    Ok(())
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 #[cfg(test)]
@@ -1548,6 +1622,72 @@ mod tests {
         ];
         for (name, header, want) in zsync_rows {
             assert_eq!(&parse_zsync_sha1(header), want, "{name}");
+        }
+    }
+
+    #[test]
+    fn download_hosts_are_pinned_per_source() {
+        let github = lookup_known_app_source("zed").unwrap();
+        let jetbrains = lookup_known_app_source("webstorm").unwrap();
+        let gitlab = parse_user_update_url("https://gitlab.com/foo/bar").unwrap();
+        let electron = UpdateSource::ElectronYaml {
+            url: "https://updates.example.com/linux".into(),
+        };
+        let redirect = UpdateSource::HttpRedirect {
+            url: "https://example.co.uk/latest".into(),
+        };
+        let rows: &[(&UpdateSource, &str, bool)] = &[
+            (
+                &github,
+                "https://github.com/o/r/releases/download/v1/a.tar.gz",
+                true,
+            ),
+            (
+                &github,
+                "https://release-assets.githubusercontent.com/x?sig=1",
+                true,
+            ),
+            (&github, "https://objects.githubusercontent.com:443/x", true),
+            (&github, "https://evil.example/a.tar.gz", false),
+            (&github, "https://github.com.evil.example/a", false),
+            (&github, "https://github.com@evil.example/a", false),
+            (&github, "http://github.com/a", false),
+            (
+                &jetbrains,
+                "https://download.jetbrains.com/webstorm/WS.tar.gz",
+                true,
+            ),
+            (
+                &jetbrains,
+                "https://download-cdn.jetbrains.com/webstorm/WS.tar.gz",
+                true,
+            ),
+            (
+                &jetbrains,
+                "https://jetbrains.evil.example/WS.tar.gz",
+                false,
+            ),
+            (
+                &gitlab,
+                "https://gitlab.com/foo/bar/-/releases/v1/downloads/a",
+                true,
+            ),
+            (&gitlab, "https://GitLab.com./foo/bar/a", true),
+            (&gitlab, "https://cdn.example/a", false),
+            (&electron, "https://dl.example.com/App.AppImage", true),
+            (&electron, "https://example.com/App.AppImage", true),
+            (&electron, "https://example.net/App.AppImage", false),
+            (&redirect, "https://cdn.example.co.uk/app.tar.gz", true),
+            (&redirect, "https://other.co.uk/app.tar.gz", false),
+            (&redirect, "not a url", false),
+        ];
+        for (source, url, want) in rows {
+            assert_eq!(
+                download_host_allowed(source, url),
+                *want,
+                "{} -> {url}",
+                source.display_label()
+            );
         }
     }
 

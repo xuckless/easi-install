@@ -42,6 +42,9 @@ pub enum EasiError {
         found: String,
     },
 
+    #[error("update blocked: untrusted download host {url} for {update_source}")]
+    UntrustedDownloadHost { url: String, update_source: String },
+
     #[error("desktop integration error: {0}")]
     Desktop(String),
 
@@ -76,6 +79,10 @@ struct ErrorHelp {
 }
 
 const ERROR_HINTS: &[ErrorHelp] = &[
+    ErrorHelp {
+        prefix: "update blocked: untrusted download host",
+        hint: "The update source sent the download to a host it is not pinned to, which can mean a hijacked release; nothing was installed. If the publisher really moved its downloads, re-record the source with `easi set-source <app> <url>`.",
+    },
     ErrorHelp {
         prefix: "downloaded update failed its",
         hint: "The file does not match the checksum its publisher listed; nothing was installed. Retry later — if it persists, the release or download mirror may be tampered with.",
