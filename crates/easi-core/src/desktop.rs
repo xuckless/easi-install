@@ -16,6 +16,22 @@ pub const EASI_DESKTOP_ID: &str = "easi.desktop";
 const SYSTEMD_TIMER_NAME: &str = "easi-check-updates.timer";
 const SYSTEMD_SERVICE_NAME: &str = "easi-check-updates.service";
 
+/// systemd.service "Command lines": inside double quotes `\` and `"` take a backslash and `%`
+/// starts a specifier (`%%` is literal). `$` is only expanded in arguments, never in the program
+/// path (checked with `systemd-analyze verify`), so it stays as is.
+const SYSTEMD_EXEC_ESCAPES: &[(char, &str)] = &[('\\', r"\\"), ('"', r#"\""#), ('%', "%%")];
+
+/// Quote `bin` as the program of an `ExecStart=` line; line breaks are dropped since a unit
+/// file line cannot hold them.
+fn quote_systemd_exec(bin: &Path) -> String {
+    let path: String = bin
+        .to_string_lossy()
+        .chars()
+        .filter(|c| !matches!(c, '\r' | '\n'))
+        .collect();
+    crate::install::quote_with(&path, SYSTEMD_EXEC_ESCAPES)
+}
+
 /// Check whether the optional `systemd --user` background update-check timer is installed.
 pub fn is_background_update_timer_enabled(roots: &InstallRoots) -> bool {
     roots
@@ -37,18 +53,14 @@ pub fn set_background_update_timer(
 
     if enabled {
         fs::create_dir_all(&unit_dir)?;
-        let exec: String = easi_bin
-            .to_string_lossy()
-            .chars()
-            .filter(|c| !matches!(c, '\r' | '\n' | '"'))
-            .collect();
+        let exec = quote_systemd_exec(easi_bin);
         let service = format!(
             "[Unit]\n\
              Description=Check upstream updates for easi-managed apps\n\
              After=network-online.target\n\n\
              [Service]\n\
              Type=oneshot\n\
-             ExecStart=\"{exec}\" check-updates\n"
+             ExecStart={exec} check-updates\n"
         );
         let timer = "[Unit]\n\
              Description=Daily easi app update check\n\n\
@@ -555,5 +567,21 @@ mod tests {
             loaded.defaults.get("application/zip").map(String::as_str),
             Some("org.gnome.FileRoller.desktop")
         );
+    }
+
+    #[test]
+    fn systemd_exec_quotes_specifiers_variables_and_quotes() {
+        // (easi binary path, ExecStart= program as written)
+        let rows = [
+            ("/home/u/.local/bin/easi", r#""/home/u/.local/bin/easi""#),
+            ("/home/u/My Bin/easi", r#""/home/u/My Bin/easi""#),
+            ("/home/u/100%/easi", r#""/home/u/100%%/easi""#),
+            ("/home/u/$HOME/easi", r#""/home/u/$HOME/easi""#),
+            (r#"/home/u/a"b\c/easi"#, r#""/home/u/a\"b\\c/easi""#),
+            ("/home/u/x\ny/easi", r#""/home/u/xy/easi""#),
+        ];
+        for (path, expected) in rows {
+            assert_eq!(quote_systemd_exec(Path::new(path)), expected, "{path}");
+        }
     }
 }
