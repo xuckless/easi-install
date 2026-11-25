@@ -24,7 +24,9 @@ use crate::manifest::{
 use crate::model::{Format, InstallPlan, InstallStep, InstallSummary};
 use crate::plan::{PlanOp, detect_de_quirk, plan_ops};
 use crate::roots::{InstallRoots, safe_join};
-use crate::sandbox::{Isolation, inspect_package};
+use crate::sandbox::{
+    Confined, Isolation, SandboxStatus, WaitOutcome, inspect_package, wait_or_kill,
+};
 
 /// Records every created file/symlink/dir in order so failure or cancel rolls back cleanly.
 #[derive(Debug, Default)]
@@ -57,6 +59,10 @@ pub fn rollback_paths(files: &[PathBuf], dirs: &[PathBuf]) {
         let _ = fs::remove_dir(dir);
     }
 }
+
+/// Environment an installer script may inherit; display, D-Bus, SSH-agent and token variables
+/// are withheld, and HOME/TMPDIR/PREFIX/EASI_INSTALL_DIR are set explicitly.
+const INSTALLER_ENV_PASSTHROUGH: &[&str] = &["PATH", "LANG", "LC_ALL", "TERM"];
 
 fn check_cancelled(cancel_flag: &AtomicBool) -> Result<(), EasiError> {
     if cancel_flag.load(Ordering::Relaxed) {
@@ -191,6 +197,7 @@ where
         .zip(plan.icon_bytes.as_ref())
         .map(|(p, b)| (p.clone(), b.clone()));
     let mut installed_icon_name: Option<String> = None;
+    let mut script_sandbox: Option<SandboxStatus> = None;
 
     for (idx, op) in ops.iter().enumerate() {
         check_cancelled(cancel_flag)?;
@@ -284,47 +291,62 @@ where
                 ];
                 let before = snapshot_files(&watched);
                 let staging = TempDir::new()?;
+                // Locked decision: the script may write only here; dotfiles like ~/.bashrc,
+                // ~/.profile and ~/.ssh stay read-only. Rules only apply to existing paths.
+                let writable = [
+                    app_dir.clone(),
+                    staging.path().to_path_buf(),
+                    roots.bin_dir.clone(),
+                    roots.desktop_dir.clone(),
+                    roots.icons_dir.clone(),
+                    roots.home_dir.join(".config"),
+                    roots.home_dir.join(".local/share"),
+                ];
+                for dir in &writable {
+                    fs::create_dir_all(dir)?;
+                }
+                let mut confined = Confined::new(isolation, &writable, "sh")?;
                 // Own process group so cancel/timeout can kill everything the script spawned
                 // (RLIMIT_NPROC is per-UID across the whole desktop session, so a `ulimit -u` cap
                 // broke every installer). `--` stops the script path being read as an option.
-                let mut child = Command::new("sh")
+                // A scrubbed environment keeps display, D-Bus, SSH-agent and token variables
+                // away from the script.
+                let mut child = confined
+                    .command
                     .arg("--")
                     .arg(&plan.source_path)
                     .process_group(0)
                     .current_dir(staging.path())
+                    .env_clear()
+                    .envs(
+                        INSTALLER_ENV_PASSTHROUGH
+                            .iter()
+                            .filter_map(|k| std::env::var_os(k).map(|v| (k, v))),
+                    )
                     .env("HOME", &roots.home_dir)
+                    .env("TMPDIR", staging.path())
                     .env("PREFIX", &app_dir)
                     .env("EASI_INSTALL_DIR", &app_dir)
                     .spawn()?;
-                let started = std::time::Instant::now();
-                let max_duration = std::time::Duration::from_secs(300);
-                let status = loop {
-                    if let Some(st) = child.try_wait()? {
-                        break st;
+                let max = std::time::Duration::from_secs(LIMITS.installer_wall_secs);
+                let status = match wait_or_kill(&mut child, max, cancel_flag)? {
+                    WaitOutcome::Exited(status) => status,
+                    WaitOutcome::Cancelled => {
+                        return Err(EasiError::Desktop("installation cancelled".into()));
                     }
-                    let abort = if cancel_flag.load(Ordering::Relaxed) {
-                        Some("installation cancelled")
-                    } else if started.elapsed() > max_duration {
-                        Some("installer script exceeded 5-minute timeout and was terminated")
-                    } else {
-                        None
-                    };
-                    if let Some(reason) = abort {
-                        // The group id is the child's pid (process_group(0)); `kill` avoids unsafe libc.
-                        let _ = Command::new("kill")
-                            .args(["-KILL", "--", &format!("-{}", child.id())])
-                            .status();
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return Err(EasiError::Desktop(reason.into()));
+                    WaitOutcome::TimedOut => {
+                        return Err(EasiError::Desktop(format!(
+                            "installer script exceeded {}-minute timeout and was terminated",
+                            LIMITS.installer_wall_secs / 60
+                        )));
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(50));
                 };
                 if !status.success() {
                     return Err(EasiError::Desktop(format!(
                         "installer script exited with status {status}"
                     )));
                 }
+                script_sandbox = Some(confined.status());
                 let after = snapshot_files(&watched);
                 for path in after {
                     if !before.contains(&path) {
@@ -482,6 +504,7 @@ where
         install_dir: app_dir,
         kind: plan.kind,
         bin_on_path: is_bin_dir_on_path(&roots.bin_dir),
+        script_sandbox,
     })
 }
 

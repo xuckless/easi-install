@@ -202,6 +202,54 @@ fn sandbox_exec_main(args: &[OsString]) -> ExitCode {
     helper_fail(SANDBOX_EXEC, err)
 }
 
+/// A command confined by `__sandbox-exec` (or run directly for [`Isolation::InProcess`]) plus
+/// where its helper reports the sandbox status it achieved.
+pub(crate) struct Confined {
+    pub command: Command,
+    // Its own temp dir, outside every writable path, so the confined program cannot forge it.
+    report: Option<(tempfile::TempDir, PathBuf)>,
+}
+
+impl Confined {
+    /// `program` may write only beneath `writable` (plus [`SHELL_DEVICES`]); reads stay open.
+    pub(crate) fn new(
+        isolation: &Isolation,
+        writable: &[PathBuf],
+        program: &str,
+    ) -> std::io::Result<Self> {
+        let exe = match isolation {
+            Isolation::InProcess => {
+                return Ok(Self {
+                    command: Command::new(program),
+                    report: None,
+                });
+            }
+            Isolation::Helper(exe) => exe,
+        };
+        let dir = tempfile::TempDir::new()?;
+        let status_file = dir.path().join("sandbox.json");
+        let mut command = Command::new(exe);
+        command.arg(SANDBOX_EXEC).arg("--status").arg(&status_file);
+        for path in writable {
+            command.arg("--write").arg(path);
+        }
+        command.args(["--", program]);
+        Ok(Self {
+            command,
+            report: Some((dir, status_file)),
+        })
+    }
+
+    /// What the helper reported; anything unreadable is reported as unsandboxed.
+    pub(crate) fn status(&self) -> SandboxStatus {
+        self.report
+            .as_ref()
+            .and_then(|(_, file)| std::fs::read(file).ok())
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or(SandboxStatus::NotEnforced)
+    }
+}
+
 /// What the `__inspect` helper prints on stdout.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct InspectReply {

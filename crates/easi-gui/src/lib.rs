@@ -1472,6 +1472,7 @@ fn project_state(win: &ui::AppWindow, state: &State, ui: &ManagerUi) {
                             .into(),
                     );
                 }
+                lines.push(format!("• {}", trust.sandbox.script_note()));
                 win.set_script_warning_text(lines.join("\n").into());
             } else {
                 win.set_has_script_warning(false);
@@ -1556,11 +1557,14 @@ fn project_state(win: &ui::AppWindow, state: &State, ui: &ManagerUi) {
             win.set_error_text("".into());
             match outcome {
                 DoneOutcome::Installed { summary, trashed } => {
-                    let msg = if *trashed {
+                    let mut msg = if *trashed {
                         format!("{} installed and download moved to Trash.", summary.name)
                     } else {
                         format!("{} installed.", summary.name)
                     };
+                    if let Some(sandbox) = summary.script_sandbox {
+                        msg.push_str(&format!(" Installer script ran {}.", sandbox.label()));
+                    }
                     win.set_status_text(msg.into());
                 }
                 DoneOutcome::HandedOff { .. } => {

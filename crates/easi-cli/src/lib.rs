@@ -978,6 +978,7 @@ fn run_install_cmd(
                             "    * Note: script is obfuscated or contains binary data — exact commands cannot be fully verified."
                         );
                     }
+                    println!("    * {}", trust.sandbox.script_note());
                     if allow_script {
                         Action::ConfirmInstall
                     } else if yes {
@@ -1103,6 +1104,9 @@ fn run_install_cmd(
                             );
                         } else {
                             println!("Done! {} installed.", summary.name);
+                        }
+                        if let Some(sandbox) = summary.script_sandbox {
+                            println!("Installer script ran {}.", sandbox.label());
                         }
                     }
                     DoneOutcome::HandedOff { path } => {

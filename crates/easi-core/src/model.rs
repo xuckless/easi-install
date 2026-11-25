@@ -246,6 +246,8 @@ pub struct InstallSummary {
     pub install_dir: PathBuf,
     pub kind: AppKind,
     pub bin_on_path: bool,
+    /// Sandbox a consented `.run`/`.sh` installer script actually ran under (None: no script).
+    pub script_sandbox: Option<SandboxStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

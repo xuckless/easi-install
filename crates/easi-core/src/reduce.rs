@@ -752,6 +752,7 @@ mod tests {
             install_dir: PathBuf::from("/tmp/apps/Foo"),
             kind: AppKind::Gui,
             bin_on_path: true,
+            script_sandbox: None,
         }
     }
 
