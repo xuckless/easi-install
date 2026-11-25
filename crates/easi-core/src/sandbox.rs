@@ -538,7 +538,19 @@ mod tests {
             let helper = tmp.path().join(format!("helper{i}"));
             std::fs::write(&helper, format!("#!/bin/sh\n{body}\n")).unwrap();
             std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
-            let err = inspect_package(&Isolation::Helper(helper), &pkg, Format::ShellInstaller)
+            // A sibling test forking while this script's write fd is open makes exec fail with
+            // ETXTBSY until that child execs; retry briefly instead of racing.
+            let isolation = Isolation::Helper(helper);
+            let err = (0..50)
+                .map(|_| inspect_package(&isolation, &pkg, Format::ShellInstaller))
+                .find_map(|r| match r {
+                    Err(EasiError::Io(e)) if e.raw_os_error() == Some(26) => {
+                        std::thread::sleep(Duration::from_millis(20));
+                        None
+                    }
+                    other => Some(other),
+                })
+                .expect("helper kept failing with ETXTBSY")
                 .expect_err(body);
             let msg = err.to_string();
             assert!(
