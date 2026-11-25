@@ -33,6 +33,15 @@ pub enum EasiError {
     #[error("release signature verification failed: {0}")]
     Signature(String),
 
+    #[error(
+        "downloaded update failed its {algo} integrity check (published {expected}, got {found})"
+    )]
+    DigestMismatch {
+        algo: &'static str,
+        expected: String,
+        found: String,
+    },
+
     #[error("desktop integration error: {0}")]
     Desktop(String),
 
@@ -67,6 +76,10 @@ struct ErrorHelp {
 }
 
 const ERROR_HINTS: &[ErrorHelp] = &[
+    ErrorHelp {
+        prefix: "downloaded update failed its",
+        hint: "The file does not match the checksum its publisher listed; nothing was installed. Retry later — if it persists, the release or download mirror may be tampered with.",
+    },
     ErrorHelp {
         prefix: "path not found",
         hint: "Check that the file still exists and was not moved.",

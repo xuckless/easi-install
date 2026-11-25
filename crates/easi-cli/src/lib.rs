@@ -470,11 +470,12 @@ fn run_update_cmd(roots: &InstallRoots, app: Option<&str>, all: bool) -> ExitCod
     for m in &targets {
         println!("Updating {}…", m.name);
         match easi_core::upstream::download_and_update_app(roots, m) {
-            Ok(summary) => {
+            Ok(easi_core::upstream::UpdateOutcome { summary, integrity }) => {
                 println!(
-                    "Updated {} to {}.",
+                    "Updated {} to {} ({}).",
                     summary.name,
-                    summary.version.as_deref().unwrap_or("latest")
+                    summary.version.as_deref().unwrap_or("latest"),
+                    integrity.label()
                 );
             }
             Err(e) => {

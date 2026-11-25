@@ -675,9 +675,13 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                     .and_then(|m| easi_core::upstream::download_and_update_app(&r.roots, &m));
                 let _ = slint::invoke_from_event_loop(move || {
                     match outcome {
-                        Ok(summary) => {
+                        Ok(easi_core::upstream::UpdateOutcome { summary, integrity }) => {
                             let ver = summary.version.as_deref().unwrap_or("latest");
-                            let msg = format!("Updated {} to {ver}.", summary.name);
+                            let msg = format!(
+                                "Updated {} to {ver} ({}).",
+                                summary.name,
+                                integrity.label()
+                            );
                             if let Some(win) = w.upgrade() {
                                 win.set_detail_feedback(msg.into());
                             }
@@ -923,7 +927,7 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
                     match easi_core::upstream::check_app_update(m) {
                         easi_core::upstream::AppUpdateStatus::UpdateAvailable { .. } => {
                             match easi_core::upstream::download_and_update_app(&r.roots, m) {
-                                Ok(summary) => {
+                                Ok(easi_core::upstream::UpdateOutcome { summary, .. }) => {
                                     let ver = summary.version.as_deref().unwrap_or("latest");
                                     status_map.insert(
                                         m.app_id.clone(),

@@ -2,7 +2,6 @@
 //! and the pinned minisign signature, extracts safely, and atomically swaps the running binary.
 
 use std::fs::{self, File};
-use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -187,7 +186,7 @@ pub fn run_self_update(
     let expected = parse_sha256sums(&sums_text, &tarball_name).ok_or_else(|| {
         EasiError::Desktop(format!("checksum for {tarball_name} missing in SHA256SUMS"))
     })?;
-    let actual = sha256_file(&tarball_path)?;
+    let actual = file_digest_hex::<Sha256>(&tarball_path)?;
     if actual != expected {
         return Err(EasiError::Desktop(format!(
             "SHA-256 mismatch for {tarball_name}: expected {expected}, got {actual}"
@@ -363,17 +362,10 @@ pub fn parse_sha256sums(text: &str, filename: &str) -> Option<String> {
     None
 }
 
-pub fn sha256_file(path: &Path) -> Result<String, EasiError> {
-    let mut file = File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
+/// Stream a file through any RustCrypto hasher and return the lowercase hex digest.
+pub fn file_digest_hex<D: Digest + std::io::Write>(path: &Path) -> Result<String, EasiError> {
+    let mut hasher = D::new();
+    std::io::copy(&mut File::open(path)?, &mut hasher)?;
     Ok(hasher
         .finalize()
         .iter()

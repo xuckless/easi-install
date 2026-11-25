@@ -16,7 +16,7 @@ use crate::install::execute_install;
 use crate::manifest::{Manifest, list_manifests, resolve_installed, save_manifest};
 use crate::model::{AppKind, Classified, InstallSummary, UpdateSource};
 use crate::roots::InstallRoots;
-use crate::self_update::{extract_json_string_field, is_newer_version};
+use crate::self_update::{extract_json_string_field, file_digest_hex, is_newer_version};
 
 enum KnownSourceKind {
     GitHub(&'static str, &'static str),
@@ -336,7 +336,7 @@ pub fn import_apps_from_toml(
             created_dirs: vec![],
         };
         match download_and_update_app(roots, &synthetic) {
-            Ok(summary) => outcomes.push(ImportOutcome::Installed {
+            Ok(UpdateOutcome { summary, .. }) => outcomes.push(ImportOutcome::Installed {
                 name: summary.name,
                 version: summary.version,
             }),
@@ -652,11 +652,45 @@ pub fn parse_zsync_version(header: &str) -> Option<String> {
     None
 }
 
-/// Parse Electron-builder `latest-linux.yml` -> `(version, relative_or_absolute_path)`.
-pub fn parse_electron_latest_yml(yaml: &str) -> Option<(String, Option<String>)> {
+/// Electron-builder `latest-linux.yml`: version, the top-level `path`, and its top-level `sha512`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ElectronRelease {
+    pub version: String,
+    pub path: Option<String>,
+    pub digest: Option<PublishedDigest>,
+}
+
+pub fn parse_electron_latest_yml(yaml: &str) -> Option<ElectronRelease> {
+    use base64::Engine as _;
     let ver = yaml_field(yaml, "version")?;
     let path = yaml_field(yaml, "path").or_else(|| yaml_field(yaml, "url"));
-    Some((ver.trim_start_matches('v').to_string(), path))
+    // Only the unindented `sha512:` belongs to the top-level `path`; indented ones describe
+    // `files:` entries that may be different artifacts.
+    let digest = yaml
+        .lines()
+        .find_map(|l| l.strip_prefix("sha512:"))
+        .and_then(|b64| {
+            base64::engine::general_purpose::STANDARD
+                .decode(b64.trim().trim_matches(['"', '\'']))
+                .ok()
+        })
+        .and_then(|raw| {
+            let hex: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+            PublishedDigest::new(DigestAlgo::Sha512, &hex)
+        });
+    Some(ElectronRelease {
+        version: ver.trim_start_matches('v').to_string(),
+        path,
+        digest,
+    })
+}
+
+/// `SHA-1:` line of a `.zsync` header: digest of the complete target file.
+pub fn parse_zsync_sha1(header: &str) -> Option<PublishedDigest> {
+    header
+        .lines()
+        .find_map(|l| l.strip_prefix("SHA-1:"))
+        .and_then(|hex| PublishedDigest::new(DigestAlgo::Sha1, hex.trim()))
 }
 
 /// Parse JetBrains releases API JSON -> `(version, linux_download_link)`.
@@ -802,7 +836,7 @@ pub fn check_app_update(manifest: &Manifest) -> AppUpdateStatus {
             let yml_url = electron_yaml_url(url, std::env::consts::ARCH);
             match curl_text(&yml_url, &["-fsSL", "--max-time", "5"]) {
                 Ok(body) => match parse_electron_latest_yml(&body) {
-                    Some((latest, _)) => version_status(manifest, current, latest, yml_url),
+                    Some(release) => version_status(manifest, current, release.version, yml_url),
                     None => fail("could not parse version from latest-linux.yml".into()),
                 },
                 Err(reason) => fail(reason),
@@ -898,7 +932,109 @@ fn resolve_redirect_url(url: &str) -> Result<String, String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedRelease {
     pub version: String,
-    pub asset_urls: Vec<String>,
+    pub assets: Vec<ReleaseAsset>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseAsset {
+    pub url: String,
+    /// GitHub's per-asset `digest` (`sha256:<hex>`); absent on old releases and other forges.
+    pub digest: Option<PublishedDigest>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DigestAlgo {
+    Sha1,
+    Sha256,
+    Sha512,
+}
+
+impl DigestAlgo {
+    const ALL: [Self; 3] = [Self::Sha1, Self::Sha256, Self::Sha512];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Sha1 => "sha1",
+            Self::Sha256 => "sha256",
+            Self::Sha512 => "sha512",
+        }
+    }
+
+    fn hex_len(self) -> usize {
+        match self {
+            Self::Sha1 => 40,
+            Self::Sha256 => 64,
+            Self::Sha512 => 128,
+        }
+    }
+
+    fn file_hex(self, path: &Path) -> Result<String, EasiError> {
+        match self {
+            Self::Sha1 => file_digest_hex::<sha1::Sha1>(path),
+            Self::Sha256 => file_digest_hex::<sha2::Sha256>(path),
+            Self::Sha512 => file_digest_hex::<sha2::Sha512>(path),
+        }
+    }
+}
+
+/// A digest the update source published for the exact file we download.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedDigest {
+    pub algo: DigestAlgo,
+    /// Lowercase hex.
+    pub hex: String,
+}
+
+impl PublishedDigest {
+    /// Malformed digests yield `None` (treated as unavailable) rather than a false mismatch.
+    pub fn new(algo: DigestAlgo, hex: &str) -> Option<Self> {
+        (hex.len() == algo.hex_len() && hex.chars().all(|c| c.is_ascii_hexdigit())).then(|| Self {
+            algo,
+            hex: hex.to_ascii_lowercase(),
+        })
+    }
+}
+
+/// How the downloaded update's bytes were checked against what the source published.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Integrity {
+    Verified(DigestAlgo),
+    Unavailable,
+}
+
+impl Integrity {
+    pub fn label(self) -> String {
+        match self {
+            Self::Verified(algo) => format!("{} checksum verified", algo.name()),
+            Self::Unavailable => "no published checksum".into(),
+        }
+    }
+}
+
+/// Hash the downloaded file when the source published a digest; any mismatch is a hard error.
+pub fn verify_integrity(
+    path: &Path,
+    published: Option<&PublishedDigest>,
+) -> Result<Integrity, EasiError> {
+    let Some(expected) = published else {
+        return Ok(Integrity::Unavailable);
+    };
+    let found = expected.algo.file_hex(path)?;
+    if found != expected.hex {
+        return Err(EasiError::DigestMismatch {
+            algo: expected.algo.name(),
+            expected: expected.hex.clone(),
+            found,
+        });
+    }
+    Ok(Integrity::Verified(expected.algo))
+}
+
+/// The outcome of a successful update, with how its bytes were verified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateOutcome {
+    pub summary: InstallSummary,
+    pub integrity: Integrity,
 }
 
 #[derive(Deserialize)]
@@ -926,6 +1062,8 @@ impl Default for ReleaseAssetsJson {
 #[derive(Deserialize)]
 struct ListedAssetJson {
     browser_download_url: String,
+    #[serde(default)]
+    digest: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -943,28 +1081,39 @@ pub fn parse_release_json(body: &str) -> Option<ParsedRelease> {
         other => other,
     };
     let release: ReleaseJson = serde_json::from_value(object).ok()?;
-    let asset_urls = match release.assets {
-        ReleaseAssetsJson::Listed(list) => {
-            list.into_iter().map(|a| a.browser_download_url).collect()
-        }
+    let assets = match release.assets {
+        ReleaseAssetsJson::Listed(list) => list
+            .into_iter()
+            .map(|a| ReleaseAsset {
+                url: a.browser_download_url,
+                digest: a.digest.as_deref().and_then(|d| {
+                    let (name, hex) = d.split_once(':')?;
+                    let algo = DigestAlgo::ALL.into_iter().find(|a| a.name() == name)?;
+                    PublishedDigest::new(algo, hex)
+                }),
+            })
+            .collect(),
         ReleaseAssetsJson::Linked { links } => links
             .into_iter()
-            .map(|l| l.direct_asset_url.unwrap_or(l.url))
+            .map(|l| ReleaseAsset {
+                url: l.direct_asset_url.unwrap_or(l.url),
+                digest: None,
+            })
             .collect(),
     };
     Some(ParsedRelease {
         version: release.tag_name.trim_start_matches('v').to_string(),
-        asset_urls,
+        assets,
     })
 }
 
 /// Score forge release asset URLs and pick the best match for the current Linux arch and
 /// previously installed package extension.
-pub fn select_best_github_asset(
-    urls: &[String],
+pub fn select_best_github_asset<'a>(
+    assets: &'a [ReleaseAsset],
     arch: &str,
     prev_filename: &str,
-) -> Option<String> {
+) -> Option<&'a ReleaseAsset> {
     let prev_lower = prev_filename.to_ascii_lowercase();
     let arch_tokens: &[&str] = match arch {
         "aarch64" => &["aarch64", "arm64"],
@@ -979,8 +1128,9 @@ pub fn select_best_github_asset(
         ],
     };
 
-    let mut best: Option<(i32, &String)> = None;
-    for url in urls {
+    let mut best: Option<(i32, &ReleaseAsset)> = None;
+    for asset in assets {
+        let url = &asset.url;
         if !url.starts_with("https://") {
             continue;
         }
@@ -1015,17 +1165,17 @@ pub fn select_best_github_asset(
             score += 25;
         }
         if score > 0 && best.is_none_or(|(bs, _)| score > bs) {
-            best = Some((score, url));
+            best = Some((score, asset));
         }
     }
-    best.map(|(_, u)| u.clone())
+    best.map(|(_, a)| a)
 }
 
 /// Download the latest release for `manifest` into a temp dir and run a transactional replace.
 pub fn download_and_update_app(
     roots: &InstallRoots,
     manifest: &Manifest,
-) -> Result<InstallSummary, EasiError> {
+) -> Result<UpdateOutcome, EasiError> {
     let source = manifest.update_source.as_ref().ok_or_else(|| {
         EasiError::Desktop(format!(
             "{} has no recorded upstream update source",
@@ -1033,7 +1183,12 @@ pub fn download_and_update_app(
         ))
     })?;
 
-    let (download_url, known_latest_version): (String, Option<String>) = match source {
+    // Each source names its download URL, release version, and where its published digest lives.
+    let (download_url, known_latest_version, published_digest): (
+        String,
+        Option<String>,
+        Option<PublishedDigest>,
+    ) = match source {
         UpdateSource::GitHubRelease { owner, repo, .. } => {
             if !is_safe_repo_segment(owner) || !is_safe_repo_segment(repo) {
                 return Err(EasiError::Desktop(format!(
@@ -1046,8 +1201,8 @@ pub fn download_and_update_app(
             let release = parse_release_json(&body).ok_or_else(|| {
                 EasiError::Desktop("could not parse GitHub release response".into())
             })?;
-            let url = select_best_github_asset(
-                &release.asset_urls,
+            let asset = select_best_github_asset(
+                &release.assets,
                 std::env::consts::ARCH,
                 &manifest.source_filename,
             )
@@ -1058,7 +1213,11 @@ pub fn download_and_update_app(
                     std::env::consts::ARCH
                 ))
             })?;
-            (url, Some(release.version))
+            (
+                asset.url.clone(),
+                Some(release.version.clone()),
+                asset.digest.clone(),
+            )
         }
         UpdateSource::ForgeRelease {
             host,
@@ -1081,8 +1240,8 @@ pub fn download_and_update_app(
             let release = parse_release_json(&body).ok_or_else(|| {
                 EasiError::Desktop(format!("could not parse {host} release response"))
             })?;
-            let url = select_best_github_asset(
-                &release.asset_urls,
+            let asset = select_best_github_asset(
+                &release.assets,
                 std::env::consts::ARCH,
                 &manifest.source_filename,
             )
@@ -1092,7 +1251,11 @@ pub fn download_and_update_app(
                     manifest.name
                 ))
             })?;
-            (url, Some(release.version))
+            (
+                asset.url.clone(),
+                Some(release.version.clone()),
+                asset.digest.clone(),
+            )
         }
         UpdateSource::ZsyncUrl { url } => {
             let header = curl_text(url, &["-fsSL", "--max-time", "10", "-r", "0-4095"])
@@ -1101,16 +1264,17 @@ pub fn download_and_update_app(
             let dl = resolve_zsync_download_url(url, &header).ok_or_else(|| {
                 EasiError::Desktop(format!("could not resolve download URL from {url}"))
             })?;
-            (dl, ver)
+            (dl, ver, parse_zsync_sha1(&header))
         }
         UpdateSource::ElectronYaml { url } => {
             let yml_url = electron_yaml_url(url, std::env::consts::ARCH);
             let body =
                 curl_text(&yml_url, &["-fsSL", "--max-time", "10"]).map_err(EasiError::Desktop)?;
-            let (ver, path_opt) = parse_electron_latest_yml(&body).ok_or_else(|| {
+            let release = parse_electron_latest_yml(&body).ok_or_else(|| {
                 EasiError::Desktop(format!("could not parse download path from {yml_url}"))
             })?;
-            let rel = path_opt
+            let rel = release
+                .path
                 .ok_or_else(|| EasiError::Desktop(format!("no file path listed in {yml_url}")))?;
             let dl = if rel.starts_with("https://") {
                 rel
@@ -1123,7 +1287,7 @@ pub fn download_and_update_app(
             } else {
                 rel
             };
-            (dl, Some(ver))
+            (dl, Some(release.version), release.digest)
         }
         UpdateSource::JetBrains { product_code } => {
             if !is_safe_product_code(product_code) {
@@ -1147,13 +1311,13 @@ pub fn download_and_update_app(
                     "no Linux download found on JetBrains CDN for {product_code}"
                 ))
             })?;
-            (dl, Some(ver))
+            (dl, Some(ver), None)
         }
         UpdateSource::HttpRedirect { url } => {
             let final_url = resolve_redirect_url(url).unwrap_or_else(|_| url.clone());
             let fname = final_url.rsplit('/').next().unwrap_or(&final_url);
             let ver = slug_and_version(fname).1;
-            (final_url, ver)
+            (final_url, ver, None)
         }
     };
 
@@ -1168,6 +1332,7 @@ pub fn download_and_update_app(
         .unwrap_or("update.pkg");
     let dest = crate::roots::safe_join(tmp.path(), Path::new(raw_fname))?;
     download_to_file(&download_url, &dest)?;
+    let integrity = verify_integrity(&dest, published_digest.as_ref())?;
 
     let classified = classify_package(&dest, |_| Some(manifest.to_installed_app()))?;
     let mut plan = match classified {
@@ -1205,7 +1370,7 @@ pub fn download_and_update_app(
             summary.version.as_deref().unwrap_or("latest")
         ),
     );
-    Ok(summary)
+    Ok(UpdateOutcome { summary, integrity })
 }
 
 fn resolve_zsync_download_url(zsync_url: &str, header: &str) -> Option<String> {
@@ -1271,10 +1436,11 @@ mod tests {
                 r#"{"tag_name":"v1.2.0","body":"say \"browser_download_url\": \"https://evil\"","assets":[{"name":"a","browser_download_url":"https://github.com/o/r/releases/download/v1.2.0/app-x86_64.AppImage"}]}"#,
                 Some(ParsedRelease {
                     version: "1.2.0".into(),
-                    asset_urls: vec![
-                        "https://github.com/o/r/releases/download/v1.2.0/app-x86_64.AppImage"
+                    assets: vec![ReleaseAsset {
+                        url: "https://github.com/o/r/releases/download/v1.2.0/app-x86_64.AppImage"
                             .into(),
-                    ],
+                        digest: None,
+                    }],
                 }),
             ),
             (
@@ -1282,9 +1448,10 @@ mod tests {
                 r#"[{"tag_name":"2.0","assets":{"links":[{"url":"https://cdn.example/x.tar.gz","direct_asset_url":"https://gitlab.com/g/p/-/releases/2.0/downloads/x.tar.gz"}]}},{"tag_name":"1.0"}]"#,
                 Some(ParsedRelease {
                     version: "2.0".into(),
-                    asset_urls: vec![
-                        "https://gitlab.com/g/p/-/releases/2.0/downloads/x.tar.gz".into(),
-                    ],
+                    assets: vec![ReleaseAsset {
+                        url: "https://gitlab.com/g/p/-/releases/2.0/downloads/x.tar.gz".into(),
+                        digest: None,
+                    }],
                 }),
             ),
             (
@@ -1292,7 +1459,40 @@ mod tests {
                 r#"{"tag_name":"v3"}"#,
                 Some(ParsedRelease {
                     version: "3".into(),
-                    asset_urls: vec![],
+                    assets: vec![],
+                }),
+            ),
+            (
+                "github digests: valid kept, malformed and unknown algo dropped",
+                r#"{"tag_name":"v4","assets":[
+                    {"browser_download_url":"https://github.com/o/r/a","digest":"sha256:ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef0123456789"},
+                    {"browser_download_url":"https://github.com/o/r/b","digest":"sha256:abc"},
+                    {"browser_download_url":"https://github.com/o/r/c","digest":"md5:d41d8cd98f00b204e9800998ecf8427e"},
+                    {"browser_download_url":"https://github.com/o/r/d","digest":null}]}"#,
+                Some(ParsedRelease {
+                    version: "4".into(),
+                    assets: vec![
+                        ReleaseAsset {
+                            url: "https://github.com/o/r/a".into(),
+                            digest: Some(PublishedDigest {
+                                algo: DigestAlgo::Sha256,
+                                hex: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                                    .into(),
+                            }),
+                        },
+                        ReleaseAsset {
+                            url: "https://github.com/o/r/b".into(),
+                            digest: None,
+                        },
+                        ReleaseAsset {
+                            url: "https://github.com/o/r/c".into(),
+                            digest: None,
+                        },
+                        ReleaseAsset {
+                            url: "https://github.com/o/r/d".into(),
+                            digest: None,
+                        },
+                    ],
                 }),
             ),
             ("missing tag", r#"{"assets":[]}"#, None),
@@ -1301,6 +1501,93 @@ mod tests {
         ];
         for (name, body, want) in rows {
             assert_eq!(&parse_release_json(body), want, "{name}");
+        }
+    }
+
+    #[test]
+    fn published_digests_come_from_each_source_format() {
+        // sha512("abc") and sha1("abc"), as electron-builder (base64) and zsync (hex) publish them.
+        const SHA512_ABC: &str = "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f";
+        let sha512 = |hex: &str| PublishedDigest::new(DigestAlgo::Sha512, hex);
+        let yml_rows: &[(&str, &str, Option<PublishedDigest>)] = &[
+            (
+                "top-level sha512 belongs to path",
+                "version: 1.0.0\nfiles:\n  - url: Other.AppImage\n    sha512: AAAA\npath: App.AppImage\nsha512: 3a81oZNherrMQXNJriBBMRLm+k6JqX6iCp7u5ktV05ohkpkqJ0/BqDa6PCOj/uu9RU1EI2Q86A4qmslPpUyknw==\n",
+                sha512(SHA512_ABC),
+            ),
+            (
+                "only file-entry digests -> unavailable",
+                "version: 1.0.0\nfiles:\n  - url: App.AppImage\n    sha512: 3a81oZNherrMQXNJriBBMRLm+k6JqX6iCp7u5ktV05ohkpkqJ0/BqDa6PCOj/uu9RU1EI2Q86A4qmslPpUyknw==\npath: App.AppImage\n",
+                None,
+            ),
+            (
+                "undecodable base64 -> unavailable",
+                "version: 1.0.0\npath: App.AppImage\nsha512: !!!\n",
+                None,
+            ),
+        ];
+        for (name, yml, want) in yml_rows {
+            assert_eq!(
+                &parse_electron_latest_yml(yml).unwrap().digest,
+                want,
+                "{name}"
+            );
+        }
+
+        let zsync_rows: &[(&str, &str, Option<PublishedDigest>)] = &[
+            (
+                "zsync SHA-1 header",
+                "zsync: 0.6.2\nFilename: App.AppImage\nSHA-1: A9993E364706816ABA3E25717850C26C9CD0D89D\n\n",
+                PublishedDigest::new(DigestAlgo::Sha1, "a9993e364706816aba3e25717850c26c9cd0d89d"),
+            ),
+            (
+                "no SHA-1 line",
+                "zsync: 0.6.2\nFilename: App.AppImage\n",
+                None,
+            ),
+        ];
+        for (name, header, want) in zsync_rows {
+            assert_eq!(&parse_zsync_sha1(header), want, "{name}");
+        }
+    }
+
+    #[test]
+    fn verify_integrity_checks_published_digests() {
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("pkg");
+        fs::write(&file, b"abc").unwrap();
+        let digest = |algo, hex: &str| PublishedDigest::new(algo, hex).unwrap();
+        let sha256_abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        let rows: &[(&str, Option<PublishedDigest>, Result<Integrity, &str>)] = &[
+            ("no digest", None, Ok(Integrity::Unavailable)),
+            (
+                "sha256 match",
+                Some(digest(DigestAlgo::Sha256, sha256_abc)),
+                Ok(Integrity::Verified(DigestAlgo::Sha256)),
+            ),
+            (
+                "sha1 match",
+                Some(digest(
+                    DigestAlgo::Sha1,
+                    "a9993e364706816aba3e25717850c26c9cd0d89d",
+                )),
+                Ok(Integrity::Verified(DigestAlgo::Sha1)),
+            ),
+            (
+                "sha256 mismatch",
+                Some(digest(DigestAlgo::Sha256, &"0".repeat(64))),
+                Err("sha256"),
+            ),
+        ];
+        for (name, published, want) in rows {
+            let got = verify_integrity(&file, published.as_ref());
+            match (got, want) {
+                (Ok(g), Ok(w)) => assert_eq!(&g, w, "{name}"),
+                (Err(EasiError::DigestMismatch { algo, .. }), Err(w)) => {
+                    assert_eq!(algo, *w, "{name}")
+                }
+                (got, want) => panic!("{name}: got {got:?}, want {want:?}"),
+            }
         }
     }
 
@@ -1395,7 +1682,11 @@ mod tests {
         let yml = "version: 3.2.1\npath: MyApp-3.2.1-x86_64.AppImage\n";
         assert_eq!(
             parse_electron_latest_yml(yml),
-            Some(("3.2.1".into(), Some("MyApp-3.2.1-x86_64.AppImage".into())))
+            Some(ElectronRelease {
+                version: "3.2.1".into(),
+                path: Some("MyApp-3.2.1-x86_64.AppImage".into()),
+                digest: None,
+            })
         );
 
         let jb_json = r#"{"WS":[{"version":"2026.1.2","downloads":{"linux":{"link":"https://download.jetbrains.com/webstorm/WebStorm-2026.1.2.tar.gz"}}}]}"#;
