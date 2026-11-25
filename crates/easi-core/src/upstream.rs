@@ -661,9 +661,13 @@ pub fn set_app_update_source(
     source: Option<UpdateSource>,
 ) -> Result<Manifest, EasiError> {
     let mut manifest = resolve_installed(roots, query)?;
+    // A new source is a new trust root; re-selecting the same one (e.g. GUI auto-detect) must
+    // keep the pinned publisher identity or it would silently re-trust on the next update.
+    if manifest.update_source != source {
+        manifest.signer_fingerprint = None;
+        manifest.pinned_download_host = None;
+    }
     manifest.update_source = source;
-    manifest.signer_fingerprint = None;
-    manifest.pinned_download_host = None;
     save_manifest(roots, &manifest)?;
     Ok(manifest)
 }
@@ -2233,19 +2237,37 @@ mod tests {
             exported.contains("zen-browser/desktop") || exported.contains("repo = \"desktop\"")
         );
 
-        // 6b. set-source resets the pinned publisher identity (new source = new trust root).
+        // 6b. set-source resets the pinned publisher identity only when the source changes
+        // (new source = new trust root; re-selecting the same source keeps the pins).
         let pinned = Manifest {
             signer_fingerprint: Some("0123456789ABCDEF0123456789ABCDEF01234567".into()),
             pinned_download_host: Some("dl.example.com".into()),
             ..sample.clone()
         };
-        save_manifest(&roots, &pinned).unwrap();
-        let reset =
-            set_app_update_source(&roots, "zen-browser", parse_user_update_url("o/r")).unwrap();
-        assert_eq!(
-            (reset.signer_fingerprint, reset.pinned_download_host),
-            (None, None)
-        );
+        // (new source, pins kept)
+        let rows = [
+            (sample.update_source.clone(), true),
+            (parse_user_update_url("o/r"), false),
+            (None, false),
+        ];
+        for (source, kept) in rows {
+            save_manifest(&roots, &pinned).unwrap();
+            let after = set_app_update_source(&roots, "zen-browser", source.clone()).unwrap();
+            let expected = if kept {
+                (
+                    pinned.signer_fingerprint.clone(),
+                    pinned.pinned_download_host.clone(),
+                )
+            } else {
+                (None, None)
+            };
+            assert_eq!(
+                (after.signer_fingerprint, after.pinned_download_host),
+                expected,
+                "{source:?}"
+            );
+            assert_eq!(after.update_source, source);
+        }
 
         // 7. Security: plain HTTP and flag-injection strings are refused
         assert_eq!(
