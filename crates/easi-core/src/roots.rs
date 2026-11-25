@@ -54,9 +54,11 @@ impl InstallRoots {
     pub fn is_within_allowed_write_roots(&self, path: &Path) -> bool {
         // `Path::starts_with` treats `..` as an ordinary component, so `root/../.bashrc` would
         // pass the prefix test below; refuse anything that is not plain names under `/`.
-        if !path
-            .components()
-            .all(|c| matches!(c, Component::RootDir | Component::Normal(_)))
+        // Relative paths are refused too: the canonicalize fallback would resolve them from cwd.
+        if !path.is_absolute()
+            || !path
+                .components()
+                .all(|c| matches!(c, Component::RootDir | Component::Normal(_)))
         {
             return false;
         }
@@ -185,6 +187,7 @@ mod tests {
             (format!("{apps}/App/../../.bashrc"), false),
             ("./Applications/App".to_string(), false),
             ("../Applications/App".to_string(), false),
+            ("Applications/App".to_string(), false),
             (apps.clone(), false),
             (
                 tmp.path().join(".bashrc").to_string_lossy().into_owned(),
