@@ -162,6 +162,12 @@ pub fn run(cli: Cli) -> ExitCode {
             easi_core::self_update::corrupt_config_notice(&kept_at)
         );
     }
+    if let (_, Some(kept_at)) = easi_core::desktop::load_saved_handlers_checked(&roots) {
+        eprintln!(
+            "easi: warning: {}",
+            easi_core::desktop::corrupt_handlers_notice(&kept_at)
+        );
+    }
     // Untrusted package parsing and installer scripts run in re-exec'd sandboxed helpers.
     let isolation = Isolation::Helper(resolve_current_exe(&roots));
 

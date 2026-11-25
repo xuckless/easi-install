@@ -97,30 +97,11 @@ pub fn load_config(roots: &InstallRoots) -> EasiConfig {
 /// kept as `config.toml.corrupt-<n>` (never deleted) and replaced by
 /// [`EasiConfig::safe_fallback`]; the second value is where the bad file now is.
 pub fn load_config_checked(roots: &InstallRoots) -> (EasiConfig, Option<PathBuf>) {
-    let path = roots.config_path();
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (EasiConfig::default(), None),
-        Err(_) => return (EasiConfig::safe_fallback(), Some(path)),
-    };
-    if let Some(cfg) = std::str::from_utf8(&bytes)
-        .ok()
-        .and_then(|s| toml::from_str(s).ok())
-    {
-        return (cfg, None);
-    }
-    // hard_link never replaces an existing file, so concurrent recoveries (no lock: callers may
-    // already hold it) cannot clobber an earlier corrupt-<n>; the atomic save then replaces
-    // config.toml so later loads do not flip checks back on.
-    let fallback = EasiConfig::safe_fallback();
-    let Some(aside) = (1..=1000)
-        .map(|n| roots.easi_dir.join(format!("config.toml.corrupt-{n}")))
-        .find(|p| fs::hard_link(&path, p).is_ok())
-    else {
-        return (fallback, Some(path));
-    };
-    let _ = save_config(roots, &fallback);
-    (fallback, Some(aside))
+    crate::atomic::load_toml_checked(
+        &roots.config_path(),
+        EasiConfig::default(),
+        EasiConfig::safe_fallback(),
+    )
 }
 
 pub fn save_config(roots: &InstallRoots, cfg: &EasiConfig) -> Result<PathBuf, EasiError> {

@@ -92,6 +92,12 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
             &easi_core::self_update::corrupt_config_notice(&kept_at),
         );
     }
+    if let (_, Some(kept_at)) = easi_core::desktop::load_saved_handlers_checked(&runner.roots) {
+        easi_core::desktop::notify(
+            "easi handler record reset",
+            &easi_core::desktop::corrupt_handlers_notice(&kept_at),
+        );
+    }
     let needs_onboard = initial_path.is_none() && cfg.needs_onboarding();
     for path in easi_core::manifest::list_manifests_checked(&runner.roots)
         .map(|(_, unreadable)| unreadable)

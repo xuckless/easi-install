@@ -1,10 +1,12 @@
 //! Crash-safe replacement of persistent files (manifests, config, launchers, wrappers, units).
 
-use std::fs::{File, Permissions};
+use std::fs::{self, File, Permissions};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use tempfile::NamedTempFile;
 
 /// Replace `path` with `bytes` and exact `mode` so a crash leaves either the old or the new file,
@@ -24,11 +26,48 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()>
     File::open(dir)?.sync_all()
 }
 
+/// Keep an unreadable state file as `<file>.corrupt-<n>` (first free `n`) and return that path.
+/// `hard_link` never replaces an existing file, so concurrent recoveries (no lock: callers may
+/// already hold it) cannot clobber an earlier copy, and the original stays until replaced.
+pub fn keep_aside(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    (1..=1000)
+        .map(|n| path.with_file_name(format!("{name}.corrupt-{n}")))
+        .find(|aside| fs::hard_link(path, aside).is_ok())
+}
+
+/// Read a TOML state file: `missing` when it does not exist, its value when it parses. One that
+/// does not parse is kept aside ([`keep_aside`]) and atomically replaced by `fallback`, so it is
+/// never silently reset and later loads stay on the fallback; the second value is where the bad
+/// file now is.
+pub fn load_toml_checked<T: DeserializeOwned + Serialize>(
+    path: &Path,
+    missing: T,
+    fallback: T,
+) -> (T, Option<PathBuf>) {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (missing, None),
+        Err(_) => return (fallback, Some(path.to_path_buf())),
+    };
+    if let Some(value) = std::str::from_utf8(&bytes)
+        .ok()
+        .and_then(|s| toml::from_str(s).ok())
+    {
+        return (value, None);
+    }
+    let Some(aside) = keep_aside(path) else {
+        return (fallback, Some(path.to_path_buf()));
+    };
+    if let Ok(text) = toml::to_string_pretty(&fallback) {
+        let _ = write_atomic(path, text.as_bytes(), 0o644);
+    }
+    (fallback, Some(aside))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use std::fs;
-
     use super::*;
 
     #[test]

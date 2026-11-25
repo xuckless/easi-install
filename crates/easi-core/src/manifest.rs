@@ -158,6 +158,14 @@ pub fn save_manifest(roots: &InstallRoots, manifest: &Manifest) -> Result<PathBu
     let dir = roots.manifests_dir();
     fs::create_dir_all(&dir)?;
     let path = manifest_path(roots, &manifest.app_id);
+    // An unparseable manifest may be the only record of what an install created: keep it.
+    if path.exists() && load_manifest(&path).is_err() && crate::atomic::keep_aside(&path).is_none()
+    {
+        return Err(EasiError::Manifest(format!(
+            "could not keep unreadable manifest {} before replacing it",
+            path.display()
+        )));
+    }
     let text = toml::to_string_pretty(manifest).map_err(|e| EasiError::Manifest(e.to_string()))?;
     crate::atomic::write_atomic(&path, text.as_bytes(), 0o644)?;
     Ok(path)
@@ -296,8 +304,27 @@ mod tests {
         fs::write(roots.manifests_dir().join("notes.txt"), "ignored").unwrap();
 
         let (manifests, unreadable) = list_manifests_checked(&roots).unwrap();
-        assert_eq!(manifests, vec![good]);
+        assert_eq!(manifests, vec![good.clone()]);
         assert_eq!(unreadable, vec![bad.clone()]);
         assert!(bad.exists());
+
+        // Replacing it (e.g. a fresh install with that id) keeps the unreadable copy first.
+        let bad_text = fs::read_to_string(&bad).unwrap();
+        let replacement = Manifest {
+            app_id: "easi.bad".into(),
+            ..good
+        };
+        save_manifest(&roots, &replacement).unwrap();
+        assert_eq!(load_manifest(&bad).unwrap(), replacement);
+        let kept = roots.manifests_dir().join("easi.bad.toml.corrupt-1");
+        assert_eq!(fs::read_to_string(kept).unwrap(), bad_text);
+        // A second save over a now-valid manifest keeps nothing more.
+        save_manifest(&roots, &replacement).unwrap();
+        assert!(
+            !roots
+                .manifests_dir()
+                .join("easi.bad.toml.corrupt-2")
+                .exists()
+        );
     }
 }

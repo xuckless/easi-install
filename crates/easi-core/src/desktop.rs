@@ -147,11 +147,27 @@ pub struct SavedHandlers {
 }
 
 pub fn load_saved_handlers(roots: &InstallRoots) -> SavedHandlers {
-    let path = roots.previous_handlers_path();
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|s| toml::from_str(&s).ok())
-        .unwrap_or_default()
+    load_saved_handlers_checked(roots).0
+}
+
+/// Load `previous_handlers.toml`; one that does not parse is kept as `.corrupt-<n>` and reset to
+/// empty, and the second value is where the bad file now is.
+pub fn load_saved_handlers_checked(roots: &InstallRoots) -> (SavedHandlers, Option<PathBuf>) {
+    crate::atomic::load_toml_checked(
+        &roots.previous_handlers_path(),
+        SavedHandlers::default(),
+        SavedHandlers::default(),
+    )
+}
+
+/// Warning shown (CLI stderr, GUI notification) after an unreadable handler record was set aside.
+pub fn corrupt_handlers_notice(kept_at: &Path) -> String {
+    format!(
+        "easi's record of your previous default apps could not be read and was reset; the old \
+         file was kept at {}. `easi --restore-handlers` can no longer restore defaults recorded \
+         before this.",
+        kept_at.display()
+    )
 }
 
 pub fn save_handlers(roots: &InstallRoots, handlers: &SavedHandlers) -> Result<PathBuf, EasiError> {
@@ -583,5 +599,19 @@ mod tests {
         for (path, expected) in rows {
             assert_eq!(quote_systemd_exec(Path::new(path)), expected, "{path}");
         }
+    }
+
+    #[test]
+    fn unreadable_handler_record_is_kept_aside_and_reset() {
+        let tmp = TempDir::new().unwrap();
+        let roots = InstallRoots::from_home(tmp.path());
+        fs::create_dir_all(&roots.easi_dir).unwrap();
+        fs::write(roots.previous_handlers_path(), "[defaults\nbroken").unwrap();
+        let (handlers, kept) = load_saved_handlers_checked(&roots);
+        assert!(handlers.defaults.is_empty());
+        let aside = roots.easi_dir.join("previous_handlers.toml.corrupt-1");
+        assert_eq!(kept.as_deref(), Some(aside.as_path()));
+        assert_eq!(fs::read_to_string(aside).unwrap(), "[defaults\nbroken");
+        assert_eq!(load_saved_handlers_checked(&roots).1, None);
     }
 }
