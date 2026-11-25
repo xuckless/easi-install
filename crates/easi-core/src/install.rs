@@ -3,6 +3,7 @@
 use std::fs::{self, File};
 use std::io::{BufReader, Read};
 use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -279,15 +280,13 @@ where
                 ];
                 let before = snapshot_files(&watched);
                 let staging = TempDir::new()?;
-                // Cap process count (`ulimit -u 256`) to neutralize fork bombs, pass `--` before
-                // script path, and poll with a 5-minute timeout + cancel_flag kill guard.
+                // Own process group so cancel/timeout can kill everything the script spawned
+                // (RLIMIT_NPROC is per-UID across the whole desktop session, so a `ulimit -u` cap
+                // broke every installer). `--` stops the script path being read as an option.
                 let mut child = Command::new("sh")
-                    .args([
-                        "-c",
-                        "ulimit -u 256 2>/dev/null || true; exec sh -- \"$1\"",
-                        "_",
-                    ])
+                    .arg("--")
                     .arg(&plan.source_path)
+                    .process_group(0)
                     .current_dir(staging.path())
                     .env("HOME", &roots.home_dir)
                     .env("PREFIX", &app_dir)
@@ -299,17 +298,21 @@ where
                     if let Some(st) = child.try_wait()? {
                         break st;
                     }
-                    if cancel_flag.load(Ordering::Relaxed) {
+                    let abort = if cancel_flag.load(Ordering::Relaxed) {
+                        Some("installation cancelled")
+                    } else if started.elapsed() > max_duration {
+                        Some("installer script exceeded 5-minute timeout and was terminated")
+                    } else {
+                        None
+                    };
+                    if let Some(reason) = abort {
+                        // The group id is the child's pid (process_group(0)); `kill` avoids unsafe libc.
+                        let _ = Command::new("kill")
+                            .args(["-KILL", "--", &format!("-{}", child.id())])
+                            .status();
                         let _ = child.kill();
                         let _ = child.wait();
-                        return Err(EasiError::Desktop("installation cancelled".into()));
-                    }
-                    if started.elapsed() > max_duration {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return Err(EasiError::Desktop(
-                            "installer script exceeded 5-minute timeout and was terminated".into(),
-                        ));
+                        return Err(EasiError::Desktop(reason.into()));
                     }
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 };
