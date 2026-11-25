@@ -54,8 +54,28 @@ impl Default for EasiConfig {
     }
 }
 
-pub fn needs_onboarding(roots: &InstallRoots) -> bool {
-    load_config(roots).onboarding_version < CURRENT_ONBOARDING_VERSION
+impl EasiConfig {
+    /// Used when `config.toml` is unreadable: background checks stay off and onboarding runs
+    /// again, so a crash never silently re-enables network checks the user turned off.
+    pub fn safe_fallback() -> Self {
+        Self {
+            auto_check_updates: false,
+            ..Self::default()
+        }
+    }
+
+    pub fn needs_onboarding(&self) -> bool {
+        self.onboarding_version < CURRENT_ONBOARDING_VERSION
+    }
+}
+
+/// Warning shown (CLI stderr, GUI notification) after an unreadable config was set aside.
+pub fn corrupt_config_notice(kept_at: &Path) -> String {
+    format!(
+        "easi settings could not be read and were reset with automatic update checks OFF; \
+         the old file was kept at {}. Re-enable checks with `easi config --auto-update true`.",
+        kept_at.display()
+    )
 }
 
 pub fn complete_onboarding(roots: &InstallRoots) -> Result<EasiConfig, EasiError> {
@@ -66,10 +86,35 @@ pub fn complete_onboarding(roots: &InstallRoots) -> Result<EasiConfig, EasiError
 }
 
 pub fn load_config(roots: &InstallRoots) -> EasiConfig {
-    fs::read_to_string(roots.config_path())
+    load_config_checked(roots).0
+}
+
+/// Load `config.toml`; a missing file gives first-run defaults. A file that does not parse is
+/// renamed to `config.toml.corrupt-<n>` (never deleted) and replaced by
+/// [`EasiConfig::safe_fallback`]; the second value is where the bad file now is.
+pub fn load_config_checked(roots: &InstallRoots) -> (EasiConfig, Option<PathBuf>) {
+    let path = roots.config_path();
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (EasiConfig::default(), None),
+        Err(_) => return (EasiConfig::safe_fallback(), Some(path)),
+    };
+    if let Some(cfg) = std::str::from_utf8(&bytes)
         .ok()
-        .and_then(|s| toml::from_str(&s).ok())
-        .unwrap_or_default()
+        .and_then(|s| toml::from_str(s).ok())
+    {
+        return (cfg, None);
+    }
+    let fallback = EasiConfig::safe_fallback();
+    let aside = (1u32..)
+        .map(|n| roots.easi_dir.join(format!("config.toml.corrupt-{n}")))
+        .find(|p| fs::symlink_metadata(p).is_err())
+        .unwrap_or_else(|| path.clone());
+    if fs::rename(&path, &aside).is_err() {
+        return (fallback, Some(path));
+    }
+    let _ = save_config(roots, &fallback);
+    (fallback, Some(aside))
 }
 
 pub fn save_config(roots: &InstallRoots, cfg: &EasiConfig) -> Result<PathBuf, EasiError> {
@@ -508,13 +553,59 @@ ANbB7XuM6V9oebe+HcYx0ZvC5dcyaNu1A1mQEpWArDJOjSmRR9tDPpY0QhrZey35BPUnVzSvGq+3Cd2g
             onboarding_version: 0,
         };
         save_config(&roots, &cfg).expect("save");
-        assert!(needs_onboarding(&roots));
+        assert!(load_config(&roots).needs_onboarding());
         complete_onboarding(&roots).expect("complete onboarding");
-        assert!(!needs_onboarding(&roots));
+        assert!(!load_config(&roots).needs_onboarding());
         assert_eq!(
             check_for_easi_update(&roots, "0.1.0").as_deref(),
             Some("0.2.0")
         );
         assert_eq!(check_for_easi_update(&roots, "0.2.0"), None);
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    fn unreadable_config_is_kept_aside_and_falls_back_to_checks_off() {
+        // (case, config.toml bytes, expected auto_check_updates, kept aside as corrupt-1)
+        let rows: &[(&str, Option<&[u8]>, bool, bool)] = &[
+            ("missing", None, true, false),
+            (
+                "valid, checks off",
+                Some(b"auto_check_updates = false\n"),
+                false,
+                false,
+            ),
+            (
+                "truncated toml",
+                Some(b"auto_check_updates = tr"),
+                false,
+                true,
+            ),
+            (
+                "wrong type",
+                Some(b"auto_check_updates = \"yes\"\n"),
+                false,
+                true,
+            ),
+            ("not utf-8", Some(b"\xff\xfe\x00"), false, true),
+        ];
+        for (case, bytes, auto, corrupt) in rows {
+            let tmp = TempDir::new().expect("tempdir");
+            let roots = InstallRoots::from_home(tmp.path());
+            if let Some(bytes) = bytes {
+                fs::create_dir_all(&roots.easi_dir).unwrap();
+                fs::write(roots.config_path(), bytes).unwrap();
+            }
+            let (cfg, kept) = load_config_checked(&roots);
+            assert_eq!(cfg.auto_check_updates, *auto, "{case}");
+            let aside = roots.easi_dir.join("config.toml.corrupt-1");
+            assert_eq!(kept.as_deref() == Some(aside.as_path()), *corrupt, "{case}");
+            if *corrupt {
+                assert_eq!(fs::read(&aside).unwrap(), *bytes.unwrap(), "{case}");
+                // The fallback is persisted, so later loads do not flip checks back on.
+                assert_eq!(load_config_checked(&roots), (cfg.clone(), None), "{case}");
+                assert!(cfg.needs_onboarding(), "{case}");
+            }
+        }
     }
 }

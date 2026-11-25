@@ -77,8 +77,14 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
     let isolation =
         easi_core::sandbox::Isolation::Helper(easi_core::sandbox::resolve_current_exe(&roots));
     let runner = Arc::new(EffectRunner::new(roots, isolation));
-    let needs_onboard =
-        initial_path.is_none() && easi_core::self_update::needs_onboarding(&runner.roots);
+    let (cfg, corrupt_config) = easi_core::self_update::load_config_checked(&runner.roots);
+    if let Some(kept_at) = corrupt_config {
+        easi_core::desktop::notify(
+            "easi settings reset",
+            &easi_core::self_update::corrupt_config_notice(&kept_at),
+        );
+    }
+    let needs_onboard = initial_path.is_none() && cfg.needs_onboarding();
     // Only auto-heal easi.desktop/icon after onboarding has been completed.
     if !needs_onboard && let Ok(exe) = std::env::current_exe() {
         easi_core::desktop::ensure_easi_desktop_and_icon(&runner.roots, &exe);
@@ -87,7 +93,6 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
     let window = ui::AppWindow::new()?;
     // Match `easi.desktop` so Wayland/X11 Alt-Tab and taskbars show "easi" instead of "Unknown".
     let _ = slint::set_xdg_app_id("easi");
-    let cfg = easi_core::self_update::load_config(&runner.roots);
     let bg_timer = easi_core::desktop::is_background_update_timer_enabled(&runner.roots);
     window.set_easi_version(env!("CARGO_PKG_VERSION").into());
     window.set_privacy_policy_text(easi_core::self_update::PRIVACY_POLICY_TEXT.into());
