@@ -159,7 +159,7 @@ pub fn save_manifest(roots: &InstallRoots, manifest: &Manifest) -> Result<PathBu
     fs::create_dir_all(&dir)?;
     let path = manifest_path(roots, &manifest.app_id);
     let text = toml::to_string_pretty(manifest).map_err(|e| EasiError::Manifest(e.to_string()))?;
-    fs::write(&path, text)?;
+    crate::atomic::write_atomic(&path, text.as_bytes(), 0o644)?;
     Ok(path)
 }
 

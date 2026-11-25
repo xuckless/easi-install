@@ -311,8 +311,7 @@ where
                             "#!/bin/sh\nexport APPIMAGE_EXTRACT_AND_RUN=1\nexec {dest_q} \"$@\"\n"
                         )
                     };
-                    fs::write(&wrapper, script)?;
-                    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755))?;
+                    crate::atomic::write_atomic(&wrapper, script.as_bytes(), 0o755)?;
                     tx.record_file(wrapper.clone());
                     resolved_exec = Some(wrapper);
                 } else {
@@ -340,8 +339,7 @@ where
                 let wrapper = safe_join(&app_dir, Path::new(&bin_name))?;
                 let jar_q = shell_single_quote(&jar_dest.to_string_lossy());
                 let script = format!("#!/bin/sh\nexec java -jar {jar_q} \"$@\"\n");
-                fs::write(&wrapper, script)?;
-                fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755))?;
+                crate::atomic::write_atomic(&wrapper, script.as_bytes(), 0o755)?;
                 tx.record_file(wrapper.clone());
                 resolved_exec = Some(wrapper);
             }
@@ -516,7 +514,7 @@ where
                     }
                     let content =
                         render_desktop_entry(plan, exec_path, installed_icon_name.as_deref());
-                    fs::write(&desktop_path, content)?;
+                    crate::atomic::write_atomic(&desktop_path, content.as_bytes(), 0o644)?;
                     tx.record_file(desktop_path);
                 }
             }
@@ -887,7 +885,7 @@ fn write_hicolor_icon(
     let dir = roots.icons_dir.join(subdir);
     fs::create_dir_all(&dir)?;
     let dest = safe_join(&dir, Path::new(&format!("{icon_name}.{ext}")))?;
-    fs::write(&dest, bytes)?;
+    crate::atomic::write_atomic(&dest, bytes, 0o644)?;
     tx.record_file(dest.clone());
     Ok(Some(dest))
 }
@@ -1534,7 +1532,7 @@ pub fn move_to_trash(roots: &InstallRoots, source: &Path) -> Result<PathBuf, Eas
         "[Trash Info]\nPath={}\nDeletionDate={secs}\n",
         abs_source.to_string_lossy()
     );
-    fs::write(&info_path, info_content)?;
+    crate::atomic::write_atomic(&info_path, info_content.as_bytes(), 0o644)?;
 
     if fs::rename(source, &dest).is_err() {
         fs::copy(source, &dest)?;
@@ -1578,7 +1576,12 @@ pub fn add_bin_to_shell_rc(home: &Path) -> Result<PathBuf, EasiError> {
         next.push_str("# Added by easi\n");
         next.push_str(line);
         next.push('\n');
-        fs::write(&rc_path, next)?;
+        // Write through a symlinked rc (dotfile managers) to its real file, keeping its mode.
+        let target = fs::canonicalize(&rc_path).unwrap_or_else(|_| rc_path.clone());
+        let mode = fs::metadata(&target)
+            .map(|m| m.permissions().mode() & 0o7777)
+            .unwrap_or(0o644);
+        crate::atomic::write_atomic(&target, next.as_bytes(), mode)?;
     }
     Ok(rc_path)
 }
@@ -2113,5 +2116,35 @@ Exec=/bin/sh -c 'pwned'
                 );
             }
         }
+    }
+
+    #[test]
+    fn shell_rc_edit_keeps_symlink_and_mode() {
+        let tmp = TempDir::new().expect("tempdir");
+        let dotfiles = tmp.path().join("dotfiles");
+        fs::create_dir_all(&dotfiles).expect("mkdir");
+        // $SHELL picks the rc name, so give every candidate the same setup.
+        for rc in [".zshrc", ".bashrc", ".profile"] {
+            let real = dotfiles.join(rc);
+            fs::write(&real, "alias ll='ls -l'").expect("write rc");
+            fs::set_permissions(&real, fs::Permissions::from_mode(0o600)).expect("chmod");
+            symlink(&real, tmp.path().join(rc)).expect("link rc");
+        }
+        let rc_path = add_bin_to_shell_rc(tmp.path()).expect("edit rc");
+        let real = dotfiles.join(rc_path.file_name().expect("rc name"));
+        assert!(
+            fs::symlink_metadata(&rc_path)
+                .expect("meta")
+                .file_type()
+                .is_symlink()
+        );
+        let text = fs::read_to_string(&real).expect("read rc");
+        assert!(
+            text.starts_with("alias ll='ls -l'\n# Added by easi\n"),
+            "{text}"
+        );
+        assert!(text.contains(".local/bin"), "{text}");
+        let mode = fs::metadata(&real).expect("meta").permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o600);
     }
 }

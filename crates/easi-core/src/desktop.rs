@@ -58,8 +58,8 @@ pub fn set_background_update_timer(
              Persistent=true\n\n\
              [Install]\n\
              WantedBy=timers.target\n";
-        fs::write(&service_path, service)?;
-        fs::write(&timer_path, timer)?;
+        crate::atomic::write_atomic(&service_path, service.as_bytes(), 0o644)?;
+        crate::atomic::write_atomic(&timer_path, timer.as_bytes(), 0o644)?;
 
         let out = Command::new("systemctl")
             .args(["--user", "daemon-reload"])
@@ -146,7 +146,7 @@ pub fn save_handlers(roots: &InstallRoots, handlers: &SavedHandlers) -> Result<P
     fs::create_dir_all(&roots.easi_dir)?;
     let path = roots.previous_handlers_path();
     let text = toml::to_string_pretty(handlers).map_err(|e| EasiError::Desktop(e.to_string()))?;
-    fs::write(&path, text)?;
+    crate::atomic::write_atomic(&path, text.as_bytes(), 0o644)?;
     Ok(path)
 }
 
@@ -163,12 +163,12 @@ pub fn ensure_easi_desktop_and_icon(roots: &InstallRoots, easi_bin: &Path) {
 
     if fs::create_dir_all(&icon_dir).is_ok() {
         if fs::read_to_string(&icon_path).ok().as_deref() != Some(EASI_ICON_SVG)
-            && fs::write(&icon_path, EASI_ICON_SVG).is_ok()
+            && crate::atomic::write_atomic(&icon_path, EASI_ICON_SVG.as_bytes(), 0o644).is_ok()
         {
             changed = true;
         }
         if fs::read_to_string(&sym_path).ok().as_deref() != Some(EASI_SYMBOLIC_SVG)
-            && fs::write(&sym_path, EASI_SYMBOLIC_SVG).is_ok()
+            && crate::atomic::write_atomic(&sym_path, EASI_SYMBOLIC_SVG.as_bytes(), 0o644).is_ok()
         {
             changed = true;
         }
@@ -207,7 +207,7 @@ pub fn ensure_easi_desktop_and_icon(roots: &InstallRoots, easi_bin: &Path) {
              Categories=System;Utility;\n\
              MimeType={mimes};\n"
         );
-        if fs::write(&desktop_path, content).is_ok() {
+        if crate::atomic::write_atomic(&desktop_path, content.as_bytes(), 0o644).is_ok() {
             changed = true;
         }
     }
@@ -235,8 +235,12 @@ pub fn run_setup_with_options(
     let icon_dir = roots.icons_dir.join("scalable/apps");
     let icon_path = icon_dir.join("easi.svg");
     if fs::create_dir_all(&icon_dir).is_ok() {
-        let _ = fs::write(&icon_path, EASI_ICON_SVG);
-        let _ = fs::write(icon_dir.join("easi-symbolic.svg"), EASI_SYMBOLIC_SVG);
+        let _ = crate::atomic::write_atomic(&icon_path, EASI_ICON_SVG.as_bytes(), 0o644);
+        let _ = crate::atomic::write_atomic(
+            &icon_dir.join("easi-symbolic.svg"),
+            EASI_SYMBOLIC_SVG.as_bytes(),
+            0o644,
+        );
     }
     let desktop_path = roots.desktop_dir.join(EASI_DESKTOP_ID);
     let mimes = SUPPORTED_MIMES
@@ -268,13 +272,18 @@ pub fn run_setup_with_options(
          MimeType={mimes};\n",
         icon_path.display()
     );
-    fs::write(&desktop_path, content)?;
+    crate::atomic::write_atomic(&desktop_path, content.as_bytes(), 0o644)?;
 
     // Install AppImage MIME XML for distros that don't ship shared-mime-info rules for it.
     let mime_root = roots.home_dir.join(".local/share/mime");
     let mime_packages = mime_root.join("packages");
     if fs::create_dir_all(&mime_packages).is_ok()
-        && fs::write(mime_packages.join("easi-appimage.xml"), APPIMAGE_MIME_XML).is_ok()
+        && crate::atomic::write_atomic(
+            &mime_packages.join("easi-appimage.xml"),
+            APPIMAGE_MIME_XML.as_bytes(),
+            0o644,
+        )
+        .is_ok()
     {
         let _ = Command::new("update-mime-database")
             .arg(&mime_root)

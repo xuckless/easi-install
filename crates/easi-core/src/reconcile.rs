@@ -116,7 +116,7 @@ pub fn set_startup_wm_class(
     if !found {
         lines.push(format!("StartupWMClass={wm_class}"));
     }
-    fs::write(&desktop_path, lines.join("\n") + "\n")?;
+    crate::atomic::write_atomic(&desktop_path, (lines.join("\n") + "\n").as_bytes(), 0o644)?;
     crate::install::refresh_desktop_caches(roots);
     Ok(desktop_path)
 }
@@ -287,7 +287,7 @@ fn repair_renamed_binary_wiring(
             let updated = format!(
                 "#!/bin/sh\nexport APPIMAGE_EXTRACT_AND_RUN=1\nexec \"{new_ai_str}\" \"$@\"\n"
             );
-            let _ = fs::write(&target, updated);
+            let _ = crate::atomic::write_atomic(&target, updated.as_bytes(), 0o755);
             return true;
         }
         return false;
@@ -354,7 +354,7 @@ fn repair_renamed_binary_wiring(
             .collect::<Vec<_>>()
             .join("\n")
             + "\n";
-        let _ = fs::write(desktop_path, updated);
+        let _ = crate::atomic::write_atomic(desktop_path, updated.as_bytes(), 0o644);
     }
 
     true

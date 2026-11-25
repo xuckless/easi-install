@@ -2,6 +2,7 @@
 
 pub mod adopt;
 pub mod appid;
+pub mod atomic;
 pub mod desktop;
 pub mod detect;
 pub mod error;

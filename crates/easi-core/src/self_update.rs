@@ -76,7 +76,7 @@ pub fn save_config(roots: &InstallRoots, cfg: &EasiConfig) -> Result<PathBuf, Ea
     fs::create_dir_all(&roots.easi_dir)?;
     let path = roots.config_path();
     let text = toml::to_string_pretty(cfg).map_err(|e| EasiError::Desktop(e.to_string()))?;
-    fs::write(&path, text)?;
+    crate::atomic::write_atomic(&path, text.as_bytes(), 0o644)?;
     Ok(path)
 }
 

@@ -485,7 +485,7 @@ pub fn repair_app(
             let dir = roots.icons_dir.join(subdir);
             fs::create_dir_all(&dir)?;
             let icon_dest = safe_join(&dir, Path::new(&format!("{}.{ext}", manifest.app_id)))?;
-            fs::write(&icon_dest, bytes)?;
+            crate::atomic::write_atomic(&icon_dest, &bytes, 0o644)?;
             let icon_abs = icon_dest.to_string_lossy().into_owned();
             if !manifest.created_files.contains(&icon_dest) {
                 manifest.created_files.push(icon_dest);
@@ -542,7 +542,7 @@ pub fn repair_app(
     }
 
     if let (Some(dp), Some(text)) = (&desktop_path, &desktop_text) {
-        fs::write(dp, text)?;
+        crate::atomic::write_atomic(dp, text.as_bytes(), 0o644)?;
     }
 
     // 4. Ensure ~/.local/bin/<slug> symlink exists (never overwrite unmanaged files).
@@ -667,7 +667,7 @@ pub fn organize_app_into_applications(
         {
             let updated = text.replace(&old_str, &new_str);
             if updated != text {
-                let _ = fs::write(path, updated);
+                let _ = crate::atomic::write_atomic(path, updated.as_bytes(), 0o644);
             }
         }
     }
