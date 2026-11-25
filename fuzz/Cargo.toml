@@ -1,0 +1,25 @@
+[package]
+name = "easi-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+# libfuzzer-sys: the libFuzzer driver cargo-fuzz targets link against.
+libfuzzer-sys = "0.4"
+easi-core = { path = "../crates/easi-core" }
+tempfile = "3"
+
+# Kept out of the main workspace: fuzzing needs nightly + sanitizers and must not slow CI.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "inspect_package"
+path = "fuzz_targets/inspect_package.rs"
+test = false
+doc = false
+bench = false
