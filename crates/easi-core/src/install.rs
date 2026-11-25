@@ -461,7 +461,7 @@ where
                     let src = fs::canonicalize(staging.path().join(&top))?;
                     // Stripping the top dir makes it the app dir's root, so a link that only
                     // stayed inside staging via `../<sibling>` would point beside the app.
-                    reject_escaping_symlinks(&src, &src)?;
+                    reject_escaping_symlinks(&src)?;
                     stripped_prefix = Some(top);
                     src
                 } else {
@@ -1067,71 +1067,78 @@ pub fn extract_archive_safe(
     // The per-entry lexical check cannot see links that traverse other links (chains like
     // `l1 -> ../..` then `l1/x/y/l2 -> ../../../..`), so re-resolve every link on disk.
     let root = fs::canonicalize(dest_root)?;
-    reject_escaping_symlinks(&root, &root)
+    reject_escaping_symlinks(&root)
 }
 
 /// Symlinks followed while resolving one link before it counts as a loop (the kernel's ELOOP cap).
 const MAX_SYMLINK_HOPS: usize = 40;
 
-/// Walk `dir` without following links and resolve each symlink by hand against the real tree,
-/// rejecting absolute targets, loops, and any `..` that climbs above `root` (canonical).
+/// Walk `root` (canonical) without following links and resolve each symlink by hand against the
+/// real tree, rejecting absolute targets, loops, and any `..` that climbs above `root`.
 /// Missing components are taken lexically, so dangling links are judged by the same rule.
-fn reject_escaping_symlinks(root: &Path, dir: &Path) -> Result<(), EasiError> {
-    for entry in fs::read_dir(dir)? {
-        let path = entry?.path();
-        let meta = fs::symlink_metadata(&path)?;
-        if meta.is_dir() {
-            reject_escaping_symlinks(root, &path)?;
-            continue;
-        }
-        if !meta.file_type().is_symlink() {
-            continue;
-        }
-        let escape = || EasiError::PathEscape(path.to_string_lossy().into_owned());
-        let rel = path.strip_prefix(root).map_err(|_| escape())?;
-        // `resolved` only ever holds real directories or missing names, never a symlink.
-        let mut resolved = PathBuf::new();
-        let mut pending: Vec<std::ffi::OsString> = rel
-            .components()
-            .rev()
-            .map(|c| c.as_os_str().to_os_string())
-            .collect();
-        let mut hops = 0usize;
-        while let Some(comp) = pending.pop() {
-            match Path::new(&comp).components().next() {
-                Some(std::path::Component::Normal(name)) => {
-                    let candidate = root.join(&resolved).join(name);
-                    if !fs::symlink_metadata(&candidate).is_ok_and(|m| m.file_type().is_symlink()) {
-                        resolved.push(name);
-                        continue;
+fn reject_escaping_symlinks(root: &Path) -> Result<(), EasiError> {
+    // A work list, not recursion: archives can nest ~2000 directories within PATH_MAX, which
+    // overflowed 2 MiB thread stacks (aborting mid-install) and held one open fd per level.
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in fs::read_dir(&dir)? {
+            let path = entry?.path();
+            let meta = fs::symlink_metadata(&path)?;
+            if meta.is_dir() {
+                dirs.push(path);
+                continue;
+            }
+            if !meta.file_type().is_symlink() {
+                continue;
+            }
+            let escape = || EasiError::PathEscape(path.to_string_lossy().into_owned());
+            let rel = path.strip_prefix(root).map_err(|_| escape())?;
+            // `resolved` only ever holds real directories or missing names, never a symlink.
+            let mut resolved = PathBuf::new();
+            let mut pending: Vec<std::ffi::OsString> = rel
+                .components()
+                .rev()
+                .map(|c| c.as_os_str().to_os_string())
+                .collect();
+            let mut hops = 0usize;
+            while let Some(comp) = pending.pop() {
+                match Path::new(&comp).components().next() {
+                    Some(std::path::Component::Normal(name)) => {
+                        let candidate = root.join(&resolved).join(name);
+                        if !fs::symlink_metadata(&candidate)
+                            .is_ok_and(|m| m.file_type().is_symlink())
+                        {
+                            resolved.push(name);
+                            continue;
+                        }
+                        hops += 1;
+                        let target = fs::read_link(&candidate)?;
+                        if hops > MAX_SYMLINK_HOPS || target.has_root() {
+                            return Err(escape());
+                        }
+                        // Relative targets resolve from the link's real parent, which is `resolved`.
+                        pending.extend(
+                            target
+                                .components()
+                                .rev()
+                                .map(|c| c.as_os_str().to_os_string()),
+                        );
                     }
-                    hops += 1;
-                    let target = fs::read_link(&candidate)?;
-                    if hops > MAX_SYMLINK_HOPS || target.has_root() {
+                    Some(std::path::Component::ParentDir) => {
+                        if !resolved.pop() {
+                            return Err(escape());
+                        }
+                    }
+                    Some(std::path::Component::CurDir) | None => {}
+                    Some(std::path::Component::RootDir | std::path::Component::Prefix(_)) => {
                         return Err(escape());
                     }
-                    // Relative targets resolve from the link's real parent, which is `resolved`.
-                    pending.extend(
-                        target
-                            .components()
-                            .rev()
-                            .map(|c| c.as_os_str().to_os_string()),
-                    );
-                }
-                Some(std::path::Component::ParentDir) => {
-                    if !resolved.pop() {
-                        return Err(escape());
-                    }
-                }
-                Some(std::path::Component::CurDir) | None => {}
-                Some(std::path::Component::RootDir | std::path::Component::Prefix(_)) => {
-                    return Err(escape());
                 }
             }
-        }
-        // Same rule as the per-entry check: a link to the extraction root itself is rejected.
-        if resolved.as_os_str().is_empty() {
-            return Err(escape());
+            // Same rule as the per-entry check: a link to the extraction root itself is rejected.
+            if resolved.as_os_str().is_empty() {
+                return Err(escape());
+            }
         }
     }
     Ok(())
