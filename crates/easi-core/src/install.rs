@@ -18,6 +18,7 @@ use zip::ZipArchive;
 
 use crate::detect::inspect_contents;
 use crate::error::EasiError;
+use crate::limits::LIMITS;
 use crate::manifest::{
     Manifest, delete_manifest, find_manifest_by_id, resolve_installed, save_manifest,
 };
@@ -378,13 +379,14 @@ where
                 } else if let Some(icon_rel) = &plan.icon_path {
                     let rel_icon = strip_top_prefix(icon_rel, stripped_prefix.as_deref());
                     let src = safe_join(&app_dir, Path::new(&rel_icon))?;
-                    if src.exists() {
-                        let bytes = fs::read(&src)?;
-                        if let Some(icon_dest) =
+                    // An oversized icon is skipped rather than failing the install.
+                    if let Some(bytes) = File::open(&src)
+                        .ok()
+                        .and_then(|mut f| crate::detect::read_capped(&mut f, LIMITS.icon_bytes))
+                        && let Some(icon_dest) =
                             write_hicolor_icon(roots, &icon_name, icon_rel, &bytes, tx)?
-                        {
-                            installed_icon_name = Some(icon_dest.to_string_lossy().into_owned());
-                        }
+                    {
+                        installed_icon_name = Some(icon_dest.to_string_lossy().into_owned());
                     }
                 } else if let Some((asar_rel, bytes)) =
                     crate::detect::extract_icon_from_asar_path(&app_dir.join("resources/app.asar"))
@@ -963,9 +965,6 @@ fn reject_escaping_symlinks(root: &Path, dir: &Path) -> Result<(), EasiError> {
     Ok(())
 }
 
-/// Hard cap on total bytes extracted from a single archive (guards against decompression bombs).
-const MAX_EXTRACT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
-
 fn copy_limited<R: Read + ?Sized>(
     reader: &mut R,
     dest: &Path,
@@ -977,12 +976,12 @@ fn copy_limited<R: Read + ?Sized>(
     {
         fs::remove_file(dest)?;
     }
-    let remaining = MAX_EXTRACT_BYTES.saturating_sub(*extracted_total);
+    let remaining = LIMITS.extract_bytes.saturating_sub(*extracted_total);
     let mut limited = reader.take(remaining.saturating_add(1));
     let mut out = File::create(dest)?;
     let copied = std::io::copy(&mut limited, &mut out)?;
     *extracted_total = extracted_total.saturating_add(copied);
-    if *extracted_total > MAX_EXTRACT_BYTES {
+    if *extracted_total > LIMITS.extract_bytes {
         let _ = fs::remove_file(dest);
         return Err(EasiError::Archive(
             "archive exceeds maximum safe extracted size (16 GiB)".into(),
@@ -999,10 +998,10 @@ fn extract_sevenz_safe(path: &Path, dest_root: &Path) -> Result<(), EasiError> {
     reader
         .for_each_entries(|entry, data| {
             count += 1;
-            if count > crate::detect::MAX_ARCHIVE_ENTRIES {
+            if count > LIMITS.archive_entries {
                 return Err(sevenz_rust::Error::other(format!(
                     "archive exceeds maximum entry limit ({})",
-                    crate::detect::MAX_ARCHIVE_ENTRIES
+                    LIMITS.archive_entries
                 )));
             }
             let rel = PathBuf::from(entry.name());
@@ -1094,10 +1093,10 @@ fn extract_tar_safe<R: Read>(reader: R, dest_root: &Path) -> Result<(), EasiErro
     let mut count = 0usize;
     for item in entries {
         count += 1;
-        if count > crate::detect::MAX_ARCHIVE_ENTRIES {
+        if count > LIMITS.archive_entries {
             return Err(EasiError::Archive(format!(
                 "archive exceeds maximum entry limit ({})",
-                crate::detect::MAX_ARCHIVE_ENTRIES
+                LIMITS.archive_entries
             )));
         }
         let mut entry = item.map_err(|e| EasiError::Archive(e.to_string()))?;
@@ -1143,10 +1142,10 @@ fn extract_zip_safe(path: &Path, dest_root: &Path) -> Result<(), EasiError> {
     let file = File::open(path)?;
     let mut zip =
         ZipArchive::new(BufReader::new(file)).map_err(|e| EasiError::Archive(e.to_string()))?;
-    if zip.len() > crate::detect::MAX_ARCHIVE_ENTRIES {
+    if zip.len() > LIMITS.archive_entries {
         return Err(EasiError::Archive(format!(
             "archive exceeds maximum entry limit ({})",
-            crate::detect::MAX_ARCHIVE_ENTRIES
+            LIMITS.archive_entries
         )));
     }
 
@@ -1165,8 +1164,9 @@ fn extract_zip_safe(path: &Path, dest_root: &Path) -> Result<(), EasiError> {
         if entry.is_dir() {
             fs::create_dir_all(&dest)?;
         } else if (mode & 0o170000) == 0o120000 {
-            let mut target = String::new();
-            entry.read_to_string(&mut target)?;
+            let target = crate::detect::read_capped(&mut entry, LIMITS.symlink_target_bytes)
+                .and_then(|b| String::from_utf8(b).ok())
+                .ok_or_else(|| EasiError::Archive(format!("invalid symlink target in {rel:?}")))?;
             let target_path = Path::new(&target);
             if !is_safe_archive_symlink(&rel, target_path) {
                 return Err(EasiError::PathEscape(target));

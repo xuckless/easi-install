@@ -7,6 +7,7 @@ pub mod detect;
 pub mod error;
 pub mod inspect;
 pub mod install;
+pub mod limits;
 pub mod manifest;
 pub mod model;
 pub mod plan;

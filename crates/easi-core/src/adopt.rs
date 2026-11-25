@@ -917,7 +917,9 @@ fn find_best_icon_bytes(manifest: &Manifest) -> Option<(&'static str, Vec<u8>)> 
         let scored = score_icons(&entries, &slug);
         for cand in scored {
             let full = manifest.install_dir.join(&cand.path);
-            if let Ok(bytes) = fs::read(&full) {
+            if let Some(bytes) = fs::File::open(&full).ok().and_then(|mut f| {
+                crate::detect::read_capped(&mut f, crate::limits::LIMITS.icon_bytes)
+            }) {
                 if is_svg_bytes(&bytes) {
                     return Some(("svg", bytes));
                 }

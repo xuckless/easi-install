@@ -12,6 +12,7 @@ use xz2::read::XzDecoder;
 use zip::ZipArchive;
 
 use crate::error::EasiError;
+use crate::limits::LIMITS;
 use crate::model::{Format, ScriptReport};
 
 /// One row in the magic-byte format table.
@@ -285,12 +286,15 @@ pub struct PackageContents {
     pub script_report: Option<ScriptReport>,
 }
 
-const MAX_METADATA_BYTES: u64 = 256 * 1024;
-const MAX_ICON_BYTES: u64 = 2 * 1024 * 1024;
-/// Hard cap on archive entries during both inspection and extraction (blocks inode/entry bombs).
-pub const MAX_ARCHIVE_ENTRIES: usize = 100_000;
-/// Hard cap on total in-memory bytes buffered across icons + metadata during inspection (blocks OOM bombs).
-const MAX_TOTAL_INSPECT_BYTES: usize = 32 * 1024 * 1024;
+/// Read at most `cap` bytes without trusting header sizes; `None` when the content is longer.
+pub(crate) fn read_capped<R: Read + ?Sized>(reader: &mut R, cap: u64) -> Option<Vec<u8>> {
+    let mut buf = Vec::new();
+    reader
+        .take(cap.saturating_add(1))
+        .read_to_end(&mut buf)
+        .ok()?;
+    (buf.len() as u64 <= cap).then_some(buf)
+}
 
 /// Read at most `max_entry` bytes without trusting archive header sizes, respecting `budget`.
 fn read_bounded_bytes<R: Read + ?Sized>(
@@ -302,11 +306,7 @@ fn read_bounded_bytes<R: Read + ?Sized>(
     if cap == 0 {
         return None;
     }
-    let mut buf = Vec::new();
-    let mut limited = reader.take(cap as u64 + 1);
-    if limited.read_to_end(&mut buf).is_err() || buf.len() > cap {
-        return None;
-    }
+    let buf = read_capped(reader, cap as u64)?;
     *budget = budget.saturating_sub(buf.len());
     Some(buf)
 }
@@ -332,8 +332,6 @@ fn is_asar_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     lower == "app.asar" || lower.ends_with("/resources/app.asar") || lower == "resources/app.asar"
 }
-
-const MAX_ASAR_HEADER_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 struct AsarIconCandidate {
@@ -595,7 +593,7 @@ fn parse_asar_dir_object(
     if !is_unpacked
         && let (Some(sz), Some(off)) = (size, offset)
         && sz > 0
-        && sz <= MAX_ICON_BYTES
+        && sz <= LIMITS.icon_bytes
         && !prefix.is_empty()
     {
         let lower = prefix.to_ascii_lowercase();
@@ -618,7 +616,7 @@ pub fn extract_icon_from_asar_path(asar_path: &Path) -> Option<(String, Vec<u8>)
     file.read_exact(&mut hdr).ok()?;
     let hdr_obj_size = u32::from_le_bytes(hdr[4..8].try_into().ok()?) as u64;
     let json_len = u32::from_le_bytes(hdr[12..16].try_into().ok()?) as usize;
-    if json_len == 0 || json_len > MAX_ASAR_HEADER_BYTES {
+    if json_len == 0 || json_len > LIMITS.asar_header_bytes {
         return None;
     }
     let mut json_buf = vec![0u8; json_len];
@@ -653,7 +651,7 @@ fn extract_icon_from_asar_stream<R: Read + ?Sized>(
     reader.read_exact(&mut hdr).ok()?;
     let hdr_obj_size = u32::from_le_bytes(hdr[4..8].try_into().ok()?) as u64;
     let json_len = u32::from_le_bytes(hdr[12..16].try_into().ok()?) as usize;
-    if json_len == 0 || json_len > MAX_ASAR_HEADER_BYTES {
+    if json_len == 0 || json_len > LIMITS.asar_header_bytes {
         return None;
     }
     let mut json_buf = vec![0u8; json_len];
@@ -780,15 +778,16 @@ pub fn inspect_contents(path: &Path, format: Format) -> Result<PackageContents, 
 fn list_tar<R: Read>(reader: R) -> Result<PackageContents, EasiError> {
     let mut archive = Archive::new(reader);
     let mut contents = PackageContents::default();
-    let mut inspect_budget = MAX_TOTAL_INSPECT_BYTES;
+    let mut inspect_budget = LIMITS.inspect_total_bytes;
     let entries = archive
         .entries()
         .map_err(|e| EasiError::Archive(e.to_string()))?;
 
     for item in entries {
-        if contents.entries.len() >= MAX_ARCHIVE_ENTRIES {
+        if contents.entries.len() >= LIMITS.archive_entries {
             return Err(EasiError::Archive(format!(
-                "archive exceeds maximum entry limit ({MAX_ARCHIVE_ENTRIES})"
+                "archive exceeds maximum entry limit ({})",
+                LIMITS.archive_entries
             )));
         }
         let mut entry = item.map_err(|e| EasiError::Archive(e.to_string()))?;
@@ -815,10 +814,10 @@ fn list_tar<R: Read>(reader: R) -> Result<PackageContents, EasiError> {
 
         if !is_dir && !is_symlink && size > 0 {
             if (is_desktop_path(&raw_path) || is_metainfo_path(&raw_path))
-                && size <= MAX_METADATA_BYTES
+                && size <= LIMITS.metadata_bytes
             {
                 if let Some(bytes) =
-                    read_bounded_bytes(&mut entry, MAX_METADATA_BYTES, &mut inspect_budget)
+                    read_bounded_bytes(&mut entry, LIMITS.metadata_bytes, &mut inspect_budget)
                     && let Ok(text) = String::from_utf8(bytes)
                 {
                     if is_desktop_path(&raw_path) {
@@ -827,16 +826,16 @@ fn list_tar<R: Read>(reader: R) -> Result<PackageContents, EasiError> {
                         contents.metainfo_files.push((raw_path.clone(), text));
                     }
                 }
-            } else if is_meta_hint_path(&raw_path) && size <= MAX_METADATA_BYTES {
+            } else if is_meta_hint_path(&raw_path) && size <= LIMITS.metadata_bytes {
                 if let Some(bytes) =
-                    read_bounded_bytes(&mut entry, MAX_METADATA_BYTES, &mut inspect_budget)
+                    read_bounded_bytes(&mut entry, LIMITS.metadata_bytes, &mut inspect_budget)
                     && let Ok(text) = String::from_utf8(bytes)
                 {
                     absorb_meta_hint(&mut contents, &raw_path, &text);
                 }
-            } else if is_icon_path(&raw_path) && size <= MAX_ICON_BYTES {
+            } else if is_icon_path(&raw_path) && size <= LIMITS.icon_bytes {
                 if let Some(buf) =
-                    read_bounded_bytes(&mut entry, MAX_ICON_BYTES, &mut inspect_budget)
+                    read_bounded_bytes(&mut entry, LIMITS.icon_bytes, &mut inspect_budget)
                 {
                     contents.embedded_icons.push((raw_path.clone(), buf));
                 }
@@ -886,13 +885,14 @@ fn list_zip(path: &Path) -> Result<PackageContents, EasiError> {
     let file = File::open(path)?;
     let mut zip =
         ZipArchive::new(BufReader::new(file)).map_err(|e| EasiError::Archive(e.to_string()))?;
-    if zip.len() > MAX_ARCHIVE_ENTRIES {
+    if zip.len() > LIMITS.archive_entries {
         return Err(EasiError::Archive(format!(
-            "archive exceeds maximum entry limit ({MAX_ARCHIVE_ENTRIES})"
+            "archive exceeds maximum entry limit ({})",
+            LIMITS.archive_entries
         )));
     }
     let mut contents = PackageContents::default();
-    let mut inspect_budget = MAX_TOTAL_INSPECT_BYTES;
+    let mut inspect_budget = LIMITS.inspect_total_bytes;
 
     for i in 0..zip.len() {
         let mut entry = zip
@@ -916,10 +916,10 @@ fn list_zip(path: &Path) -> Result<PackageContents, EasiError> {
             }
         } else if !is_dir && size > 0 {
             if (is_desktop_path(&raw_path) || is_metainfo_path(&raw_path))
-                && size <= MAX_METADATA_BYTES
+                && size <= LIMITS.metadata_bytes
             {
                 if let Some(bytes) =
-                    read_bounded_bytes(&mut entry, MAX_METADATA_BYTES, &mut inspect_budget)
+                    read_bounded_bytes(&mut entry, LIMITS.metadata_bytes, &mut inspect_budget)
                     && let Ok(text) = String::from_utf8(bytes)
                 {
                     if is_desktop_path(&raw_path) {
@@ -928,16 +928,16 @@ fn list_zip(path: &Path) -> Result<PackageContents, EasiError> {
                         contents.metainfo_files.push((raw_path.clone(), text));
                     }
                 }
-            } else if is_meta_hint_path(&raw_path) && size <= MAX_METADATA_BYTES {
+            } else if is_meta_hint_path(&raw_path) && size <= LIMITS.metadata_bytes {
                 if let Some(bytes) =
-                    read_bounded_bytes(&mut entry, MAX_METADATA_BYTES, &mut inspect_budget)
+                    read_bounded_bytes(&mut entry, LIMITS.metadata_bytes, &mut inspect_budget)
                     && let Ok(text) = String::from_utf8(bytes)
                 {
                     absorb_meta_hint(&mut contents, &raw_path, &text);
                 }
-            } else if is_icon_path(&raw_path) && size <= MAX_ICON_BYTES {
+            } else if is_icon_path(&raw_path) && size <= LIMITS.icon_bytes {
                 if let Some(buf) =
-                    read_bounded_bytes(&mut entry, MAX_ICON_BYTES, &mut inspect_budget)
+                    read_bounded_bytes(&mut entry, LIMITS.icon_bytes, &mut inspect_budget)
                 {
                     contents.embedded_icons.push((raw_path.clone(), buf));
                 }
@@ -1141,11 +1141,12 @@ fn list_appimage_type2(path: &Path) -> Result<PackageContents, EasiError> {
         ..Default::default()
     };
 
-    let mut inspect_budget = MAX_TOTAL_INSPECT_BYTES;
+    let mut inspect_budget = LIMITS.inspect_total_bytes;
     for node in fs.files() {
-        if contents.entries.len() >= MAX_ARCHIVE_ENTRIES {
+        if contents.entries.len() >= LIMITS.archive_entries {
             return Err(EasiError::AppImage(format!(
-                "AppImage exceeds maximum entry limit ({MAX_ARCHIVE_ENTRIES})"
+                "AppImage exceeds maximum entry limit ({})",
+                LIMITS.archive_entries
             )));
         }
         let rel = node
@@ -1185,10 +1186,12 @@ fn list_appimage_type2(path: &Path) -> Result<PackageContents, EasiError> {
             }
             InnerNode::File(f) => {
                 let size = f.file_len() as u64;
-                if (is_desktop_path(&rel) || is_metainfo_path(&rel)) && size <= MAX_METADATA_BYTES {
+                if (is_desktop_path(&rel) || is_metainfo_path(&rel))
+                    && size <= LIMITS.metadata_bytes
+                {
                     let mut r = fs.file(f).reader();
                     if let Some(buf) =
-                        read_bounded_bytes(&mut r, MAX_METADATA_BYTES, &mut inspect_budget)
+                        read_bounded_bytes(&mut r, LIMITS.metadata_bytes, &mut inspect_budget)
                         && let Ok(text) = String::from_utf8(buf)
                     {
                         if is_desktop_path(&rel) {
@@ -1197,10 +1200,10 @@ fn list_appimage_type2(path: &Path) -> Result<PackageContents, EasiError> {
                             contents.metainfo_files.push((rel.clone(), text));
                         }
                     }
-                } else if is_icon_path(&rel) && size <= MAX_ICON_BYTES {
+                } else if is_icon_path(&rel) && size <= LIMITS.icon_bytes {
                     let mut r = fs.file(f).reader();
                     if let Some(buf) =
-                        read_bounded_bytes(&mut r, MAX_ICON_BYTES, &mut inspect_budget)
+                        read_bounded_bytes(&mut r, LIMITS.icon_bytes, &mut inspect_budget)
                     {
                         contents.embedded_icons.push((rel.clone(), buf));
                     }
@@ -1230,12 +1233,13 @@ fn list_sevenz(path: &Path) -> Result<PackageContents, EasiError> {
     let mut reader = sevenz_rust::SevenZReader::open(path, sevenz_rust::Password::empty())
         .map_err(|e| EasiError::Archive(e.to_string()))?;
     let mut contents = PackageContents::default();
-    let mut inspect_budget = MAX_TOTAL_INSPECT_BYTES;
+    let mut inspect_budget = LIMITS.inspect_total_bytes;
     reader
         .for_each_entries(|entry, data| {
-            if contents.entries.len() >= MAX_ARCHIVE_ENTRIES {
+            if contents.entries.len() >= LIMITS.archive_entries {
                 return Err(sevenz_rust::Error::other(format!(
-                    "archive exceeds maximum entry limit ({MAX_ARCHIVE_ENTRIES})"
+                    "archive exceeds maximum entry limit ({})",
+                    LIMITS.archive_entries
                 )));
             }
             let raw_path = entry.name().to_string();
@@ -1247,10 +1251,10 @@ fn list_sevenz(path: &Path) -> Result<PackageContents, EasiError> {
 
             if !is_dir && size > 0 {
                 if (is_desktop_path(&raw_path) || is_metainfo_path(&raw_path))
-                    && size <= MAX_METADATA_BYTES
+                    && size <= LIMITS.metadata_bytes
                 {
                     if let Some(bytes) =
-                        read_bounded_bytes(data, MAX_METADATA_BYTES, &mut inspect_budget)
+                        read_bounded_bytes(data, LIMITS.metadata_bytes, &mut inspect_budget)
                         && let Ok(text) = String::from_utf8(bytes)
                     {
                         if is_desktop_path(&raw_path) {
@@ -1259,15 +1263,16 @@ fn list_sevenz(path: &Path) -> Result<PackageContents, EasiError> {
                             contents.metainfo_files.push((raw_path.clone(), text));
                         }
                     }
-                } else if is_meta_hint_path(&raw_path) && size <= MAX_METADATA_BYTES {
+                } else if is_meta_hint_path(&raw_path) && size <= LIMITS.metadata_bytes {
                     if let Some(bytes) =
-                        read_bounded_bytes(data, MAX_METADATA_BYTES, &mut inspect_budget)
+                        read_bounded_bytes(data, LIMITS.metadata_bytes, &mut inspect_budget)
                         && let Ok(text) = String::from_utf8(bytes)
                     {
                         absorb_meta_hint(&mut contents, &raw_path, &text);
                     }
-                } else if is_icon_path(&raw_path) && size <= MAX_ICON_BYTES {
-                    if let Some(buf) = read_bounded_bytes(data, MAX_ICON_BYTES, &mut inspect_budget)
+                } else if is_icon_path(&raw_path) && size <= LIMITS.icon_bytes {
+                    if let Some(buf) =
+                        read_bounded_bytes(data, LIMITS.icon_bytes, &mut inspect_budget)
                     {
                         contents.embedded_icons.push((raw_path.clone(), buf));
                     }
@@ -1510,6 +1515,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn capped_reads_refuse_content_past_the_cap() {
+        // (content length, cap, accepted)
+        let rows = [(0, 4, true), (4, 4, true), (5, 4, false), (4096, 16, false)];
+        for (len, cap, accepted) in rows {
+            let data = vec![b'x'; len];
+            let got = read_capped(&mut data.as_slice(), cap);
+            assert_eq!(got.is_some(), accepted, "len={len} cap={cap}");
+        }
+    }
+
+    #[test]
     fn magic_byte_format_table() {
         let cases: &[(&str, &[u8], Option<Format>)] = &[
             (
@@ -1610,7 +1626,7 @@ mod tests {
         asar.extend_from_slice(tray_bytes);
         asar.extend_from_slice(png_bytes);
 
-        let mut budget = MAX_TOTAL_INSPECT_BYTES;
+        let mut budget = LIMITS.inspect_total_bytes;
         let mut cursor = std::io::Cursor::new(&asar);
         let (path, extracted) =
             extract_icon_from_asar_stream(&mut cursor, &mut budget).unwrap_or_default();
