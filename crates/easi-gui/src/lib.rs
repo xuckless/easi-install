@@ -60,6 +60,10 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
     if try_forward_to_running_instance(initial_path.as_ref()) {
         return Ok(());
     }
+    // No HOME means no per-user write roots; a shared /tmp stand-in would be predictable and
+    // writable by other users, so refuse to start instead.
+    let roots =
+        InstallRoots::default_user().map_err(|e| slint::PlatformError::OtherError(Box::new(e)))?;
     let sock_path = single_instance_socket_path();
     let listener = sock_path.as_ref().and_then(|p| {
         let _ = std::fs::remove_file(p);
@@ -69,9 +73,6 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
         Some(listener)
     });
 
-    let roots = InstallRoots::default_user().unwrap_or_else(|_| {
-        InstallRoots::from_home(&std::env::temp_dir().join("easi-fallback-home"))
-    });
     let runner = Arc::new(EffectRunner::new(roots));
     let needs_onboard =
         initial_path.is_none() && easi_core::self_update::needs_onboarding(&runner.roots);
