@@ -69,9 +69,15 @@ main() {
     if command -v minisign >/dev/null 2>&1; then
         curl --proto '=https' --tlsv1.2 -fsSL "${base_url}/SHA256SUMS.minisig" -o "${tmpdir}/SHA256SUMS.minisig" \
             || die "failed to download SHA256SUMS.minisig for signature verification"
-        minisign -V -P "${MINISIGN_PUBKEY}" -m "${tmpdir}/SHA256SUMS" >/dev/null \
+        verify_out="$(minisign -V -P "${MINISIGN_PUBKEY}" -m "${tmpdir}/SHA256SUMS")" \
             || die "minisign signature verification failed"
-        printf 'Verified minisign signature.\n'
+        # The signed trusted comment must name this exact tag (whole token), so an older signed
+        # release cannot be served in its place. Releases before v2.5.8 lack the token, so
+        # EASI_VERSION pointing at one is refused while minisign is installed.
+        printf '%s\n' "$verify_out" | sed -n 's/^Trusted comment: //p' | tr ' ' '\n' \
+            | grep -Fqx "tag:${tag}" \
+            || die "signature does not name release ${tag} (trusted comment lacks tag:${tag})"
+        printf 'Verified minisign signature for %s.\n' "$tag"
     else
         # A plain checksum from the same server proves integrity, not who published it.
         printf 'easi install warning: minisign not found; only the SHA-256 checksum was verified, not the publisher signature.\n' >&2
