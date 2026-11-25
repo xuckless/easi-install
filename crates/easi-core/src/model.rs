@@ -62,7 +62,7 @@ impl SignatureStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScriptReport {
     pub actions: Vec<String>,
     pub obfuscated: bool,

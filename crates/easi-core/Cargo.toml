@@ -27,3 +27,5 @@ backhand.workspace = true
 tempfile.workspace = true
 xattr.workspace = true
 minisign-verify.workspace = true
+landlock.workspace = true
+rlimit.workspace = true

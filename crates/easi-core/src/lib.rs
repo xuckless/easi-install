@@ -15,6 +15,7 @@ pub mod reconcile;
 pub mod reduce;
 pub mod roots;
 pub mod runner;
+pub mod sandbox;
 pub mod self_update;
 pub mod state;
 pub mod store;

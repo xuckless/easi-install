@@ -37,6 +37,11 @@ fn has_gui_session() -> bool {
 fn main() -> ExitCode {
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
 
+    // Hidden sandbox helpers re-exec this binary; they must start before any GUI/CLI setup.
+    if let Some(code) = easi_core::sandbox::run_helper(&args) {
+        return code;
+    }
+
     if args.len() == 1 {
         return launch_gui(None);
     }

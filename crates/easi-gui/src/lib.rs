@@ -1063,7 +1063,7 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
             if let Some(sock) = &sock {
                 let _ = std::fs::remove_file(sock);
             }
-            let exe = resolve_restart_exe(&r.roots);
+            let exe = easi_core::sandbox::resolve_current_exe(&r.roots);
             if let Some(win) = w.upgrade() {
                 let _ = win.hide();
             }
@@ -1676,28 +1676,6 @@ fn format_app_size(size_bytes: u64, data_size_bytes: u64) -> String {
     } else {
         app_str
     }
-}
-
-/// Resolve the executable path to launch after an atomic in-place self-update.
-/// On Linux, `/proc/self/exe` appends `" (deleted)"` once the old binary is replaced via `rename()`.
-fn resolve_restart_exe(roots: &InstallRoots) -> PathBuf {
-    if let Ok(exe) = std::env::current_exe() {
-        let s = exe.to_string_lossy();
-        if let Some(stripped) = s.strip_suffix(" (deleted)") {
-            let candidate = PathBuf::from(stripped);
-            if candidate.exists() {
-                return candidate;
-            }
-        }
-        if exe.exists() {
-            return exe;
-        }
-    }
-    let fallback = roots.bin_dir.join("easi");
-    if fallback.exists() {
-        return fallback;
-    }
-    PathBuf::from("easi")
 }
 
 fn extract_blocked_path(error: &str) -> Option<String> {

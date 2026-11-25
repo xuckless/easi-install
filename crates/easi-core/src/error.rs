@@ -78,6 +78,9 @@ pub enum EasiError {
     )]
     NoExecMount(PathBuf),
 
+    #[error("package inspection failed: {reason}")]
+    InspectionFailed { reason: String },
+
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -103,6 +106,10 @@ const ERROR_HINTS: &[ErrorHelp] = &[
     ErrorHelp {
         prefix: "downloaded update failed its",
         hint: "The file does not match the checksum its publisher listed; nothing was installed. Retry later — if it persists, the release or download mirror may be tampered with.",
+    },
+    ErrorHelp {
+        prefix: "package inspection failed",
+        hint: "easi reads packages in a sandboxed, memory- and time-limited helper; the file may be corrupt or crafted to exhaust resources. Nothing was installed.",
     },
     ErrorHelp {
         prefix: "path not found",

@@ -56,6 +56,14 @@ minisign-verify = "0.3"
 # xattr: read user.xdg.origin.url extended attribute for trust summary.
 xattr = "1"
 
+# landlock: official safe Rust binding for the kernel's unprivileged Landlock LSM, used by the
+# `__sandbox-exec`/`__inspect` helpers to restrict their own filesystem/network access without
+# `unsafe` or setuid tools (best-effort: older kernels degrade and we report the status).
+landlock = "0.4"
+# rlimit: safe `setrlimit` wrapper so the inspection helper caps its own address space and CPU
+# time without `unsafe` libc calls.
+rlimit = "0.12"
+
 [workspace.lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"

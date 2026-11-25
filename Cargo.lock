@@ -1357,7 +1357,10 @@ version = "2.5.8"
 dependencies = [
  "clap",
  "easi-cli",
+ "easi-core",
  "easi-gui",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -1376,8 +1379,10 @@ dependencies = [
  "base64",
  "bzip2",
  "flate2",
+ "landlock",
  "lz4_flex",
  "minisign-verify",
+ "rlimit",
  "serde",
  "serde_json",
  "sevenz-rust",
@@ -2737,6 +2742,17 @@ dependencies = [
  "euclid",
  "polycool",
  "smallvec",
+]
+
+[[package]]
+name = "landlock"
+version = "0.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03795bb5dba9d001e861618f7301289e3ad0bb146d0a8192ff5fd8b06d069087"
+dependencies = [
+ "enumflags2",
+ "libc",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -4140,6 +4156,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47b34b781b31e5d73e9fbc8689c70551fd1ade9a19e3e28cfec8580a79290cc4"
 dependencies = [
  "bytemuck",
+]
+
+[[package]]
+name = "rlimit"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89be6f31978e7fb890f29af88b6040c1524cb9b254d20724190c2bb4d438d550"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

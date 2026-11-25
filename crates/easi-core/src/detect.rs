@@ -5,8 +5,11 @@ use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use backhand::{FilesystemReader, InnerNode};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tar::Archive;
 use xz2::read::XzDecoder;
 use zip::ZipArchive;
@@ -238,7 +241,7 @@ pub fn detect_friendly_unsupported(path: &Path, header: &[u8]) -> Option<EasiErr
 }
 
 /// Metadata collected for one entry during read-only inspection (no disk extraction).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArchiveEntry {
     pub path: String,
     pub size: u64,
@@ -247,8 +250,29 @@ pub struct ArchiveEntry {
     pub is_symlink: bool,
     pub symlink_target: Option<String>,
     pub is_elf: bool,
-    pub elf_arch: Option<&'static str>,
+    #[serde(deserialize_with = "deserialize_elf_arch")]
+    pub elf_arch: ElfArch,
     pub is_script: bool,
+}
+
+/// ELF `e_machine` → Rust's `std::env::consts::ARCH` name.
+const ARCH_TABLE: &[(u16, &str)] = &[
+    (62, "x86_64"),
+    (183, "aarch64"),
+    (3, "x86"),
+    (40, "arm"),
+    (243, "riscv64"),
+];
+
+/// Named so serde's derive does not treat `Option<&str>` as implicitly borrowed from the input
+/// (which would force `'de: 'static`); [`deserialize_elf_arch`] maps names back instead.
+pub type ElfArch = Option<&'static str>;
+
+/// Arch names cross the `__inspect` boundary as strings; map them back onto the table's
+/// `'static` names (unknown names become `None`, as for an unknown `e_machine`).
+fn deserialize_elf_arch<'de, D: Deserializer<'de>>(d: D) -> Result<ElfArch, D::Error> {
+    let name = Option::<String>::deserialize(d)?;
+    Ok(name.and_then(|n| ARCH_TABLE.iter().find(|(_, a)| *a == n).map(|(_, a)| *a)))
 }
 
 /// Map ELF `e_machine` (offset 18, little-endian u16) to Rust's `std::env::consts::ARCH` name.
@@ -257,13 +281,6 @@ pub fn elf_arch_from_header(header: &[u8]) -> Option<&'static str> {
         return None;
     }
     let machine = u16::from_le_bytes([header[18], header[19]]);
-    const ARCH_TABLE: &[(u16, &str)] = &[
-        (62, "x86_64"),
-        (183, "aarch64"),
-        (3, "x86"),
-        (40, "arm"),
-        (243, "riscv64"),
-    ];
     ARCH_TABLE
         .iter()
         .find(|(m, _)| *m == machine)
@@ -271,11 +288,15 @@ pub fn elf_arch_from_header(header: &[u8]) -> Option<&'static str> {
 }
 
 /// Small metadata files extracted in memory during inspection.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PackageContents {
     pub entries: Vec<ArchiveEntry>,
     pub desktop_files: Vec<(String, String)>,
     pub metainfo_files: Vec<(String, String)>,
+    #[serde(
+        serialize_with = "serialize_icons",
+        deserialize_with = "deserialize_icons"
+    )]
     pub embedded_icons: Vec<(String, Vec<u8>)>,
     pub has_appimage_sig_section: bool,
     pub appimage_sig_section: Option<(u64, u64, Vec<u8>)>,
@@ -284,6 +305,24 @@ pub struct PackageContents {
     pub meta_version: Option<String>,
     pub jar_main_class: Option<String>,
     pub script_report: Option<ScriptReport>,
+}
+
+// Icons dominate the `__inspect` reply; base64 keeps it ~1.33x their size instead of the ~3.6x
+// of a JSON number array, so a full inspection budget fits the reply cap.
+fn serialize_icons<S: Serializer>(icons: &[(String, Vec<u8>)], s: S) -> Result<S::Ok, S::Error> {
+    s.collect_seq(icons.iter().map(|(p, b)| (p, BASE64.encode(b))))
+}
+
+fn deserialize_icons<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<(String, Vec<u8>)>, D::Error> {
+    Vec::<(String, String)>::deserialize(d)?
+        .into_iter()
+        .map(|(p, b)| {
+            BASE64
+                .decode(b)
+                .map(|bytes| (p, bytes))
+                .map_err(serde::de::Error::custom)
+        })
+        .collect()
 }
 
 /// Read at most `cap` bytes without trusting header sizes; `None` when the content is longer.
