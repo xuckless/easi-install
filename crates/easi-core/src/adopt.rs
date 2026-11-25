@@ -627,9 +627,10 @@ pub fn organize_app_into_applications(
         return Err(EasiError::UnmanagedOverwrite(dest_dir));
     }
 
-    let old_str = canon_old.to_string_lossy().into_owned();
     let new_install_dir: PathBuf;
     let new_exec: PathBuf;
+    // Where whatever was at `canon_old` now lives (the moved file, or the moved dir).
+    let new_base: PathBuf;
 
     if canon_old.is_file() {
         fs::create_dir_all(&dest_dir)?;
@@ -639,29 +640,69 @@ pub fn organize_app_into_applications(
         let dest_file = dest_dir.join(fname);
         fs::rename(&canon_old, &dest_file)?;
         new_install_dir = dest_dir.clone();
+        new_base = dest_file.clone();
         new_exec = dest_file;
     } else if canon_old.is_dir() {
         fs::rename(&canon_old, &dest_dir)?;
         new_install_dir = dest_dir.clone();
+        new_base = dest_dir.clone();
         new_exec = find_best_exec_in_dir(&dest_dir, &bin_slug_for_id(&manifest.app_id))
             .unwrap_or_else(|| dest_dir.join(&manifest.source_filename));
     } else {
         return Err(EasiError::NotFound(canon_old));
     }
 
-    let new_str = if canon_old.is_file() {
-        new_exec.to_string_lossy().into_owned()
-    } else {
-        new_install_dir.to_string_lossy().into_owned()
+    let relocate = |p: &Path| {
+        p.strip_prefix(&canon_old).ok().map(|rel| {
+            if rel.as_os_str().is_empty() {
+                new_base.clone()
+            } else {
+                new_base.join(rel)
+            }
+        })
     };
 
-    // Rewrite tracked .desktop Exec= and Icon= paths that pointed to the old location.
+    // Re-render tracked .desktop paths that pointed into the old location: the `Exec=` program
+    // with the spec's quoting, and plain path values (`TryExec=`, `Icon=`, `Path=`) with the
+    // string escape for backslashes. A text replace missed escaped paths and left a moved path
+    // with spaces unquoted.
     for path in &manifest.created_files {
         if path.starts_with(&roots.desktop_dir)
             && path.extension().and_then(|s| s.to_str()) == Some("desktop")
             && let Ok(text) = fs::read_to_string(path)
         {
-            let updated = text.replace(&old_str, &new_str);
+            let updated: String = text
+                .lines()
+                .map(|line| {
+                    let Some((key, value)) = line.split_once('=') else {
+                        return line.to_string();
+                    };
+                    match key.trim() {
+                        "Exec" => {
+                            let (program, rest) = split_exec_program(value);
+                            match relocate(Path::new(&program)) {
+                                Some(moved) => format!(
+                                    "{key}={}{rest}",
+                                    crate::install::quote_desktop_exec(&moved)
+                                ),
+                                None => line.to_string(),
+                            }
+                        }
+                        "TryExec" | "Icon" | "Path" => {
+                            match relocate(Path::new(&value.replace("\\\\", "\\"))) {
+                                Some(moved) => format!(
+                                    "{key}={}",
+                                    moved.to_string_lossy().replace('\\', "\\\\")
+                                ),
+                                None => line.to_string(),
+                            }
+                        }
+                        _ => line.to_string(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n";
             if updated != text {
                 let _ = crate::atomic::write_atomic(path, updated.as_bytes(), 0o644);
             }
@@ -1122,6 +1163,47 @@ fn parse_exec_binary_path(exec_raw: &str, home_dir: &Path) -> Option<PathBuf> {
     if p.is_absolute() { Some(p) } else { None }
 }
 
+/// Split a raw `.desktop` `Exec=` value into its program path (string and quoting escapes
+/// undone, `%%` as `%`) and the raw text after the program, e.g. ` %U`.
+fn split_exec_program(raw: &str) -> (String, &str) {
+    // Undo the string-level `\\` escape, remembering where each char ends in `raw`.
+    let mut units: Vec<(char, usize)> = Vec::new();
+    let mut chars = raw.char_indices().peekable();
+    while let Some((_, c)) = chars.next() {
+        if c == '\\' && chars.peek().is_some_and(|(_, n)| *n == '\\') {
+            chars.next();
+        }
+        let end = chars.peek().map_or(raw.len(), |(i, _)| *i);
+        units.push((c, end));
+    }
+    let mut program = String::new();
+    let mut end = raw.len();
+    let quoted = units.first().is_some_and(|(c, _)| *c == '"');
+    let mut k = usize::from(quoted);
+    while let Some(&(c, unit_end)) = units.get(k) {
+        match (quoted, c) {
+            (true, '\\') => {
+                if let Some(&(escaped, _)) = units.get(k + 1) {
+                    program.push(escaped);
+                }
+                k += 2;
+                continue;
+            }
+            (true, '"') => {
+                end = unit_end;
+                break;
+            }
+            (false, c) if c.is_whitespace() => {
+                end = unit_end - c.len_utf8();
+                break;
+            }
+            (_, c) => program.push(c),
+        }
+        k += 1;
+    }
+    (program.replace("%%", "%"), &raw[end..])
+}
+
 fn split_exec_tokens(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
@@ -1377,5 +1459,81 @@ mod tests {
             tmp.path(),
         );
         assert_eq!(parsed.as_deref(), Some(custom_bin.as_path()));
+    }
+
+    #[test]
+    fn organize_rerenders_desktop_paths_with_spec_quoting() {
+        // (old folder under ~/opt, Exec= program quoted as easi writes it)
+        let rows = [("My App 100%", true), ("myapp", false)];
+        for (old_folder, quoted) in rows {
+            let tmp = TempDir::new().expect("tempdir");
+            let roots = InstallRoots::from_home(tmp.path());
+            fs::create_dir_all(&roots.desktop_dir).expect("mkdir desktop");
+            let old_dir = tmp.path().join("opt").join(old_folder);
+            fs::create_dir_all(&old_dir).expect("mkdir old");
+            let old_dir = fs::canonicalize(&old_dir).expect("canon");
+            let exec = old_dir.join("myapp");
+            fs::write(&exec, b"\x7fELF").expect("write exec");
+            fs::set_permissions(&exec, fs::Permissions::from_mode(0o755)).expect("chmod");
+            fs::write(old_dir.join("icon.png"), b"\x89PNG").expect("write icon");
+            let program = if quoted {
+                crate::install::quote_desktop_exec(&exec)
+            } else {
+                exec.to_string_lossy().into_owned()
+            };
+            let desktop = roots.desktop_dir.join("easi.myapp.desktop");
+            fs::write(
+                &desktop,
+                format!(
+                    "[Desktop Entry]\nName=My App\nExec={program} --flag %U\nTryExec={}\n\
+                     Icon={}\nComment=kept {}\n",
+                    exec.display(),
+                    old_dir.join("icon.png").display(),
+                    old_dir.display()
+                ),
+            )
+            .expect("write desktop");
+            let manifest = Manifest {
+                app_id: "easi.myapp".into(),
+                name: "My App".into(),
+                version: None,
+                source_filename: "myapp".into(),
+                kind: AppKind::Gui,
+                install_dir: old_dir.clone(),
+                developer: None,
+                origin_url: None,
+                signature_summary: None,
+                signer_fingerprint: None,
+                pinned_download_host: None,
+                update_source: None,
+                adopted: true,
+                created_files: vec![exec.clone(), desktop.clone()],
+                created_dirs: vec![old_dir.clone()],
+                installer_data_paths: vec![],
+            };
+            save_manifest(&roots, &manifest).expect("save");
+
+            let moved = organize_app_into_applications(&roots, "easi.myapp").expect("organize");
+            let new_dir = roots.applications_dir.join("My App");
+            assert_eq!(moved.install_dir, new_dir, "{old_folder}");
+            let text = fs::read_to_string(&desktop).expect("read desktop");
+            let new_exec = new_dir.join("myapp");
+            let expected = [
+                format!(
+                    "Exec={} --flag %U",
+                    crate::install::quote_desktop_exec(&new_exec)
+                ),
+                format!("TryExec={}", new_exec.display()),
+                format!("Icon={}", new_dir.join("icon.png").display()),
+                // Only path-valued keys move; free text keeps the old wording.
+                format!("Comment=kept {}", old_dir.display()),
+            ];
+            for line in expected {
+                assert!(
+                    text.lines().any(|l| l == line),
+                    "{old_folder}: {line}\n{text}"
+                );
+            }
+        }
     }
 }
