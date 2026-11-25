@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::appid::{
     display_name_from_raw, display_name_from_slug, guess_startup_wm_class, slug_and_version,
 };
+use crate::atomic::FileMode;
 use crate::detect::{ArchiveEntry, detect_file_format};
 use crate::error::EasiError;
 use crate::inspect::{desktop_field, score_icons};
@@ -485,7 +486,7 @@ pub fn repair_app(
             let dir = roots.icons_dir.join(subdir);
             fs::create_dir_all(&dir)?;
             let icon_dest = safe_join(&dir, Path::new(&format!("{}.{ext}", manifest.app_id)))?;
-            crate::atomic::write_atomic(&icon_dest, &bytes, 0o644)?;
+            crate::atomic::write_atomic(&icon_dest, &bytes, FileMode::New(0o644))?;
             let icon_abs = icon_dest.to_string_lossy().into_owned();
             if !manifest.created_files.contains(&icon_dest) {
                 manifest.created_files.push(icon_dest);
@@ -538,7 +539,7 @@ pub fn repair_app(
     }
 
     if let (Some(dp), Some(text)) = (&desktop_path, &desktop_text) {
-        crate::atomic::write_atomic(dp, text.as_bytes(), 0o644)?;
+        crate::atomic::write_atomic(dp, text.as_bytes(), FileMode::New(0o644))?;
     }
 
     // 4. Ensure ~/.local/bin/<slug> symlink exists (never overwrite unmanaged files).
@@ -704,7 +705,7 @@ pub fn organize_app_into_applications(
                 .join("\n")
                 + "\n";
             if updated != text {
-                let _ = crate::atomic::write_atomic(path, updated.as_bytes(), 0o644);
+                let _ = crate::atomic::write_atomic(path, updated.as_bytes(), FileMode::New(0o644));
             }
         }
     }

@@ -9,10 +9,46 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tempfile::NamedTempFile;
 
-/// Replace `path` with `bytes` and exact `mode` so a crash leaves either the old or the new file,
+/// Permission bits for a file written by [`write_atomic`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileMode {
+    /// A file easi creates: these bits minus the user's umask, like `open(2)` would give.
+    New(u32),
+    /// Exactly these bits, e.g. an existing rc file's mode or a backup's being restored.
+    Keep(u32),
+}
+
+/// Assumed when `/proc/self/status` has no `Umask:` line (kernels before 4.7).
+const FALLBACK_UMASK: u32 = 0o022;
+
+/// `mode` as `open(2)` would create it under `umask`.
+pub fn effective_mode(mode: u32, umask: u32) -> u32 {
+    mode & !umask & 0o7777
+}
+
+/// The `Umask:` value (octal) of a `/proc/<pid>/status` text.
+fn parse_umask(status: &str) -> Option<u32> {
+    status
+        .lines()
+        .find_map(|l| l.strip_prefix("Umask:"))
+        .and_then(|v| u32::from_str_radix(v.trim(), 8).ok())
+}
+
+/// Replace `path` with `bytes` and `mode` so a crash leaves either the old or the new file,
 /// never a truncated one. The randomly named temp file sits in the target's directory so the
 /// rename stays on one filesystem; a symlink at `path` is replaced, never followed.
-pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
+pub fn write_atomic(path: &Path, bytes: &[u8], mode: FileMode) -> std::io::Result<()> {
+    // Read per write (no process-global cache): the umask is per process and cheap to read.
+    let mode = match mode {
+        FileMode::New(bits) => effective_mode(
+            bits,
+            fs::read_to_string("/proc/self/status")
+                .ok()
+                .and_then(|s| parse_umask(&s))
+                .unwrap_or(FALLBACK_UMASK),
+        ),
+        FileMode::Keep(bits) => bits,
+    };
     let dir = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -60,7 +96,7 @@ pub fn load_toml_checked<T: DeserializeOwned + Serialize>(
         return (fallback, Some(path.to_path_buf()));
     };
     if let Ok(text) = toml::to_string_pretty(&fallback) {
-        let _ = write_atomic(path, text.as_bytes(), 0o644);
+        let _ = write_atomic(path, text.as_bytes(), FileMode::New(0o644));
     }
     (fallback, Some(aside))
 }
@@ -89,7 +125,7 @@ mod tests {
             (&link, 0o600),
         ];
         for (path, mode) in rows {
-            write_atomic(path, b"new", mode).unwrap();
+            write_atomic(path, b"new", FileMode::Keep(mode)).unwrap();
             assert_eq!(fs::read(path).unwrap(), b"new", "{}", path.display());
             let got = fs::metadata(path).unwrap().permissions().mode() & 0o7777;
             assert_eq!(got, mode, "{}", path.display());
@@ -102,5 +138,35 @@ mod tests {
                 .is_symlink()
         );
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 3);
+    }
+
+    #[test]
+    fn new_files_get_the_umask_applied() {
+        // (requested mode, umask, resulting mode)
+        let rows = [
+            (0o644, 0o022, 0o644),
+            (0o755, 0o022, 0o755),
+            (0o644, 0o077, 0o600),
+            (0o755, 0o027, 0o750),
+            (0o644, 0o000, 0o644),
+            (0o4755, 0o022, 0o4755),
+        ];
+        for (mode, umask, expected) in rows {
+            assert_eq!(
+                effective_mode(mode, umask),
+                expected,
+                "{mode:o} & !{umask:o}"
+            );
+        }
+        // (status text, parsed umask)
+        let statuses = [
+            ("Name:\teasi\nUmask:\t0022\nState:\tR\n", Some(0o022)),
+            ("Umask:\t0077\n", Some(0o077)),
+            ("Name:\teasi\n", None),
+            ("Umask:\tzz\n", None),
+        ];
+        for (status, expected) in statuses {
+            assert_eq!(parse_umask(status), expected, "{status:?}");
+        }
     }
 }

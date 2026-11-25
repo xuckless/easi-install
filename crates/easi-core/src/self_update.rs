@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tempfile::{NamedTempFile, TempDir};
 
+use crate::atomic::FileMode;
 use crate::error::EasiError;
 use crate::install::extract_archive_safe;
 use crate::model::Format;
@@ -108,7 +109,7 @@ pub fn save_config(roots: &InstallRoots, cfg: &EasiConfig) -> Result<PathBuf, Ea
     fs::create_dir_all(&roots.easi_dir)?;
     let path = roots.config_path();
     let text = toml::to_string_pretty(cfg).map_err(|e| EasiError::Desktop(e.to_string()))?;
-    crate::atomic::write_atomic(&path, text.as_bytes(), 0o644)?;
+    crate::atomic::write_atomic(&path, text.as_bytes(), FileMode::New(0o644))?;
     Ok(path)
 }
 

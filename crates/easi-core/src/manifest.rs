@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::atomic::FileMode;
 use crate::error::EasiError;
 use crate::model::{AppKind, InstalledApp, UpdateSource};
 use crate::roots::InstallRoots;
@@ -167,7 +168,7 @@ pub fn save_manifest(roots: &InstallRoots, manifest: &Manifest) -> Result<PathBu
         )));
     }
     let text = toml::to_string_pretty(manifest).map_err(|e| EasiError::Manifest(e.to_string()))?;
-    crate::atomic::write_atomic(&path, text.as_bytes(), 0o644)?;
+    crate::atomic::write_atomic(&path, text.as_bytes(), FileMode::New(0o644))?;
     Ok(path)
 }
 

@@ -17,6 +17,7 @@ use tempfile::TempDir;
 use xz2::read::XzDecoder;
 use zip::ZipArchive;
 
+use crate::atomic::FileMode;
 use crate::error::EasiError;
 use crate::limits::LIMITS;
 use crate::manifest::{
@@ -233,7 +234,7 @@ where
                     let _ = crate::atomic::write_atomic(
                         &orig,
                         &bytes,
-                        meta.permissions().mode() & 0o7777,
+                        FileMode::Keep(meta.permissions().mode() & 0o7777),
                     );
                 }
             }
@@ -315,7 +316,7 @@ where
                         .to_ascii_lowercase();
                     let wrapper = safe_join(&app_dir, Path::new(&format!("{bin_name}-run.sh")))?;
                     let script = appimage_wrapper_script(&dest, nix_wrap);
-                    crate::atomic::write_atomic(&wrapper, script.as_bytes(), 0o755)?;
+                    crate::atomic::write_atomic(&wrapper, script.as_bytes(), FileMode::New(0o755))?;
                     tx.record_file(wrapper.clone());
                     resolved_exec = Some(wrapper);
                 } else {
@@ -343,7 +344,7 @@ where
                 let wrapper = safe_join(&app_dir, Path::new(&bin_name))?;
                 let jar_q = shell_single_quote(&jar_dest.to_string_lossy());
                 let script = format!("#!/bin/sh\nexec java -jar {jar_q} \"$@\"\n");
-                crate::atomic::write_atomic(&wrapper, script.as_bytes(), 0o755)?;
+                crate::atomic::write_atomic(&wrapper, script.as_bytes(), FileMode::New(0o755))?;
                 tx.record_file(wrapper.clone());
                 resolved_exec = Some(wrapper);
             }
@@ -518,7 +519,11 @@ where
                     }
                     let content =
                         render_desktop_entry(plan, exec_path, installed_icon_name.as_deref());
-                    crate::atomic::write_atomic(&desktop_path, content.as_bytes(), 0o644)?;
+                    crate::atomic::write_atomic(
+                        &desktop_path,
+                        content.as_bytes(),
+                        FileMode::New(0o644),
+                    )?;
                     tx.record_file(desktop_path);
                 }
             }
@@ -900,7 +905,7 @@ fn write_hicolor_icon(
     let dir = roots.icons_dir.join(subdir);
     fs::create_dir_all(&dir)?;
     let dest = safe_join(&dir, Path::new(&format!("{icon_name}.{ext}")))?;
-    crate::atomic::write_atomic(&dest, bytes, 0o644)?;
+    crate::atomic::write_atomic(&dest, bytes, FileMode::New(0o644))?;
     tx.record_file(dest.clone());
     Ok(Some(dest))
 }
@@ -1584,7 +1589,7 @@ pub fn move_to_trash(roots: &InstallRoots, source: &Path) -> Result<PathBuf, Eas
         "[Trash Info]\nPath={}\nDeletionDate={secs}\n",
         abs_source.to_string_lossy()
     );
-    crate::atomic::write_atomic(&info_path, info_content.as_bytes(), 0o644)?;
+    crate::atomic::write_atomic(&info_path, info_content.as_bytes(), FileMode::New(0o644))?;
 
     if fs::rename(source, &dest).is_err() {
         fs::copy(source, &dest)?;
@@ -1630,9 +1635,9 @@ pub fn add_bin_to_shell_rc(home: &Path) -> Result<PathBuf, EasiError> {
         next.push('\n');
         // Write through a symlinked rc (dotfile managers) to its real file, keeping its mode.
         let target = fs::canonicalize(&rc_path).unwrap_or_else(|_| rc_path.clone());
-        let mode = fs::metadata(&target)
-            .map(|m| m.permissions().mode() & 0o7777)
-            .unwrap_or(0o644);
+        let mode = fs::metadata(&target).map_or(FileMode::New(0o644), |m| {
+            FileMode::Keep(m.permissions().mode() & 0o7777)
+        });
         crate::atomic::write_atomic(&target, next.as_bytes(), mode)?;
     }
     Ok(rc_path)

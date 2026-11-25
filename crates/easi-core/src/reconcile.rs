@@ -7,6 +7,7 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
 use crate::appid::slug_and_version;
+use crate::atomic::FileMode;
 use crate::error::EasiError;
 use crate::manifest::{Manifest, list_manifests, save_manifest};
 use crate::oplog::{LockWait, StateLock};
@@ -117,7 +118,11 @@ pub fn set_startup_wm_class(
     if !found {
         lines.push(format!("StartupWMClass={wm_class}"));
     }
-    crate::atomic::write_atomic(&desktop_path, (lines.join("\n") + "\n").as_bytes(), 0o644)?;
+    crate::atomic::write_atomic(
+        &desktop_path,
+        (lines.join("\n") + "\n").as_bytes(),
+        FileMode::New(0o644),
+    )?;
     crate::install::refresh_desktop_caches(roots);
     Ok(desktop_path)
 }
@@ -292,7 +297,7 @@ fn repair_renamed_binary_wiring(
         let updated =
             crate::install::appimage_wrapper_script(new_ai, script.contains("appimage-run"));
         if script != updated {
-            let _ = crate::atomic::write_atomic(&target, updated.as_bytes(), 0o755);
+            let _ = crate::atomic::write_atomic(&target, updated.as_bytes(), FileMode::New(0o755));
             return true;
         }
         return false;
@@ -354,7 +359,7 @@ fn repair_renamed_binary_wiring(
             .collect::<Vec<_>>()
             .join("\n")
             + "\n";
-        let _ = crate::atomic::write_atomic(desktop_path, updated.as_bytes(), 0o644);
+        let _ = crate::atomic::write_atomic(desktop_path, updated.as_bytes(), FileMode::New(0o644));
     }
 
     true
