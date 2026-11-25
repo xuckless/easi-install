@@ -20,8 +20,9 @@ jobs:
             arch: aarch64
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with: { toolchain: stable }
       - run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libfreetype-dev libxkbcommon-dev libgl1-mesa-dev
       - run: cargo build --release --bin easi
       - name: Package tarball
@@ -33,7 +34,7 @@ jobs:
           cp target/release/easi dist/easi/easi
           chmod 0755 dist/easi/easi
           tar -czf "dist/easi-${TAG}-linux-${ARCH}.tar.gz" -C dist easi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: easi-${{ matrix.arch }}
           path: dist/easi-*.tar.gz
@@ -45,8 +46,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: release-assets
           merge-multiple: true
@@ -69,7 +70,7 @@ jobs:
           printf '%s\n' "${MINISIGN_PASSWORD}" | minisign -S -s /tmp/minisign.key \
             -t "easi release tag:${TAG}" -m release-assets/SHA256SUMS
           rm -f /tmp/minisign.key
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: |
             release-assets/easi-*.tar.gz
