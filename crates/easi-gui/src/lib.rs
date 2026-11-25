@@ -1102,7 +1102,6 @@ pub fn run(initial_path: Option<PathBuf>) -> Result<(), slint::PlatformError> {
 
     let res = window.run();
     let _ = std::fs::remove_file(&sock_path);
-    cleanup_preview_icons();
     res
 }
 
@@ -1142,20 +1141,6 @@ fn refresh_detected_async(weak: &Weak<ui::AppWindow>, roots: &InstallRoots) {
             }
         });
     });
-}
-
-fn cleanup_preview_icons() {
-    if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
-        for entry in entries.flatten() {
-            if entry
-                .file_name()
-                .to_str()
-                .is_some_and(|n| n.starts_with("easi-preview-"))
-            {
-                let _ = std::fs::remove_file(entry.path());
-            }
-        }
-    }
 }
 
 fn dispatch_ui(weak: &Weak<ui::AppWindow>, store: &Arc<Mutex<Store>>, action: UiAction) {
@@ -1430,7 +1415,7 @@ fn project_state(win: &ui::AppWindow, state: &State, ui: &ManagerUi) {
                 }
                 .into(),
             );
-            if let Some(img) = load_preview_icon(&plan.app_id, plan.icon_bytes.as_deref()) {
+            if let Some(img) = load_preview_icon(plan.icon_bytes.as_deref()) {
                 win.set_app_icon(img);
                 win.set_has_app_icon(true);
             } else {
@@ -1584,7 +1569,9 @@ fn load_installed_row_icon(roots: &InstallRoots, app_id: &str) -> (slint::Image,
     (slint::Image::default(), false)
 }
 
-fn load_preview_icon(app_id: &str, bytes: Option<&[u8]>) -> Option<slint::Image> {
+/// Decode the package's embedded icon in memory: writing it to a predictable `/tmp` name let
+/// another local user pre-plant a symlink or swap the file before Slint read it.
+fn load_preview_icon(bytes: Option<&[u8]>) -> Option<slint::Image> {
     let data = bytes?;
     let head = &data[..data.len().min(512)];
     let ext = if std::str::from_utf8(head).is_ok_and(|s| s.contains("<svg")) {
@@ -1594,19 +1581,7 @@ fn load_preview_icon(app_id: &str, bytes: Option<&[u8]>) -> Option<slint::Image>
     } else {
         return None;
     };
-    let safe_id: String = app_id
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let path = std::env::temp_dir().join(format!("easi-preview-{safe_id}.{ext}"));
-    std::fs::write(&path, data).ok()?;
-    slint::Image::load_from_path(&path).ok()
+    slint::Image::load_from_data(data, Some(ext)).ok()
 }
 
 fn project_app_detail(win: &ui::AppWindow, roots: &InstallRoots, app: &easi_core::InstalledApp) {
