@@ -94,7 +94,7 @@ const ERROR_HINTS: &[ErrorHelp] = &[
     },
     ErrorHelp {
         prefix: "update blocked: untrusted download host",
-        hint: "The update source sent the download to a host it is not pinned to, which can mean a hijacked release; nothing was installed. If the publisher really moved its downloads, re-record the source with `easi set-source <app> <url>`.",
+        hint: "The update source sent the download to a host it is not pinned to, which can mean a hijacked release; nothing was installed. If the publisher really moved its downloads, accept and pin the new host with `easi update <app> --retrust`.",
     },
     ErrorHelp {
         prefix: "downloaded update failed its",

@@ -469,6 +469,7 @@ pub fn reduce(state: State, action: Action) -> (State, Vec<Effect>) {
                 origin_url: None,
                 signature_summary: None,
                 signer_fingerprint: None,
+                pinned_download_host: None,
                 update_source: None,
                 planned_writes: vec![],
             };
@@ -717,6 +718,7 @@ mod tests {
             origin_url: None,
             signature_summary: None,
             signer_fingerprint: None,
+            pinned_download_host: None,
             update_source: None,
             planned_writes: vec![],
         }

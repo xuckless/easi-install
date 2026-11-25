@@ -457,6 +457,7 @@ where
                     origin_url: plan.origin_url.clone(),
                     signature_summary: plan.signature_summary.clone(),
                     signer_fingerprint: plan.signer_fingerprint.clone(),
+                    pinned_download_host: plan.pinned_download_host.clone(),
                     update_source: plan.update_source.clone(),
                     adopted: false,
                     created_files: tx.created_files.clone(),
@@ -1717,6 +1718,7 @@ Exec=/bin/sh -c 'pwned'
             origin_url: None,
             signature_summary: None,
             signer_fingerprint: None,
+            pinned_download_host: None,
             update_source: None,
             planned_writes: vec![],
         };

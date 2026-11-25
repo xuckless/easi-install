@@ -411,6 +411,7 @@ pub fn adopt_app(
         origin_url: None,
         signature_summary: Some("Adopted from existing system install".into()),
         signer_fingerprint: None,
+        pinned_download_host: None,
         update_source,
         adopted: true,
         created_files,

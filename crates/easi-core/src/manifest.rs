@@ -26,6 +26,10 @@ pub struct Manifest {
     /// Primary-key fingerprint of the verified signer at install/last trusted update.
     #[serde(default)]
     pub signer_fingerprint: Option<String>,
+    /// Final download host of the first/last trusted update; later updates must match it unless
+    /// the host is in the source's fixed allowlist or the user re-trusts.
+    #[serde(default)]
+    pub pinned_download_host: Option<String>,
     #[serde(default)]
     pub update_source: Option<UpdateSource>,
     #[serde(default)]
@@ -235,6 +239,7 @@ mod tests {
         .unwrap();
         let m = load_manifest(&path).unwrap();
         assert_eq!(m.signer_fingerprint, None);
+        assert_eq!(m.pinned_download_host, None);
         assert_eq!(m.update_source, None);
     }
 }

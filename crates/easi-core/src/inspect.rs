@@ -906,6 +906,7 @@ where
         origin_url: trust.origin_url.clone(),
         signature_summary: Some(trust.signature.summary()),
         signer_fingerprint: trust.signature.fingerprint().map(str::to_string),
+        pinned_download_host: None,
         update_source,
         planned_writes,
     };

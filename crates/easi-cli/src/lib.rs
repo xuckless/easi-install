@@ -84,7 +84,7 @@ pub enum Command {
         /// Update every installed app that has a newer upstream release.
         #[arg(long)]
         all: bool,
-        /// Accept and record a changed (or removed) publisher signing key for this one app.
+        /// Accept and re-pin a changed publisher signing key (or its removal) and download host for this one app.
         #[arg(long, conflicts_with = "all", requires = "app")]
         retrust: bool,
     },

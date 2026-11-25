@@ -330,6 +330,7 @@ pub fn import_apps_from_toml(
             origin_url: None,
             signature_summary: None,
             signer_fingerprint: None,
+            pinned_download_host: None,
             update_source: Some(src),
             adopted: false,
             created_files: vec![],
@@ -556,9 +557,6 @@ const GITHUB_DOWNLOAD_HOSTS: &[&str] = &[
     "release-assets.githubusercontent.com",
 ];
 const JETBRAINS_DOWNLOAD_HOSTS: &[&str] = &["download.jetbrains.com", "download-cdn.jetbrains.com"];
-/// Second-level labels that act as public suffixes under two-letter ccTLDs (`example.co.uk`).
-const CCTLD_SECOND_LEVELS: &[&str] = &["ac", "co", "com", "edu", "gov", "net", "org"];
-
 /// Lowercase host of an `https://` URL; userinfo (`user@host`) and non-DNS hosts are refused.
 fn url_host(url: &str) -> Option<String> {
     let authority = url
@@ -576,36 +574,36 @@ fn url_host(url: &str) -> Option<String> {
     is_safe_host(&host).then_some(host)
 }
 
-/// Approximate eTLD+1 (no public suffix list): last two labels, or three under `co.uk`-style suffixes.
-fn registrable_domain(host: &str) -> &str {
-    let mut labels = host.rsplit('.');
-    let tld = labels.next().unwrap_or_default();
-    let sld = labels.next().unwrap_or_default();
-    let keep = if tld.len() == 2 && CCTLD_SECOND_LEVELS.contains(&sld) {
-        3
-    } else {
-        2
+/// Decide whether curl's final download URL may be used and return its host to pin. Hosts in a
+/// source's fixed allowlist (GitHub/JetBrains CDNs, the forge itself) always pass; any other host
+/// must equal the host pinned on the first update (trust on first use) unless the user re-trusts.
+pub fn check_download_host(
+    source: &UpdateSource,
+    url: &str,
+    pinned: Option<&str>,
+    trust: PublisherTrust,
+) -> Result<String, EasiError> {
+    let blocked = || EasiError::UntrustedDownloadHost {
+        url: url.to_string(),
+        update_source: source.display_label(),
     };
-    host.rmatch_indices('.')
-        .nth(keep - 1)
-        .map_or(host, |(i, _)| &host[i + 1..])
-}
-
-/// Whether `url` (checked before download and again on curl's final redirect target) is on a
-/// host pinned for `source`: fixed CDN lists for GitHub/JetBrains, the forge host itself for
-/// GitLab/Gitea, and the recorded URL's registrable domain for URL-based sources.
-pub fn download_host_allowed(source: &UpdateSource, url: &str) -> bool {
-    let Some(host) = url_host(url) else {
-        return false;
-    };
-    match source {
+    let host = url_host(url).ok_or_else(blocked)?;
+    let listed = match source {
         UpdateSource::GitHubRelease { .. } => GITHUB_DOWNLOAD_HOSTS.contains(&host.as_str()),
         UpdateSource::JetBrains { .. } => JETBRAINS_DOWNLOAD_HOSTS.contains(&host.as_str()),
         UpdateSource::ForgeRelease { host: forge, .. } => host.eq_ignore_ascii_case(forge),
-        UpdateSource::ZsyncUrl { url: recorded }
-        | UpdateSource::ElectronYaml { url: recorded }
-        | UpdateSource::HttpRedirect { url: recorded } => {
-            url_host(recorded).is_some_and(|r| registrable_domain(&r) == registrable_domain(&host))
+        UpdateSource::ZsyncUrl { .. }
+        | UpdateSource::ElectronYaml { .. }
+        | UpdateSource::HttpRedirect { .. } => false,
+    };
+    match (listed, pinned, trust) {
+        (true, _, _) | (false, None, _) | (false, Some(_), PublisherTrust::Retrust) => Ok(host),
+        (false, Some(pin), PublisherTrust::Recorded) => {
+            if pin.eq_ignore_ascii_case(&host) {
+                Ok(host)
+            } else {
+                Err(blocked())
+            }
         }
     }
 }
@@ -1108,9 +1106,9 @@ impl ParsedRelease {
 /// Whether an update may replace the publisher identity recorded at install.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublisherTrust {
-    /// Block when the update's verified signer differs from the recorded one.
+    /// Block when the update's verified signer or download host differs from the recorded one.
     Recorded,
-    /// The user explicitly accepted whatever signer (or none) the update arrives with.
+    /// The user explicitly accepted whatever signer (or none) and host the update arrives with.
     Retrust,
 }
 
@@ -1470,22 +1468,16 @@ pub fn download_and_update_app(
         .filter(|s| !s.is_empty() && *s != "." && *s != "..")
         .unwrap_or("update.pkg");
     let dest = crate::roots::safe_join(tmp.path(), Path::new(raw_fname))?;
-    // Check the host before downloading and again on curl's final URL after redirects.
-    let pinned = |url: &str| -> Result<(), EasiError> {
-        if download_host_allowed(source, url) {
-            Ok(())
-        } else {
-            Err(EasiError::UntrustedDownloadHost {
-                url: url.to_string(),
-                update_source: source.display_label(),
-            })
-        }
+    // Pin by curl's final URL after redirects: that host served the bytes we install.
+    let fetch_pinned = |url: &str, to: &Path| -> Result<String, EasiError> {
+        check_download_host(
+            source,
+            &download_to_file(url, to)?,
+            manifest.pinned_download_host.as_deref(),
+            trust,
+        )
     };
-    let fetch_pinned = |url: &str, to: &Path| -> Result<(), EasiError> {
-        pinned(url)?;
-        pinned(&download_to_file(url, to)?)
-    };
-    fetch_pinned(&resolved.url, &dest)?;
+    let download_host = fetch_pinned(&resolved.url, &dest)?;
     let integrity = verify_integrity(&dest, resolved.digest.as_ref())?;
     if let Some((sig_url, ext)) = &resolved.detached_sig {
         let mut sig_path = dest.clone().into_os_string();
@@ -1511,8 +1503,9 @@ pub fn download_and_update_app(
         signature.fingerprint(),
         trust,
     )?;
-    // Record the new signer (first update, same key, or an explicit re-trust).
+    // Record the new signer and host (first update, unchanged, or an explicit re-trust).
     plan.signer_fingerprint = signature.fingerprint().map(str::to_string);
+    plan.pinned_download_host = Some(download_host);
     // Security guard: NEVER auto-execute an untrusted shell script during an automated update!
     if plan.format == crate::model::Format::ShellInstaller {
         return Err(EasiError::Desktop(
@@ -1824,68 +1817,145 @@ mod tests {
     }
 
     #[test]
-    fn download_hosts_are_pinned_per_source() {
+    fn download_hosts_are_allowlisted_or_pinned_on_first_use() {
+        use PublisherTrust::{Recorded, Retrust};
         let github = lookup_known_app_source("zed").unwrap();
         let jetbrains = lookup_known_app_source("webstorm").unwrap();
         let gitlab = parse_user_update_url("https://gitlab.com/foo/bar").unwrap();
-        let electron = UpdateSource::ElectronYaml {
-            url: "https://updates.example.com/linux".into(),
-        };
         let redirect = UpdateSource::HttpRedirect {
-            url: "https://example.co.uk/latest".into(),
+            url: "https://discord.com/api/download?platform=linux".into(),
         };
-        let rows: &[(&UpdateSource, &str, bool)] = &[
+        let gh_cdn = "https://release-assets.githubusercontent.com/x?sig=1";
+        let cdn = "https://dl.discordapp.net/apps/linux/0.0.1/discord-0.0.1.tar.gz";
+        type Row<'a> = (
+            &'a str,
+            &'a UpdateSource,
+            &'a str,
+            Option<&'a str>,
+            PublisherTrust,
+            Option<&'a str>,
+        );
+        let rows: &[Row] = &[
             (
+                "github cdn listed",
                 &github,
-                "https://github.com/o/r/releases/download/v1/a.tar.gz",
-                true,
+                gh_cdn,
+                None,
+                Recorded,
+                Some("release-assets.githubusercontent.com"),
             ),
             (
+                "listed host beats a different pin",
                 &github,
-                "https://release-assets.githubusercontent.com/x?sig=1",
-                true,
+                "https://github.com/o/r/a",
+                Some("objects.githubusercontent.com"),
+                Recorded,
+                Some("github.com"),
             ),
-            (&github, "https://objects.githubusercontent.com:443/x", true),
-            (&github, "https://evil.example/a.tar.gz", false),
-            (&github, "https://github.com.evil.example/a", false),
-            (&github, "https://github.com@evil.example/a", false),
-            (&github, "http://github.com/a", false),
             (
+                "port and case normalized",
+                &github,
+                "https://Objects.GitHubUserContent.com:443/x",
+                None,
+                Recorded,
+                Some("objects.githubusercontent.com"),
+            ),
+            (
+                "jetbrains cdn listed",
                 &jetbrains,
-                "https://download.jetbrains.com/webstorm/WS.tar.gz",
-                true,
+                "https://download-cdn.jetbrains.com/ws/WS.tar.gz",
+                None,
+                Recorded,
+                Some("download-cdn.jetbrains.com"),
             ),
             (
-                &jetbrains,
-                "https://download-cdn.jetbrains.com/webstorm/WS.tar.gz",
-                true,
-            ),
-            (
-                &jetbrains,
-                "https://jetbrains.evil.example/WS.tar.gz",
-                false,
-            ),
-            (
+                "forge host listed",
                 &gitlab,
                 "https://gitlab.com/foo/bar/-/releases/v1/downloads/a",
-                true,
+                None,
+                Recorded,
+                Some("gitlab.com"),
             ),
-            (&gitlab, "https://GitLab.com./foo/bar/a", true),
-            (&gitlab, "https://cdn.example/a", false),
-            (&electron, "https://dl.example.com/App.AppImage", true),
-            (&electron, "https://example.com/App.AppImage", true),
-            (&electron, "https://example.net/App.AppImage", false),
-            (&redirect, "https://cdn.example.co.uk/app.tar.gz", true),
-            (&redirect, "https://other.co.uk/app.tar.gz", false),
-            (&redirect, "not a url", false),
+            (
+                "first update pins any https host",
+                &redirect,
+                cdn,
+                None,
+                Recorded,
+                Some("dl.discordapp.net"),
+            ),
+            (
+                "same pinned host",
+                &redirect,
+                cdn,
+                Some("dl.discordapp.net"),
+                Recorded,
+                Some("dl.discordapp.net"),
+            ),
+            (
+                "unlisted host differs from pin",
+                &redirect,
+                "https://evil.example/d.tar.gz",
+                Some("dl.discordapp.net"),
+                Recorded,
+                None,
+            ),
+            (
+                "github off-list host differs from pin",
+                &github,
+                "https://evil.example/a",
+                Some("github.com"),
+                Recorded,
+                None,
+            ),
+            (
+                "retrust re-pins",
+                &redirect,
+                "https://new-cdn.example/d.tar.gz",
+                Some("dl.discordapp.net"),
+                Retrust,
+                Some("new-cdn.example"),
+            ),
+            (
+                "lookalike host",
+                &github,
+                "https://github.com.evil.example/a",
+                Some("github.com"),
+                Recorded,
+                None,
+            ),
+            (
+                "userinfo refused",
+                &github,
+                "https://github.com@evil.example/a",
+                None,
+                Recorded,
+                None,
+            ),
+            (
+                "plain http refused",
+                &redirect,
+                "http://dl.discordapp.net/a",
+                None,
+                Recorded,
+                None,
+            ),
+            (
+                "garbage refused",
+                &redirect,
+                "not a url",
+                None,
+                Retrust,
+                None,
+            ),
         ];
-        for (source, url, want) in rows {
-            assert_eq!(
-                download_host_allowed(source, url),
-                *want,
-                "{} -> {url}",
-                source.display_label()
-            );
+        for (name, source, url, pinned, trust, want) in rows {
+            let got = check_download_host(source, url, *pinned, *trust);
+            match (got, want) {
+                (Ok(host), Some(w)) => assert_eq!(host, *w, "{name}"),
+                (Err(EasiError::UntrustedDownloadHost { .. }), None) => {}
+                (got, _) => panic!("{name}: unexpected {got:?}"),
+            }
         }
     }
 
@@ -2088,6 +2158,7 @@ mod tests {
             origin_url: None,
             signature_summary: None,
             signer_fingerprint: None,
+            pinned_download_host: None,
             update_source: lookup_known_app_source("zen-browser"),
             adopted: true,
             created_files: vec![],

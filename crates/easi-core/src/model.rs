@@ -147,6 +147,8 @@ pub struct InstallPlan {
     pub signature_summary: Option<String>,
     /// Verified signer fingerprint, recorded so updates can detect a publisher key change.
     pub signer_fingerprint: Option<String>,
+    /// Final download host of the last trusted update (trust-on-first-use host pin).
+    pub pinned_download_host: Option<String>,
     pub update_source: Option<UpdateSource>,
     pub planned_writes: Vec<String>,
 }
@@ -191,6 +193,7 @@ impl ChoiceDraft {
             origin_url: None,
             signature_summary: None,
             signer_fingerprint: None,
+            pinned_download_host: None,
             update_source: None,
             planned_writes: vec![],
         }
