@@ -198,6 +198,10 @@ where
         .map(|(p, b)| (p.clone(), b.clone()));
     let mut installed_icon_name: Option<String> = None;
     let mut script_sandbox: Option<SandboxStatus> = None;
+    // Carried over on replace so a re-install keeps earlier script data purgeable.
+    let mut installer_data_paths: Vec<PathBuf> = old_manifest
+        .map(|m| m.installer_data_paths.clone())
+        .unwrap_or_default();
 
     for (idx, op) in ops.iter().enumerate() {
         check_cancelled(cancel_flag)?;
@@ -289,22 +293,25 @@ where
                     roots.icons_dir.clone(),
                     roots.bin_dir.clone(),
                 ];
-                let before = snapshot_files(&watched);
                 let staging = TempDir::new()?;
+                let data_bases = roots.user_data_bases();
                 // Locked decision: the script may write only here; dotfiles like ~/.bashrc,
                 // ~/.profile and ~/.ssh stay read-only. Rules only apply to existing paths.
-                let writable = [
+                let mut writable = vec![
                     app_dir.clone(),
                     staging.path().to_path_buf(),
                     roots.bin_dir.clone(),
                     roots.desktop_dir.clone(),
                     roots.icons_dir.clone(),
-                    roots.home_dir.join(".config"),
-                    roots.home_dir.join(".local/share"),
                 ];
+                writable.extend(data_bases.iter().cloned());
                 for dir in &writable {
                     fs::create_dir_all(dir)?;
                 }
+                let before = snapshot_files(&watched);
+                // The data bases hold everyone's settings, so only their new top-level
+                // entries are attributed to this script (shallow diff).
+                let data_before = top_level_entries(&data_bases);
                 let mut confined = Confined::new(isolation, &writable, "sh")?;
                 // Own process group so cancel/timeout can kill everything the script spawned
                 // (RLIMIT_NPROC is per-UID across the whole desktop session, so a `ulimit -u` cap
@@ -347,6 +354,11 @@ where
                     )));
                 }
                 script_sandbox = Some(confined.status());
+                installer_data_paths.extend(
+                    top_level_entries(&data_bases)
+                        .into_iter()
+                        .filter(|p| !data_before.contains(p) && roots.is_purgeable_user_data(p)),
+                );
                 let after = snapshot_files(&watched);
                 for path in after {
                     if !before.contains(&path) {
@@ -490,6 +502,7 @@ where
                     adopted: false,
                     created_files: tx.created_files.clone(),
                     created_dirs: tx.created_dirs.clone(),
+                    installer_data_paths: installer_data_paths.clone(),
                 };
                 save_manifest(roots, &manifest)?;
             }
@@ -1060,6 +1073,13 @@ fn snapshot_files(roots: &[PathBuf]) -> std::collections::HashSet<PathBuf> {
     out
 }
 
+fn top_level_entries(dirs: &[PathBuf]) -> std::collections::HashSet<PathBuf> {
+    dirs.iter()
+        .filter_map(|d| fs::read_dir(d).ok())
+        .flat_map(|entries| entries.flatten().map(|e| e.path()))
+        .collect()
+}
+
 fn collect_files_recursive(dir: &Path, out: &mut std::collections::HashSet<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
@@ -1296,10 +1316,7 @@ fn find_matching_dirs(bases: &[PathBuf], manifest: &Manifest) -> Vec<PathBuf> {
     for base in bases {
         for name in &names {
             if name.is_empty()
-                || name == "easi"
-                || name == "applications"
-                || name == "icons"
-                || name == "Trash"
+                || crate::roots::SHARED_XDG_DIRS.contains(&name.as_str())
                 || name.contains('/')
                 || name.contains("..")
             {
@@ -1321,13 +1338,7 @@ pub fn find_app_cache_dirs(roots: &InstallRoots, manifest: &Manifest) -> Vec<Pat
 
 /// Find per-user settings/data directories (`~/.config/<slug>`, `~/.local/share/<slug>`).
 pub fn find_app_user_data_dirs(roots: &InstallRoots, manifest: &Manifest) -> Vec<PathBuf> {
-    find_matching_dirs(
-        &[
-            roots.home_dir.join(".config"),
-            roots.home_dir.join(".local/share"),
-        ],
-        manifest,
-    )
+    find_matching_dirs(&roots.user_data_bases(), manifest)
 }
 
 /// Find all likely per-user XDG settings/cache/data directories created by an installed app.
@@ -1396,6 +1407,19 @@ pub fn uninstall_app_with_options(
     rollback_paths(&safe_files, &safe_dirs);
     for dir in data_dirs {
         let _ = fs::remove_dir_all(dir);
+    }
+    if purge_data {
+        for path in manifest
+            .installer_data_paths
+            .iter()
+            .filter(|p| roots.is_purgeable_user_data(p))
+        {
+            // `symlink_metadata` so a planted link is removed itself, never followed.
+            let _ = match fs::symlink_metadata(path) {
+                Ok(meta) if meta.is_dir() => fs::remove_dir_all(path),
+                _ => fs::remove_file(path),
+            };
+        }
     }
     delete_manifest(roots, &manifest.app_id)?;
     refresh_desktop_caches(roots);
@@ -1576,6 +1600,56 @@ mod tests {
                     "{link:?}: app dir left behind"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn script_data_is_recorded_shallowly_and_removed_only_by_purge() {
+        // (purge_data, script data still present afterwards)
+        for (purge, kept) in [(false, true), (true, false)] {
+            let tmp = TempDir::new().expect("tempdir");
+            let roots = InstallRoots::from_home(tmp.path());
+            let config = tmp.path().join(".config");
+            fs::create_dir_all(config.join("keep")).expect("pre-existing user data");
+            let pkg = tmp.path().join("tool-setup.sh");
+            fs::write(
+                &pkg,
+                "#!/bin/sh\n\
+                 mkdir -p \"$HOME/.config/keep/new\" \"$HOME/.config/tool\" \"$HOME/.config/autostart\"\n\
+                 mkdir -p \"$HOME/.local/share/tool-data\" && echo x > \"$HOME/.local/share/tool-data/db\"\n",
+            )
+            .expect("write script");
+            let Classified::Ready { plan, .. } =
+                classify_package(&pkg, &Isolation::InProcess, |_| None).expect("classify")
+            else {
+                panic!("expected ready plan");
+            };
+            let summary = execute_install(
+                &roots,
+                &Isolation::InProcess,
+                &plan,
+                false,
+                &AtomicBool::new(false),
+                |_, _| {},
+            )
+            .expect("install");
+            let manifest = find_manifest_by_id(&roots, &summary.app_id).expect("manifest");
+            let mut recorded = manifest.installer_data_paths.clone();
+            recorded.sort();
+            // Only new, app-owned top-level entries: not `keep` (pre-existing) or `autostart`.
+            assert_eq!(
+                recorded,
+                vec![
+                    config.join("tool"),
+                    tmp.path().join(".local/share/tool-data")
+                ]
+            );
+
+            uninstall_app_with_options(&roots, &summary.app_id, purge).expect("uninstall");
+            for path in &recorded {
+                assert_eq!(path.exists(), kept, "purge={purge} {path:?}");
+            }
+            assert!(config.join("keep/new").exists() && config.join("autostart").exists());
         }
     }
 

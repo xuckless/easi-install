@@ -36,6 +36,10 @@ pub struct Manifest {
     pub adopted: bool,
     pub created_files: Vec<PathBuf>,
     pub created_dirs: Vec<PathBuf>,
+    /// New top-level entries a consented installer script created in ~/.config or
+    /// ~/.local/share; removed only by a data-purging uninstall.
+    #[serde(default)]
+    pub installer_data_paths: Vec<PathBuf>,
 }
 
 impl Manifest {

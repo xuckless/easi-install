@@ -418,6 +418,7 @@ pub fn adopt_app(
         adopted: true,
         created_files,
         created_dirs,
+        installer_data_paths: vec![],
     };
     save_manifest(roots, &manifest)?;
 

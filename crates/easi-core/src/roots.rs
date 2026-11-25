@@ -4,6 +4,19 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::error::EasiError;
 
+/// Shared directories under ~/.config / ~/.local/share that belong to no single app (easi's own
+/// roots, desktop-wide registries and autostart/service hooks); never treated as app data.
+pub const SHARED_XDG_DIRS: &[&str] = &[
+    "easi",
+    "applications",
+    "icons",
+    "Trash",
+    "autostart",
+    "systemd",
+    "mime",
+    "fonts",
+];
+
 /// The ONLY write roots easi is allowed to touch (AGENTS.md).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallRoots {
@@ -35,6 +48,27 @@ impl InstallRoots {
             .map(PathBuf::from)
             .ok_or_else(|| EasiError::Desktop("HOME environment variable is not set".into()))?;
         Ok(Self::from_home(&home))
+    }
+
+    /// Per-user settings/data bases (`~/.config`, `~/.local/share`) that apps and consented
+    /// installer scripts write their own top-level entries into.
+    pub fn user_data_bases(&self) -> [PathBuf; 2] {
+        [
+            self.home_dir.join(".config"),
+            self.home_dir.join(".local/share"),
+        ]
+    }
+
+    /// Whether `path` may be purged as installer-created data: a direct child of a
+    /// [`Self::user_data_bases`] entry that is not a shared XDG directory, so a tampered
+    /// manifest cannot widen what a purge deletes.
+    pub fn is_purgeable_user_data(&self, path: &Path) -> bool {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            return false;
+        };
+        path.parent()
+            .is_some_and(|p| self.user_data_bases().iter().any(|b| b == p))
+            && !SHARED_XDG_DIRS.contains(&name)
     }
 
     pub fn manifests_dir(&self) -> PathBuf {
@@ -171,6 +205,33 @@ mod tests {
         assert!(validate_app_id("../../.bashrc").is_err());
         assert!(validate_app_id(".hidden").is_err());
         assert!(validate_app_id("foo/bar").is_err());
+    }
+
+    #[test]
+    fn only_direct_app_owned_children_of_data_bases_are_purgeable() {
+        let roots = InstallRoots::from_home(Path::new("/home/u"));
+        // (path, purgeable)
+        let rows = [
+            ("/home/u/.config/tool", true),
+            ("/home/u/.local/share/tool-data", true),
+            ("/home/u/.config/tool/sub", false),
+            ("/home/u/.config", false),
+            ("/home/u/.bashrc", false),
+            ("/home/u/.ssh/id_ed25519", false),
+            ("/home/u/.config/autostart", false),
+            ("/home/u/.local/share/applications", false),
+            ("/home/u/.local/share/easi", false),
+            ("/home/u/.config/..", false),
+            ("/home/u/.config/../.bashrc", false),
+            ("/other/.config/tool", false),
+        ];
+        for (path, purgeable) in rows {
+            assert_eq!(
+                roots.is_purgeable_user_data(Path::new(path)),
+                purgeable,
+                "{path}"
+            );
+        }
     }
 
     #[test]

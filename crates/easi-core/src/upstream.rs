@@ -337,6 +337,7 @@ pub fn import_apps_from_toml(
             adopted: false,
             created_files: vec![],
             created_dirs: vec![],
+            installer_data_paths: vec![],
         };
         match download_and_update_app(roots, isolation, &synthetic, PublisherTrust::Recorded) {
             Ok(UpdateOutcome { summary, .. }) => outcomes.push(ImportOutcome::Installed {
@@ -2239,6 +2240,7 @@ mod tests {
             adopted: true,
             created_files: vec![],
             created_dirs: vec![],
+            installer_data_paths: vec![],
         };
         save_manifest(&roots, &sample).unwrap();
         let exported = export_apps_toml(&roots).unwrap();
