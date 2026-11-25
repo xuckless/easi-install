@@ -663,7 +663,7 @@ pub fn organize_app_into_applications(
         })
     };
 
-    // Re-render tracked .desktop paths that pointed into the old location: the `Exec=` program
+    // Re-render tracked .desktop paths that pointed into the old location: each `Exec=` argument
     // with the spec's quoting, and plain path values (`TryExec=`, `Icon=`, `Path=`) with the
     // string escape for backslashes. A text replace missed escaped paths and left a moved path
     // with spaces unquoted.
@@ -680,14 +680,18 @@ pub fn organize_app_into_applications(
                     };
                     match key.trim() {
                         "Exec" => {
-                            let (program, rest) = split_exec_program(value);
-                            match relocate(Path::new(&program)) {
-                                Some(moved) => format!(
-                                    "{key}={}{rest}",
-                                    crate::install::quote_desktop_exec(&moved)
-                                ),
-                                None => line.to_string(),
+                            // Every argument may carry the old path (`env VAR=1 /old/app`,
+                            // `--config /old/conf`); splice right-to-left so spans stay valid.
+                            let mut exec = value.to_string();
+                            for arg in exec_args(value).iter().rev() {
+                                if let Some(moved) = relocate(Path::new(&arg.value)) {
+                                    exec.replace_range(
+                                        arg.span.clone(),
+                                        &crate::install::quote_desktop_exec(&moved),
+                                    );
+                                }
                             }
+                            format!("{key}={exec}")
                         }
                         "TryExec" | "Icon" | "Path" => {
                             match relocate(Path::new(&value.replace("\\\\", "\\"))) {
@@ -1135,7 +1139,7 @@ fn is_icon_valid(roots: &InstallRoots, icon: Option<&str>) -> bool {
 }
 
 fn parse_exec_binary_path(exec_raw: &str, home_dir: &Path) -> Option<PathBuf> {
-    let tokens = split_exec_tokens(exec_raw);
+    let tokens: Vec<String> = exec_args(exec_raw).into_iter().map(|a| a.value).collect();
     let mut idx = 0;
     // Skip `env` wrapper and `VAR=val` assignments (common on Wayland/Hyprland/NixOS).
     if tokens
@@ -1164,68 +1168,68 @@ fn parse_exec_binary_path(exec_raw: &str, home_dir: &Path) -> Option<PathBuf> {
     if p.is_absolute() { Some(p) } else { None }
 }
 
-/// Split a raw `.desktop` `Exec=` value into its program path (string and quoting escapes
-/// undone, `%%` as `%`) and the raw text after the program, e.g. ` %U`.
-fn split_exec_program(raw: &str) -> (String, &str) {
-    // Undo the string-level `\\` escape, remembering where each char ends in `raw`.
+/// One argument of a `.desktop` `Exec=` value: its text with the string (`\\`), quoting and
+/// `%%` escapes undone, and the byte span it occupies in the raw value.
+struct ExecArg {
+    value: String,
+    span: std::ops::Range<usize>,
+}
+
+/// Tokenize a raw `Exec=` value per the Desktop Entry spec ("The Exec key"): whitespace
+/// separates arguments, double quotes group with `\`-escapes inside. Single quotes also group
+/// (literally), because GLib parses `Exec=` with shell rules and hand-written entries rely on it.
+fn exec_args(raw: &str) -> Vec<ExecArg> {
+    // Undo the string-level `\\` escape, remembering where each char starts in `raw`.
     let mut units: Vec<(char, usize)> = Vec::new();
     let mut chars = raw.char_indices().peekable();
-    while let Some((_, c)) = chars.next() {
+    while let Some((start, c)) = chars.next() {
         if c == '\\' && chars.peek().is_some_and(|(_, n)| *n == '\\') {
             chars.next();
         }
-        let end = chars.peek().map_or(raw.len(), |(i, _)| *i);
-        units.push((c, end));
+        units.push((c, start));
     }
-    let mut program = String::new();
-    let mut end = raw.len();
-    let quoted = units.first().is_some_and(|(c, _)| *c == '"');
-    let mut k = usize::from(quoted);
-    while let Some(&(c, unit_end)) = units.get(k) {
-        match (quoted, c) {
-            (true, '\\') => {
-                if let Some(&(escaped, _)) = units.get(k + 1) {
-                    program.push(escaped);
+    let mut args = Vec::new();
+    let mut current: Option<(String, usize)> = None;
+    let mut quote: Option<char> = None;
+    let mut k = 0;
+    while let Some(&(c, start)) = units.get(k) {
+        match (quote, c) {
+            (None, c) if c.is_whitespace() => {
+                if let Some((value, arg_start)) = current.take() {
+                    args.push(ExecArg {
+                        value: value.replace("%%", "%"),
+                        span: arg_start..start,
+                    });
                 }
-                k += 2;
-                continue;
             }
-            (true, '"') => {
-                end = unit_end;
-                break;
+            (Some('"'), '\\') => {
+                if let Some(&(escaped, _)) = units.get(k + 1) {
+                    current
+                        .get_or_insert_with(|| (String::new(), start))
+                        .0
+                        .push(escaped);
+                }
+                k += 1;
             }
-            (false, c) if c.is_whitespace() => {
-                end = unit_end - c.len_utf8();
-                break;
+            (Some(q), c) if c == q => quote = None,
+            (None, '"' | '\'') => {
+                quote = Some(c);
+                current.get_or_insert_with(|| (String::new(), start));
             }
-            (_, c) => program.push(c),
+            (_, c) => current
+                .get_or_insert_with(|| (String::new(), start))
+                .0
+                .push(c),
         }
         k += 1;
     }
-    (program.replace("%%", "%"), &raw[end..])
-}
-
-fn split_exec_tokens(s: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut quote: Option<char> = None;
-    for ch in s.chars() {
-        match (quote, ch) {
-            (Some(q), c) if c == q => quote = None,
-            (Some(_), c) => cur.push(c),
-            (None, '"' | '\'') => quote = Some(ch),
-            (None, c) if c.is_whitespace() => {
-                if !cur.is_empty() {
-                    out.push(std::mem::take(&mut cur));
-                }
-            }
-            (None, c) => cur.push(c),
-        }
+    if let Some((value, arg_start)) = current {
+        args.push(ExecArg {
+            value: value.replace("%%", "%"),
+            span: arg_start..raw.len(),
+        });
     }
-    if !cur.is_empty() {
-        out.push(cur);
-    }
-    out
+    args
 }
 
 fn infer_install_dir(roots: &InstallRoots, canon_exec: &Path) -> PathBuf {
@@ -1464,9 +1468,22 @@ mod tests {
 
     #[test]
     fn organize_rerenders_desktop_paths_with_spec_quoting() {
-        // (old folder under ~/opt, Exec= program quoted as easi writes it)
-        let rows = [("My App 100%", true), ("myapp", false)];
-        for (old_folder, quoted) in rows {
+        // (old folder under ~/opt, Exec= before, Exec= after). `{old}` is the old folder,
+        // `{old_q}`/`{new_q}` the quoted old/new program, `{conf_q}` the quoted moved conf file.
+        let rows = [
+            // env prefix: the program is not the first argument.
+            ("myapp", "env VAR=1 {old}/myapp %U", "env VAR=1 {new_q} %U"),
+            ("myapp", "{old}/myapp --flag %U", "{new_q} --flag %U"),
+            ("My App 100%", "{old_q} --flag %U", "{new_q} --flag %U"),
+            ("myapp", "{old_q} %f %%u %k", "{new_q} %f %%u %k"),
+            // Every argument under the old folder moves; anything else keeps its raw text.
+            (
+                "myapp",
+                r#"/usr/bin/env {old}/myapp --config {old}/conf "/other/x y" {old}x --o={old}"#,
+                r#"/usr/bin/env {new_q} --config {conf_q} "/other/x y" {old}x --o={old}"#,
+            ),
+        ];
+        for (old_folder, exec_before, exec_after) in rows {
             let tmp = TempDir::new().expect("tempdir");
             let roots = InstallRoots::from_home(tmp.path());
             fs::create_dir_all(&roots.desktop_dir).expect("mkdir desktop");
@@ -1477,17 +1494,27 @@ mod tests {
             fs::write(&exec, b"\x7fELF").expect("write exec");
             fs::set_permissions(&exec, fs::Permissions::from_mode(0o755)).expect("chmod");
             fs::write(old_dir.join("icon.png"), b"\x89PNG").expect("write icon");
-            let program = if quoted {
-                crate::install::quote_desktop_exec(&exec)
-            } else {
-                exec.to_string_lossy().into_owned()
+            let new_dir = roots.applications_dir.join("My App");
+            let fill = |template: &str| {
+                template
+                    .replace("{old_q}", &crate::install::quote_desktop_exec(&exec))
+                    .replace(
+                        "{new_q}",
+                        &crate::install::quote_desktop_exec(&new_dir.join("myapp")),
+                    )
+                    .replace(
+                        "{conf_q}",
+                        &crate::install::quote_desktop_exec(&new_dir.join("conf")),
+                    )
+                    .replace("{old}", &old_dir.to_string_lossy())
             };
             let desktop = roots.desktop_dir.join("easi.myapp.desktop");
             fs::write(
                 &desktop,
                 format!(
-                    "[Desktop Entry]\nName=My App\nExec={program} --flag %U\nTryExec={}\n\
+                    "[Desktop Entry]\nName=My App\nExec={}\nTryExec={}\n\
                      Icon={}\nComment=kept {}\n",
+                    fill(exec_before),
                     exec.display(),
                     old_dir.join("icon.png").display(),
                     old_dir.display()
@@ -1515,16 +1542,11 @@ mod tests {
             save_manifest(&roots, &manifest).expect("save");
 
             let moved = organize_app_into_applications(&roots, "easi.myapp").expect("organize");
-            let new_dir = roots.applications_dir.join("My App");
-            assert_eq!(moved.install_dir, new_dir, "{old_folder}");
+            assert_eq!(moved.install_dir, new_dir, "{exec_before}");
             let text = fs::read_to_string(&desktop).expect("read desktop");
-            let new_exec = new_dir.join("myapp");
             let expected = [
-                format!(
-                    "Exec={} --flag %U",
-                    crate::install::quote_desktop_exec(&new_exec)
-                ),
-                format!("TryExec={}", new_exec.display()),
+                format!("Exec={}", fill(exec_after)),
+                format!("TryExec={}", new_dir.join("myapp").display()),
                 format!("Icon={}", new_dir.join("icon.png").display()),
                 // Only path-valued keys move; free text keeps the old wording.
                 format!("Comment=kept {}", old_dir.display()),
@@ -1532,7 +1554,7 @@ mod tests {
             for line in expected {
                 assert!(
                     text.lines().any(|l| l == line),
-                    "{old_folder}: {line}\n{text}"
+                    "{exec_before}: {line}\n{text}"
                 );
             }
         }
