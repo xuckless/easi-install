@@ -2,20 +2,23 @@
 //! and the pinned minisign signature, extracts safely, and atomically swaps the running binary.
 
 use std::fs::{self, File};
+use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Command, Stdio};
+use std::sync::atomic::AtomicBool;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tempfile::TempDir;
+use tempfile::{NamedTempFile, TempDir};
 
 use crate::error::EasiError;
 use crate::install::extract_archive_safe;
 use crate::model::Format;
 use crate::roots::InstallRoots;
+use crate::sandbox::{WaitOutcome, wait_or_kill};
 
 pub const DEFAULT_REPO: &str = "xuckless/easi-install";
 pub const DEFAULT_MINISIGN_PUBKEY: &str =
@@ -249,16 +252,7 @@ pub fn run_self_update(
         ));
     }
 
-    let parent = target_bin.parent().ok_or_else(|| {
-        EasiError::Desktop(format!("invalid executable path: {}", target_bin.display()))
-    })?;
-    let staged = parent.join(".easi.update.tmp");
-    fs::copy(&new_bin, &staged)?;
-    fs::set_permissions(&staged, fs::Permissions::from_mode(0o755))?;
-    if let Err(err) = fs::rename(&staged, target_bin) {
-        let _ = fs::remove_file(&staged);
-        return Err(EasiError::Io(err));
-    }
+    swap_in_binary(&new_bin, target_bin, latest_ver)?;
     if let Ok(roots) = InstallRoots::default_user() {
         crate::desktop::ensure_easi_desktop_and_icon(&roots, target_bin);
     }
@@ -268,6 +262,90 @@ pub fn run_self_update(
         to: latest_ver.to_string(),
         bin_path: target_bin.to_path_buf(),
     })
+}
+
+/// Where the binary replaced by the last self-update is kept for `easi self-update --rollback`.
+pub fn previous_binary_path(bin: &Path) -> PathBuf {
+    let mut name = bin.file_name().unwrap_or_default().to_os_string();
+    name.push(".prev");
+    bin.with_file_name(name)
+}
+
+/// Stage `new_bin` under a random name beside `target_bin`, require it to report
+/// `expected_version`, keep the current binary as [`previous_binary_path`], then rename the
+/// staged copy over `target_bin`. A random name cannot be pre-planted as a symlink.
+pub fn swap_in_binary(
+    new_bin: &Path,
+    target_bin: &Path,
+    expected_version: &str,
+) -> Result<(), EasiError> {
+    let parent = target_bin.parent().ok_or_else(|| {
+        EasiError::Desktop(format!("invalid executable path: {}", target_bin.display()))
+    })?;
+    let mut staged = NamedTempFile::new_in(parent)?;
+    std::io::copy(&mut File::open(new_bin)?, staged.as_file_mut())?;
+    staged
+        .as_file()
+        .set_permissions(fs::Permissions::from_mode(0o755))?;
+    staged.as_file().sync_all()?;
+    // Close our write handle first: executing a file that is open for writing fails (ETXTBSY).
+    let staged = staged.into_temp_path();
+    let found = binary_version(&staged)?;
+    if found != expected_version {
+        return Err(EasiError::SelfUpdateVersionMismatch {
+            expected: expected_version.to_string(),
+            found,
+        });
+    }
+    let prev = previous_binary_path(target_bin);
+    let _ = fs::remove_file(&prev);
+    if fs::hard_link(target_bin, &prev).is_err() {
+        fs::copy(target_bin, &prev)?;
+    }
+    staged
+        .persist(target_bin)
+        .map_err(|e| EasiError::Io(e.error))?;
+    File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+/// Put the binary kept by the last self-update back in place of `target_bin`; returns the
+/// version it reports.
+pub fn rollback_self_update(target_bin: &Path) -> Result<String, EasiError> {
+    let prev = previous_binary_path(target_bin);
+    if !prev.is_file() {
+        return Err(EasiError::NotFound(prev));
+    }
+    let version = binary_version(&prev)?;
+    fs::rename(&prev, target_bin)?;
+    Ok(version)
+}
+
+/// The version an easi binary prints for `--version` (`easi X.Y.Z`), or what it printed
+/// instead; a binary that fails, hangs past 10 s or prints nothing reports an empty version.
+fn binary_version(bin: &Path) -> Result<String, EasiError> {
+    let mut child = Command::new(bin)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()?;
+    let outcome = wait_or_kill(&mut child, Duration::from_secs(10), &AtomicBool::new(false))?;
+    let mut out = String::new();
+    match outcome {
+        WaitOutcome::Exited(status) if status.success() => {
+            if let Some(mut stdout) = child.stdout.take() {
+                stdout.read_to_string(&mut out)?;
+            }
+        }
+        WaitOutcome::Exited(_) | WaitOutcome::Cancelled | WaitOutcome::TimedOut => {}
+    }
+    Ok(out
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or_default()
+        .to_string())
 }
 
 /// Verify `sums` against a minisign signature from `pubkey` and require its signed trusted
@@ -607,5 +685,65 @@ ANbB7XuM6V9oebe+HcYx0ZvC5dcyaNu1A1mQEpWArDJOjSmRR9tDPpY0QhrZey35BPUnVzSvGq+3Cd2g
                 assert!(cfg.needs_onboarding(), "{case}");
             }
         }
+    }
+
+    /// Write an executable fake `easi` whose `--version` runs `body`.
+    #[allow(clippy::unwrap_used)]
+    fn fake_easi(path: &Path, body: &str) {
+        fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A sibling test forking while a fake binary's write fd is open makes exec fail with
+    /// ETXTBSY until that child execs; retry briefly instead of racing.
+    fn retry_busy<T>(mut f: impl FnMut() -> Result<T, EasiError>) -> Result<T, EasiError> {
+        for _ in 0..50 {
+            match f() {
+                Err(EasiError::Io(e)) if e.raw_os_error() == Some(26) => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                other => return other,
+            }
+        }
+        f()
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    fn swap_requires_expected_version_and_keeps_previous_for_rollback() {
+        // (case, new binary --version body, swapped in)
+        let rows = [
+            ("matching version", "echo 'easi 9.9.9'", true),
+            ("older version", "echo 'easi 9.9.8'", false),
+            ("no output", "true", false),
+            ("fails", "echo 'easi 9.9.9'; exit 1", false),
+        ];
+        for (case, body, swapped) in rows {
+            let tmp = TempDir::new().expect("tempdir");
+            let target = tmp.path().join("easi");
+            let new_bin = tmp.path().join("new-easi");
+            fake_easi(&target, "echo 'easi 1.0.0'");
+            fake_easi(&new_bin, body);
+            let result = retry_busy(|| swap_in_binary(&new_bin, &target, "9.9.9"));
+            assert_eq!(result.is_ok(), swapped, "{case}: {result:?}");
+            let installed = fs::read_to_string(&target).unwrap();
+            assert_eq!(installed.contains(body), swapped, "{case}");
+            // Only the target (and .prev after a swap) remain: no staging leftovers.
+            let entries = fs::read_dir(tmp.path()).unwrap().count();
+            assert_eq!(entries, if swapped { 3 } else { 2 }, "{case}");
+            if swapped {
+                assert_eq!(
+                    retry_busy(|| rollback_self_update(&target)).unwrap(),
+                    "1.0.0"
+                );
+                assert!(fs::read_to_string(&target).unwrap().contains("easi 1.0.0"));
+                assert!(!previous_binary_path(&target).exists(), "{case}");
+            }
+        }
+        let tmp = TempDir::new().expect("tempdir");
+        assert!(matches!(
+            rollback_self_update(&tmp.path().join("easi")),
+            Err(EasiError::NotFound(_))
+        ));
     }
 }

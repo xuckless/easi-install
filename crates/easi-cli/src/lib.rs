@@ -126,7 +126,11 @@ pub enum Command {
         clear: bool,
     },
     /// Update easi itself.
-    SelfUpdate,
+    SelfUpdate {
+        /// Restore the easi binary that the last self-update replaced.
+        #[arg(long)]
+        rollback: bool,
+    },
     /// Cleanly uninstall easi itself and restore previous MIME handlers (keeps installed apps).
     SelfUninstall,
     /// View or change easi settings (e.g. --auto-update true|false).
@@ -221,7 +225,7 @@ pub fn run(cli: Cli) -> ExitCode {
         Some(Command::SetSource { app, url, clear }) => {
             run_set_source_cmd(&roots, &app, url.as_deref(), clear)
         }
-        Some(Command::SelfUpdate) => run_self_update_cmd(),
+        Some(Command::SelfUpdate { rollback }) => run_self_update_cmd(rollback),
         Some(Command::SelfUninstall) => run_self_uninstall_cmd(&roots, cli.yes),
         Some(Command::Config { auto_update }) => run_config_cmd(&roots, auto_update),
         None => {
@@ -317,7 +321,7 @@ fn run_check_updates_cmd(roots: &InstallRoots) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn run_self_update_cmd() -> ExitCode {
+fn run_self_update_cmd(rollback: bool) -> ExitCode {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
@@ -325,6 +329,18 @@ fn run_self_update_cmd() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if rollback {
+        return match easi_core::self_update::rollback_self_update(&exe) {
+            Ok(version) => {
+                println!("Restored the previous easi {version} ({}).", exe.display());
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("easi: rollback failed: {}", format_user_error(&e));
+                ExitCode::FAILURE
+            }
+        };
+    }
     let current = env!("CARGO_PKG_VERSION");
     match easi_core::self_update::run_self_update(current, &exe) {
         Ok(easi_core::self_update::UpdateOutcome::AlreadyUpToDate { version }) => {

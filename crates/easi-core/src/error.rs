@@ -54,6 +54,11 @@ pub enum EasiError {
     #[error("update blocked: untrusted download host {url} for {update_source}")]
     UntrustedDownloadHost { url: String, update_source: String },
 
+    #[error(
+        "downloaded easi binary reports version \"{found}\" instead of {expected}; nothing was replaced"
+    )]
+    SelfUpdateVersionMismatch { expected: String, found: String },
+
     #[error("desktop integration error: {0}")]
     Desktop(String),
 
